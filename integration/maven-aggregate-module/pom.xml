@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  构建期覆盖率聚合模块。
+  用法：
+    1. 把本目录拷进被测项目（建议命名 coverage-report）
+    2. 改下面的 <parent> 指向你的父 pom
+    3. 在 <dependencies> 里列出所有需要统计覆盖率的模块
+    4. 父 pom 的 <modules> 末尾加上 <module>coverage-report</module>（必须放最后）
+  之后 mvn verify 自动产出：
+    coverage-report/target/site/jacoco-aggregate/jacoco.xml
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.example</groupId>
+    <artifactId>my-parent</artifactId>
+    <version>1.0.0</version>
+  </parent>
+
+  <artifactId>coverage-report</artifactId>
+  <packaging>pom</packaging>
+  <name>Coverage Aggregate Report</name>
+
+  <dependencies>
+    <!-- 每个要统计的模块列一条 -->
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>service-a</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>com.example</groupId>
+      <artifactId>service-b</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <version>${jacoco.version}</version>
+        <executions>
+          <execution>
+            <id>aggregate-report</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report-aggregate</goal>
+            </goals>
+            <configuration>
+              <!-- 同时产出 XML（给 Sonar）与 HTML（给人看） -->
+              <formats>
+                <format>XML</format>
+                <format>HTML</format>
+              </formats>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

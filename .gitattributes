@@ -1,0 +1,13 @@
+* text=auto
+
+# 这些文件会在 Linux 上执行，必须保持 LF。
+# 带 CRLF 的 shell 脚本在 Linux 上会报 "bad interpreter: /bin/bash^M"。
+*.sh        text eol=lf
+*.py        text eol=lf
+*.groovy    text eol=lf
+Jenkinsfile* text eol=lf
+
+# 二进制
+*.jar       binary
+*.exec      binary
+*.zip       binary

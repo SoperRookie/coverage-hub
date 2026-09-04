@@ -1,0 +1,128 @@
+#!groovy
+/**
+ * 构建期覆盖率流水线（通用模板）
+ *
+ * 做三件事：
+ *   1. 跑测试并产出各模块 jacoco.exec
+ *   2. 由聚合模块产出 jacoco-aggregate/jacoco.xml
+ *   3. 推 SonarQube，并归档 class 产物 —— 归档这步是给运行期覆盖率用的
+ *
+ * 前置：被测项目已加入 integration/maven-aggregate-module 那个聚合模块。
+ */
+
+pipeline {
+    agent { node { label 'build' } }
+
+    environment {
+        JAVA_HOME     = '/opt/jdk-21'
+        // Docker Engine 29+ 最低 API 版本为 1.40，而 Testcontainers 1.21.x 内置的
+        // docker-java 默认用 1.32，会被服务端以 HTTP 400 拒绝。用 Testcontainers
+        // 的项目必须设这个；注意属性名是 api.version，不是 docker CLI 的 DOCKER_API_VERSION。
+        API_VERSION   = '1.44'
+        AGGREGATE_XML = 'coverage-report/target/site/jacoco-aggregate/jacoco.xml'
+
+        // 单测覆盖率的 project。运行期覆盖率用 "${SONAR_PROJECT_KEY}-runtime"
+        SONAR_PROJECT_KEY  = 'my-service'
+        SONAR_PROJECT_NAME = 'my-service'
+    }
+
+    options {
+        timestamps()
+        buildDiscarder(logRotator(numToKeepStr: '30'))
+    }
+
+    stages {
+        stage('Preparation') {
+            steps {
+                script {
+                    env.REVISION = env.BRANCH_NAME.startsWith('v') ?
+                            env.BRANCH_NAME.substring(1) :
+                            env.BRANCH_NAME
+                    echo "REVISION=${env.REVISION}"
+                }
+            }
+        }
+
+        stage('Build & Test') {
+            steps {
+                configFileProvider([configFile(fileId: 'maven-settings', targetLocation: 'settings.xml')]) {
+                    // 注意：不能加 -DskipTests，否则没有任何 exec 数据
+                    // -Dmaven.test.failure.ignore=true 让个别用例失败时报告照样产出，
+                    // 但下面必须靠 junit 步骤把测试结果标记出来，不能让构建假绿。
+                    sh '''
+                        ./mvnw clean verify -B \
+                          -Drevision=${REVISION} \
+                          -Dapi.version=${API_VERSION} \
+                          -Dmaven.test.failure.ignore=true \
+                          --settings ./settings.xml
+                    '''
+                }
+            }
+            post {
+                always {
+                    junit allowEmptyResults: false, testResults: '**/target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        stage('Coverage Report') {
+            steps {
+                script {
+                    if (!fileExists(env.AGGREGATE_XML)) {
+                        error("没找到聚合报告 ${env.AGGREGATE_XML}。" +
+                              "确认聚合模块已加入父 pom 的 <modules>，且排在最后。")
+                    }
+                }
+                // Jenkins 原生展示（需 JaCoCo 插件）；只是顺带，真正的门禁在 Sonar
+                jacoco execPattern: '**/target/jacoco.exec',
+                       classPattern: '**/target/classes',
+                       sourcePattern: '**/src/main/java',
+                       exclusionPattern: '**/dto/**,**/mapper/**,**/domain/**'
+            }
+        }
+
+        stage('SonarQube') {
+            // 单元测试覆盖率推到主 project。运行期覆盖率走另一个 project
+            // （<key>-runtime），由发版流水线推送 —— 见 integration/sonar/README.md。
+            // 两个 project 并列，不要合并成一个数：合并之后正好把
+            //「有单测但线上没人跑」「线上跑得勤却没单测」这个区分抹掉了。
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    sh '''
+                        ./mvnw sonar:sonar -B \
+                          -Drevision=${REVISION} \
+                          -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                          -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
+                          -Dsonar.coverage.jacoco.xmlReportPaths=${AGGREGATE_XML} \
+                          --settings ./settings.xml
+                    '''
+                }
+            }
+        }
+
+        stage('Archive for runtime coverage') {
+            // 关键：运行期覆盖率出报告时，--classfiles 必须是【运行中那个版本】的 class。
+            // 这里归档下来，发版时 covhub.retarget 就能指过去；
+            // 没有它，日后拿不到对应 class，归档的 exec 就成了废数据。
+            steps {
+                sh '''
+                    rm -rf coverage-artifacts && mkdir -p coverage-artifacts
+                    find . -type d -path '*/target/classes' -not -path './coverage-artifacts/*' \
+                      | while read -r dir; do
+                          module=$(echo "$dir" | sed 's|^\\./||; s|/target/classes$||; s|/|_|g')
+                          cp -r "$dir" "coverage-artifacts/$module"
+                        done
+                    tar czf coverage-classes-${REVISION}.tar.gz coverage-artifacts
+                '''
+                archiveArtifacts artifacts: "coverage-classes-${env.REVISION}.tar.gz, ${env.AGGREGATE_XML}",
+                                 fingerprint: true
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "构建期覆盖率已推送 Sonar；class 产物已归档，可供发版流水线取用。"
+        }
+    }
+}

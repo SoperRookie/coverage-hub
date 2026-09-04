@@ -1,0 +1,23 @@
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# 采集数据：exec、报告、过滤后的 class 副本、状态记录
+# 体积大且是运行产物，不进版本库。
+# 注意：data/<service>/versions/ 下的 exec 是不可再生的真实执行轨迹，
+# 需要长期留存的话请另行归档到对象存储或制品库，别指望 git。
+data/
+
+# JaCoCo jar 由发行包提供，按需放入，不进版本库
+lib/*.jar
+
+# 本地配置：含各环境地址与路径，通常每台机器不同
+targets.json
+
+# 运行日志
+*.log
+
+# Python
+__pycache__/
+*.py[cod]

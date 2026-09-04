@@ -1,0 +1,32 @@
+{
+  "_comment": "配置模板。复制为 targets.json 后按实际环境修改；targets.json 已被 .gitignore 排除。",
+
+  "jacocoAgent": "./lib/jacocoagent.jar",
+  "jacocoCli": "./lib/jacococli.jar",
+  "dataDir": "./data",
+
+  "serve": { "port": 8900 },
+  "watch": { "intervalSeconds": 300 },
+
+  "services": [
+    {
+      "name": "order-service",
+      "version": "1.4.2",
+
+      "address": "10.0.1.21",
+      "port": 6300,
+      "bindAddress": "0.0.0.0",
+
+      "includes": ["com.example.order.*"],
+      "excludes": [],
+
+      "classfiles": ["/opt/artifacts/order-service/1.4.2"],
+      "sourcefiles": ["/opt/src/order-service/src/main/java"],
+      "reportExcludes": [
+        "com/example/order/**/dto/**",
+        "com/example/order/*/mapper/**"
+      ],
+      "sourceEncoding": "UTF-8"
+    }
+  ]
+}
