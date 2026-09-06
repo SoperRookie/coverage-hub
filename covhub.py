@@ -45,7 +45,7 @@ import urllib.parse
 import zipfile
 from datetime import datetime
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 
