@@ -1,5 +1,5 @@
 @startuml 05-push
-' coverage-hub v1.2+ —— push 通道：agent 主动连回来
+' coverage-hub —— push 通道：agent 主动连回来
 ' 对应代码：PushCollector（_claim / dump_service）与 remote_dump()
 '
 ' 这条通道的协议是自己实现的：jacococli 只有 dump（去连 tcpserver），

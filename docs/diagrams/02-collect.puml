@@ -1,5 +1,5 @@
 @startuml 02-collect
-' coverage-hub v1.0.0 —— 一次采集的数据流
+' coverage-hub —— 一次采集的数据流
 ' 对应代码：watch_loop() / cmd_dump() -> _snapshot() -> do_dump() + make_report()
 ' watch 与 dump 走的是同一条路径，区别只有 kind 标记和触发方式。
 

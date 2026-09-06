@@ -349,10 +349,16 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
   "dataDir":     "./data",
   "serve":  { "port": 8900, "token": "改成一串随机字符串" },
   "watch":  { "intervalSeconds": 300 },
+  "collect": {
+    "port": 6400,
+    "bindAddress": "0.0.0.0",
+    "advertiseAddress": "covhub.internal"
+  },
   "services": [
     {
       "name":        "my-service",
       "version":     "1.4.2",
+      "channel":     "pull",
       "address":     "127.0.0.1",
       "port":        6300,
       "bindAddress": "0.0.0.0",
@@ -376,6 +382,9 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
 | `classfiles` | 出报告用的 class，**必须与运行中的服务是同一份产物**。用 `upload-classes` 传上来的话这项会自动指过去 |
 | `reportExcludes` | **报告端过滤**，Ant 风格路径模式（用 `/`）。CLI 的 `report` 不支持排除，工具会先过滤出一份 class 副本再出报告 |
 | `sourcefiles` | 可选。配了才能在报告里下钻到源码行 |
+| `dumpRetry` | 可选，默认 3。传给 `jacococli dump --retry`，服务刚起来时端口可能还没监听 |
+| `watch.intervalSeconds` | 轮询间隔，默认 300。它同时是**断代时数据丢失的上界** —— 调小可以压缩这个窗口 |
+| `collect.port` / `bindAddress` | push 通道的收集端口。**只有配了 `collect.port`，`serve` 才会起收集端** |
 | `channel` | `pull`（默认，hub 去连 agent）或 `push`（agent 连回 hub，见 §一·五） |
 | `collect.advertiseAddress` | push 通道用：**被测端连回 hub 的地址**，不是 hub 的监听地址 |
 | `serve.token` | 控制 API 的访问令牌。不配则任何能连上 8900 的人都能调写接口 |
@@ -419,7 +428,7 @@ data/
     versions/<版本>/             周期结算归档（报告 + exec + merged.exec + manifest）
     artifacts/<版本>/            经 upload-classes 传上来的 class 产物
     classes/                    按 reportExcludes 过滤后的 class 副本
-    state.json                  历史统计、会话基线、断代记录
+    state.json                  历史统计、会话基线（sessionStart）、断代记录（breaks）
 ```
 
 ---

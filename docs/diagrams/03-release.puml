@@ -1,5 +1,5 @@
 @startuml 03-release
-' coverage-hub v1.0.0 —— 发版全流程数据流
+' coverage-hub —— 发版全流程数据流
 ' 对应 integration/covhub-client.sh 与 integration/jenkins/Jenkinsfile.deploy 的六个阶段。
 ' 顺序是这套方案的核心，不能调整：第 1 步必须在停服之前。
 

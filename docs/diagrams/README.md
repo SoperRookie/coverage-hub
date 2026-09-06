@@ -46,7 +46,7 @@ java -jar plantuml.jar -checkonly docs/diagrams/*.puml # 只查语法
 java -jar plantuml.jar -Playout=smetana -tpng docs/diagrams/*.puml
 ```
 
-（本目录四张图都用 smetana 渲染验证过。）
+（本目录五张图都用 smetana 渲染验证过。）
 
 **中文显示成方框**时，在图里加一行指定字体：
 

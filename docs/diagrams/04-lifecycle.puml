@@ -1,9 +1,9 @@
 @startuml 04-lifecycle
-' coverage-hub v1.0.0 —— 一个采集周期的状态流转
+' coverage-hub —— 一个采集周期的状态流转
 ' 为什么必须按版本切段：JaCoCo 按类的 CRC64 指纹（class id）把 exec 和 class
 ' 对应起来。发版换了 class，旧 exec 就作废 —— 而且是静默作废。
 
-title 采集周期的状态流转 · v1.1.0
+title 采集周期的状态流转
 
 skinparam shadowing false
 skinparam NoteFontSize 11
@@ -37,7 +37,7 @@ Empty --> Active : 首次 dump
 Active --> Active : **dump**（不清零）\nwatch 轮询 / 手动 / POST /api/dump
 Active --> Sealed : **predeploy**\ncli dump ""--reset"" → 计数器清零\n+ 移走 exec + 写 manifest
 Sealed --> Empty : 新版本周期开始\n（exec 已移走，从零累加）
-Active --> Sealed : **自动断代**（v1.1.0）\n采集时发现 SessionInfo 启动时刻变了\n→ 进程重启过，替你结算上一周期
+Active --> Sealed : **自动断代**\n采集时发现 SessionInfo 启动时刻变了\n→ 进程重启过，替你结算上一周期
 Active --> Void : class 换了、进程却没重启\n（热部署 / 手工替换 class）
 
 note right of Active
@@ -58,7 +58,7 @@ note right of Void
   · 新 class 与旧 exec 的 class id 对不上
   · 报告显示「全部未覆盖」，不是抛异常
 
-  v1.1.0 里进程重启会被自动断代兜住，
+  进程重启会被自动断代兜住，
   剩下这条要靠 ""diagnose"" 发现 ——
   它会直接报出指纹匹配率。
 end note
