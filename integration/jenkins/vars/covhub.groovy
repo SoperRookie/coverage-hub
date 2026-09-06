@@ -152,6 +152,63 @@ boolean online(Map args) {
 }
 
 /**
+ * 诊断 exec 与 class 产物是否对得上，返回结构化结果。
+ *
+ * 回答的是「报告为什么全红」——JaCoCo 按类的 CRC64 指纹匹配数据，class 对不上时
+ * 报告只会显示「全部未覆盖」，**不会报错**。这一步把它变成可判定的数字。
+ *
+ * 返回的 Map 主要字段：matchRate（指纹匹配率，无执行数据时为 null）、
+ * execClasses / classFileClasses / matched、verdict（判定文案）、breaks（断代记录）。
+ */
+Map diagnose(Map args) {
+    assert args.service : 'diagnose 需要 service'
+    String raw
+    if (hubUrl(args)) {
+        String qs = "service=${enc(args.service)}"
+        if (args.version) { qs += "&version=${enc(args.version)}" }
+        raw = http(args, 'GET', "/api/diagnose?${qs}")
+    } else {
+        String extra = args.version ? " --version '${args.version}'" : ''
+        raw = sh(script: "${cli(args)} diagnose ${args.service}${extra} --json", returnStdout: true)
+    }
+    // readJSON 来自 Pipeline Utility Steps（节点前置条件里已经要求了），
+    // 比 JsonSlurper 更适合流水线沙箱
+    def parsed = readJSON(text: raw)
+    Map d = (parsed.diagnose ?: parsed) as Map
+
+    echo("[covhub] ${args.service}${args.version ? ' ' + args.version : ''}  " +
+         "exec ${d.execFiles} 个快照 / ${d.execClasses} 个类，" +
+         "classfiles ${d.classFileClasses} 个类，" +
+         "指纹匹配 ${d.matchRate == null ? '不适用' : d.matchRate + '%'}\n" +
+         "[covhub] 判定：${d.verdict}")
+    return d
+}
+
+/**
+ * 断言这个服务采到的数据是有效的，不达标就让流水线失败。
+ *
+ * 放在部署后的验证阶段：class 产物没跟着版本换（最容易漏的一步）会在这里当场
+ * 暴露，而不是等一个月后才发现归档的全是废数据。
+ *
+ * min 默认 90（%）。刚起的服务还没有执行数据时 matchRate 是 null ——
+ * 那不是「对不上」，只是「还没得可比」，此时告警而不失败。
+ */
+void requireMatch(Map args) {
+    int min = (args.min ?: 90) as int
+    Map d = diagnose(args)
+    if (d.matchRate == null) {
+        echo "[covhub] 警告：还没有执行数据，无法判断 class 是否对得上。${d.verdict}"
+        return
+    }
+    if ((d.matchRate as BigDecimal) < min) {
+        error("[covhub] ${args.service} 的 class 产物对不上：指纹匹配 ${d.matchRate}%，低于阈值 ${min}%。\n" +
+              "${d.verdict}\n" +
+              "多半是第 4 步没把新版本的 class 传给 hub，或 classfiles 还指着上一版。")
+    }
+    echo "[covhub] 指纹匹配 ${d.matchRate}%，class 产物对得上"
+}
+
+/**
  * 发版后更新 hub 的配置：版本号 + class 产物路径。
  *
  * 这一步最容易被漏掉。JaCoCo 按 CRC64 class id 匹配数据，class 产物没跟着换，

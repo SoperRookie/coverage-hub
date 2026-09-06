@@ -32,7 +32,7 @@
 | `curl` | 就这一个。不需要 Python、不需要 java、不需要 `targets.json` |
 | 环境变量 `COVHUB_URL` | hub 地址，如 `http://covhub.internal:8900`。已写在 `Jenkinsfile.deploy` 的 `environment` 块里，改成你们的 |
 | 凭据（可选） | hub 配了 `serve.token` 时，建一个 Secret text 凭据存令牌，把 ID 填进 `COVHUB_TOKEN_ID` |
-| Jenkins 插件 | Pipeline Utility Steps、Copy Artifacts、SonarQube Scanner；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
+| Jenkins 插件 | Pipeline Utility Steps（`covhub.diagnose` 用它的 `readJSON`）、Copy Artifacts、SonarQube Scanner；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
 | Config File Provider | 提供 Maven `settings.xml`，`fileId` 按你们实际的改 |
 
 发版节点**不需要**能连到被测服务的 agent 端口 —— 连 agent 的是 hub。它只要能连上 hub 的 8900。
@@ -61,13 +61,15 @@
 2. copy            取新版本 class 产物
 3. deploy          停旧实例、部署、起新实例（agent 经 JAVA_TOOL_OPTIONS 注入）
 4. upload-classes  把产物传给 hub，并把配置指过去（retarget）
-5. verify          轮询确认新实例 agent 就绪，打基线快照
+5. verify          轮询确认 agent 就绪 → 打基线快照 → 校验 class 指纹对得上
 6. sonar           取回旧版本的 jacoco.xml 与 class 产物，推上去
 ```
 
 **第 1 步跑到停服之后，那段数据就永久丢失了** —— agent 随进程消失，tcpserver 端口关闭，没有任何补救手段。所以 `predeploy` 在目标不可达时会让流水线**失败退出**，这是有意的设计；确实要跳过时才勾 `ALLOW_MISSING`。
 
 **第 4 步最容易漏。** class 产物必须跟着版本一起换，否则新版本采到的 exec 和旧 class 对不上。报告是 hub 出的，所以产物要传到 hub 上去 —— `covhub.uploadClasses(..., retarget: true)` 一步做完上传和指向。
+
+**第 5 步的 `requireMatch` 就是为了兜住第 4 步。** JaCoCo 在 class 对不上时不会报错，只是把报告渲染成「全部未覆盖」—— 不主动校验的话，要等到有人去看报告才会发现，那时这段时间的数据已经全废了。`DIAGNOSE_MIN_MATCH` 参数控制阈值（默认 90%，填 0 关闭）。刚起的服务还没有执行数据时匹配率不适用，此时只告警不失败。
 
 流水线加了 `disableConcurrentBuilds()`：同一服务的发版不能并行，否则两次结算会互相干扰。
 
@@ -144,6 +146,8 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 | `covhub.uploadClasses(service:, version:, archive:, retarget:)` | 把 class 产物压缩包传给 hub |
 | `covhub.fetchAgent(dest:)` | 从 hub 下载 `jacocoagent.jar` |
 | `covhub.fetchClasses(service:, version:, dest:)` | 从 hub 取回某版本的 class 产物并解包，返回目录 |
+| `covhub.diagnose(service:, version:)` | 诊断 exec 与 class 是否对得上，返回含 `matchRate` / `verdict` 的 Map |
+| `covhub.requireMatch(service:, min:)` | 指纹匹配率低于 `min`（默认 90）就让流水线失败 |
 | `covhub.fetchReport(service:, version:, dest:)` | 从 hub 取回某版本的 `jacoco.xml` |
 | `covhub.pushSonar(projectKey:, xmlReport:, binaries:, sources:)` | 推 SonarQube |
 

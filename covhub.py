@@ -631,6 +631,11 @@ def cmd_diagnose(cfg, args):
     svc = find_service(cfg, args.service)
     r = diagnose(cfg, svc, args.version)
 
+    # 给流水线用：--json 出结构化结果，省得去解析给人看的排版
+    if getattr(args, "json", False):
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+        return
+
     print("服务        %s%s" % (r["service"], ("  版本 " + r["version"]) if r["version"] else ""))
     print("exec        %d 个快照 · %d 个类" % (r["execFiles"], r["execClasses"]))
     for s in r["sessions"]:
@@ -1517,6 +1522,7 @@ def main():
     p = sub.add_parser("diagnose", help="诊断 exec 与 class 产物是否对得上")
     p.add_argument("service")
     p.add_argument("--version", help="诊断某个已归档版本，缺省诊断当前周期")
+    p.add_argument("--json", action="store_true", help="输出 JSON，供流水线判断")
 
     p = sub.add_parser("retarget", help="发版后更新配置里的 version / classfiles")
     p.add_argument("service")

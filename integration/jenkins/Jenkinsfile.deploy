@@ -10,7 +10,7 @@
  *   2. copy            —— 取新版本的 class 产物压缩包
  *   3. deploy          —— 停旧实例、部署新版本、起新实例
  *   4. upload-classes  —— 产物传给 hub，并把配置指过去（retarget）
- *   5. verify          —— 确认新实例的 agent 已就绪
+ *   5. verify          —— 确认 agent 就绪，并校验 class 指纹确实对得上
  *   6. sonar           —— 推旧版本的运行期覆盖率
  *
  * 第 1 步一旦跑到停服之后，那段运行期覆盖率数据永久丢失 —— agent 随进程消失，
@@ -34,6 +34,8 @@ pipeline {
         string(name: 'BUILD_JOB',   defaultValue: 'my-service-build', description: '提供 class 归档的构建任务名')
         booleanParam(name: 'ALLOW_MISSING', defaultValue: false,
                      description: '目标已离线时跳过结算（意味着这段覆盖率数据已丢失，谨慎勾选）')
+        string(name: 'DIAGNOSE_MIN_MATCH', defaultValue: '90',
+               description: '部署后校验 class 指纹匹配率的阈值（%）。低于它说明 class 产物没跟着版本换，流水线失败。填 0 表示不校验')
 
         choice(name: 'DEPLOY_MODE', choices: ['docker', 'compose', 'k8s', 'systemd', 'script'],
                description: '部署方式')
@@ -181,7 +183,7 @@ pipeline {
             }
         }
 
-        stage('5 · 确认采集恢复') {
+        stage('5 · 确认采集恢复并校验产物') {
             steps {
                 script {
                     // 服务启动需要时间，给 agent 端口一点等待余量
@@ -196,6 +198,17 @@ pipeline {
                     covhub.dump(hub: env.COVHUB_URL,
                                 tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
                                 service: params.SERVICE)
+
+                    // 紧接着验一次：第 4 步没把新版本的 class 传给 hub、或 classfiles
+                    // 还指着上一版，都会在这里当场暴露 —— 而不是等一个月后才发现
+                    // 归档的全是废数据（JaCoCo 对不上时不报错，只是全红）。
+                    int minMatch = (params.DIAGNOSE_MIN_MATCH ?: '0') as int
+                    if (minMatch > 0) {
+                        covhub.requireMatch(hub: env.COVHUB_URL,
+                                            tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                                            service: params.SERVICE,
+                                            min: minMatch)
+                    }
                 }
             }
         }
