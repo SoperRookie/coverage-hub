@@ -43,6 +43,8 @@ import urllib.parse
 import zipfile
 from datetime import datetime
 
+__version__ = "1.0.0"
+
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 
 
@@ -93,6 +95,7 @@ def log(msg):
 #       current/                最新报告，看板直接指向这里
 #       exec/<ts>.exec          历次快照原始数据
 #       versions/<version>/     发版结算归档（报告 + exec + manifest）
+#       artifacts/<version>/    经 upload-classes 传上来的 class 产物
 #       classes/                按 reportExcludes 过滤后的 class 副本
 #       state.json              历史统计，用于趋势
 # --------------------------------------------------------------------------
@@ -519,6 +522,7 @@ def cmd_watch(cfg, args):
 #         &classfiles=/a,/b
 #   POST /api/upload-classes?service=X          上传该版本的 class 产物压缩包
 #         &version=V[&retarget=1]               （tar.gz / zip，正文为二进制）
+#   GET  /api/classes?service=X&version=V       把该版本的 class 产物打成 tar.gz 回传
 #
 # 参数可用 query string，也可用 JSON body。配置了 serve.token（或设了环境变量
 # COVHUB_TOKEN）时，除 /api/health 外都要带 X-Covhub-Token 头或 ?token=。
@@ -590,6 +594,59 @@ def store_classes(cfg, svc, version, blob):
     return dest, count
 
 
+def classes_sources(cfg, svc, version):
+    """找出某个版本的 class 产物在 hub 上的位置，返回 [(打包时的顶层名, 目录)]。
+
+    两个来源，按可信度排序：
+      1. artifacts/<版本>/ —— 经 upload-classes 传上来的，一定是那次发版的产物
+      2. versions/<版本>/manifest.json 里记的 classfiles —— 结算时实际用来出报告的路径
+
+    配置里当前的 classfiles 不算数：它早就跟着新版本改掉了。
+    """
+    root = svc_dir(cfg, svc)
+    uploaded = os.path.join(root, "artifacts", version)
+    if os.path.isdir(uploaded) and os.listdir(uploaded):
+        return [("", uploaded)]
+
+    manifest = os.path.join(root, "versions", version, "manifest.json")
+    if os.path.isfile(manifest):
+        try:
+            with open(manifest, encoding="utf-8") as f:
+                paths = json.load(f).get("classfiles") or []
+        except (ValueError, OSError):
+            paths = []
+        found = [(("cp%d" % i), path) for i, path in enumerate(paths) if os.path.isdir(path)]
+        if found:
+            # 只有一份时不套目录，解出来直接就是包结构
+            return [("", found[0][1])] if len(found) == 1 else found
+    return []
+
+
+def pack_classes(cfg, svc, version, dest):
+    """把该版本的 class 产物打成 tar.gz 写到 dest，返回 (class 数, 字节数)。
+
+    发版节点因此不必自己留一份 class 产物：推 Sonar 时从 hub 取回即可。
+    """
+    sources = classes_sources(cfg, svc, version)
+    if not sources:
+        raise RuntimeError(
+            "hub 上没有 %s 版本 %s 的 class 产物。"
+            "该版本发版时没跑过 upload-classes，或结算时用的 classfiles 已经不在了。"
+            % (svc["name"], version))
+
+    count = 0
+    with tarfile.open(dest, "w:gz") as tf:
+        for top, path in sources:
+            for dirpath, _, files in os.walk(path):
+                for name in files:
+                    full = os.path.join(dirpath, name)
+                    rel = os.path.relpath(full, path).replace("\\", "/")
+                    tf.add(full, arcname=("%s/%s" % (top, rel)) if top else rel)
+                    if name.endswith(".class"):
+                        count += 1
+    return count, os.path.getsize(dest)
+
+
 def _token(cfg):
     return os.environ.get("COVHUB_TOKEN") or (cfg.get("serve") or {}).get("token") or ""
 
@@ -626,7 +683,8 @@ def api_dispatch(cfg_path, method, route, params):
     cfg = load_config(cfg_path)
 
     if route == "/api/health":
-        return 200, {"ok": True, "services": [s["name"] for s in cfg.get("services", [])]}
+        return 200, {"ok": True, "version": __version__,
+                     "services": [s["name"] for s in cfg.get("services", [])]}
 
     if route == "/api/status" and method == "GET":
         name = params.get("service")
@@ -782,6 +840,44 @@ def cmd_serve(cfg, args):
                     return self._send(code, body)
             self._send(200, body)
 
+        def _download_classes(self, current, params):
+            """把某个版本的 class 产物打包回传。
+
+            推 Sonar 需要 -Dsonar.java.binaries 指向**采集时运行的那份 class**，
+            有了这个接口，发版节点不必自己囤一份历史产物。
+            """
+            name, version = params.get("service"), params.get("version")
+            if not name or not version:
+                return self._send(400, {"ok": False, "error": "需要参数 service 与 version"})
+            if not any(s["name"] == name for s in current.get("services", [])):
+                return self._send(404, {"ok": False, "error": "配置里没有名为 %r 的服务" % name})
+
+            svc = find_service(current, name)
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".tar.gz")
+            tmp.close()
+            try:
+                with _LOCK:
+                    count, size = pack_classes(current, svc, version, tmp.name)
+                log("%s：回传 %s 的 class 产物 %d 个（%.1f MB）"
+                    % (name, version, count, size / 1048576.0))
+                with open(tmp.name, "rb") as f:
+                    data = f.read()
+            except RuntimeError as exc:
+                return self._send(404, {"ok": False, "error": str(exc)})
+            except Exception as exc:
+                return self._send(500, {"ok": False, "error": str(exc)})
+            finally:
+                os.unlink(tmp.name)
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Content-Disposition",
+                             'attachment; filename="classes-%s-%s.tar.gz"' % (name, version))
+            self.send_header("X-Covhub-Classes", str(count))
+            self.end_headers()
+            self.wfile.write(data)
+
         def _api(self, method):
             route = self._route()
             try:
@@ -804,6 +900,9 @@ def cmd_serve(cfg, args):
             if route == "/api/upload-classes":
                 return self._upload(current, params)
 
+            if route == "/api/classes":
+                return self._download_classes(current, params)
+
             code, body = api_dispatch(cfg_path, method, route, params)
             if route != "/api/health":
                 log("%s %s -> %d" % (method, self.path, code))
@@ -823,7 +922,7 @@ def cmd_serve(cfg, args):
         threading.Thread(target=watch_loop, args=(cfg_path, interval), daemon=True).start()
         log("采集线程已启动，每 %d 秒轮询一次" % interval)
 
-    log("看板已启动： http://127.0.0.1:%d/  （根目录 %s）" % (port, root))
+    log("covhub %s 已启动： http://127.0.0.1:%d/  （根目录 %s）" % (__version__, port, root))
     log("控制 API： http://127.0.0.1:%d/api/health%s"
         % (port, "" if _token(cfg) else "    [未设置 serve.token，任何人都能调写接口]"))
     with Server(("0.0.0.0", port), Handler) as httpd:
@@ -1038,6 +1137,8 @@ def main():
     parser = argparse.ArgumentParser(
         prog="covhub", description="通用 JaCoCo 运行期覆盖率采集与看板")
     parser.add_argument("-c", "--config", default="targets.json", help="配置文件路径")
+    parser.add_argument("-V", "--version", action="version",
+                        version="covhub %s" % __version__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("init", help="生成配置模板")

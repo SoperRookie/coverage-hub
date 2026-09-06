@@ -194,6 +194,12 @@ covhub-client.sh upload-classes order-service 1.4.2 \
 
 hub 会解到自己的 `data/order-service/artifacts/1.4.2/`，`--retarget` 顺手把配置指过去。两台机器之间不需要 NFS、不需要 scp 免密。
 
+传上去之后本机那份就可以删了 —— 日后推 Sonar 需要这个版本的 class 时，从 hub 取回来即可：
+
+```bash
+covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
+```
+
 （hub 上本来就有产物的话，也可以跳过上传，直接在 `targets.json` 里把 `classfiles` 写成本地路径。）
 
 ### Step 4 · 在 targets.json 里加一条

@@ -1,4 +1,4 @@
-# coverage-hub
+# coverage-hub v1.0.0
 
 通用 JaCoCo 覆盖率方案：**构建期**自动出聚合报告推 SonarQube，**运行期**随服务启动自动采集、发版前自动结算、并提供实时在线看板。
 
@@ -127,6 +127,7 @@ HTTP 接口，由 hub 代劳：
 | `/api/report?service=X` | POST | 用已有 exec 重出报告 |
 | `/api/retarget?service=X&version=V&classfiles=/a,/b` | POST | 更新版本与 class 产物路径 |
 | `/api/upload-classes?service=X&version=V[&retarget=1]` | POST | 上传 class 产物压缩包（tar.gz / zip，正文为二进制） |
+| `/api/classes?service=X&version=V` | GET | 把该版本的 class 产物打成 tar.gz 回传 |
 
 写操作在 hub 内部串行执行，返回体里带着这次执行的日志；**HTTP 非 2xx 表示失败**，
 调用方应当据此让部署流程停下来。
@@ -153,6 +154,20 @@ Jenkins 的 Shared Library 同样默认走远程模式，只要设了 `COVHUB_UR
 CRC64 class id 匹配）。`upload-classes` 把构建期归档的压缩包直接 POST 过来，解到
 `data/<service>/artifacts/<版本>/`，两台机器之间不需要 NFS 或共享目录。包里如果只有
 一个顶层目录（构建脚本打的 `coverage-artifacts/`），会自动剥掉。
+
+反过来，`/api/classes` 把某个版本的产物打包回传 —— 推 Sonar 时
+`-Dsonar.java.binaries` 要的正是**采集时运行的那份 class**：
+
+```bash
+covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
+```
+
+hub 按两个来源找：先看 `artifacts/<版本>/`（`upload-classes` 传上来的），没有就退
+回 `versions/<版本>/manifest.json` 里记的 `classfiles` 路径（结算时实际用来出报告
+的那几个目录）。两个都没有就返回 404 —— 那说明该版本发版时没走 `upload-classes`，
+产物已经找不回来了。
+
+**发版节点因此不必囤任何历史产物**：新产物传上去，旧产物要用时取回来。
 
 ### 访问控制
 

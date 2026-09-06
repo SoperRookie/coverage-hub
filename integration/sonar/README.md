@@ -49,8 +49,10 @@ runtime project 只关心覆盖率，代码异味/重复率/安全热点这些�
 发版流水线第 6 步会自动推。手工推用 `push-runtime.sh`：
 
 ```bash
-# 报告在 hub 上，脚本会自己下回来；本机只要有 curl 和 sonar-scanner
+# 报告和 class 产物都在 hub 上，脚本会自己取回来；
+# 本机只要有 curl、tar 和 sonar-scanner，不必留历史产物
 export COVHUB_URL=http://covhub.internal:8900
+export COVHUB_TOKEN=<hub 上配的 serve.token>
 ./push-runtime.sh order-service 1.4.2
 ```
 
@@ -62,19 +64,20 @@ sonar-scanner \
   -Dsonar.projectName='order-service (runtime coverage)' \
   -Dsonar.projectVersion=1.4.2 \
   -Dsonar.sources=/opt/src/order-service/src/main/java \
-  -Dsonar.java.binaries=/opt/artifacts/order-service/1.4.2 \
+  -Dsonar.java.binaries=./classes-1.4.2 \
   -Dsonar.coverage.jacoco.xmlReportPaths=jacoco-runtime.xml
 
-# 其中的 jacoco.xml 先从 hub 取回来：
+# 报告和 class 先从 hub 取回来：
 curl -sSf -o jacoco-runtime.xml \
   "http://covhub.internal:8900/order-service/versions/1.4.2/jacoco.xml"
+covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
 ```
 
 ### 两个前置条件
 
 不满足这两条，Sonar 上会显示 0% 或者覆盖标记打在错误的行上：
 
-1. **`sonar.java.binaries` 必须是采集时运行的那份 class。** JaCoCo 按 CRC64 class id 匹配，对不上等于没数据。这就是构建流水线要归档 class 产物的原因。
+1. **`sonar.java.binaries` 必须是采集时运行的那份 class。** JaCoCo 按 CRC64 class id 匹配，对不上等于没数据。这就是构建流水线要归档 class 产物、并在发版时 `upload-classes` 传给 hub 的原因 —— hub 上留着，日后用 `fetch-classes` 取回即可。
 2. **`sonar.sources` 要 checkout 到对应版本。** Sonar 按文件 + 行号映射，源码版本不一致会把覆盖标记打到错行。
 
 `push-runtime.sh` 会在推之前校验这两个路径是否存在，缺一个就报错退出，避免推上去一份看似成功实则错位的数据。

@@ -137,18 +137,22 @@ covhub wait-online my-service
 
 用独立的 project key，与单元测试的 project 并列：
 
+报告和 class 产物都在 hub 上，先取回来 —— 本机不必留任何历史产物：
+
+```bash
+# 报告：看板本身就是静态文件服务，按路径直接下
+curl -sSf -o jacoco-runtime.xml \
+  "$COVHUB_URL/my-service/versions/1.4.2/jacoco.xml"
+
+# class：必须是采集时运行的那一份，否则 Sonar 上是 0%
+covhub fetch-classes my-service 1.4.2 ./classes-1.4.2
+```
+
 ```bash
 sonar-scanner \
   -Dsonar.projectKey=my-service-runtime \
   -Dsonar.projectName="my-service (runtime coverage)" \
   -Dsonar.sources=/opt/src/my-service/src/main/java \
-  -Dsonar.java.binaries=/opt/artifacts/my-service/1.4.2/classes \
+  -Dsonar.java.binaries=./classes-1.4.2 \
   -Dsonar.coverage.jacoco.xmlReportPaths=jacoco-runtime.xml
-```
-
-报告在 hub 上，先取回来（看板本身就是静态文件服务，按路径直接下）：
-
-```bash
-curl -sSf -o jacoco-runtime.xml \
-  "$COVHUB_URL/my-service/versions/1.4.2/jacoco.xml"
 ```

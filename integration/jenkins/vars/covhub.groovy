@@ -239,6 +239,43 @@ String fetchAgent(Map args) {
 }
 
 /**
+ * 从 hub 取回某个版本的 class 产物，解到 dest 目录，返回该目录。
+ *
+ * 推 Sonar 时 -Dsonar.java.binaries 必须是**采集时运行的那份 class**（JaCoCo 按
+ * CRC64 class id 匹配，对不上就是 0%）。有了它，发版节点不必自己囤历史产物 ——
+ * hub 上有 upload-classes 传上去的那一份，或结算时 manifest 记下的路径。
+ */
+String fetchClasses(Map args) {
+    assert args.service : 'fetchClasses 需要 service'
+    assert args.version : 'fetchClasses 需要 version'
+    assert hubUrl(args) : 'fetchClasses 需要 hub（或环境变量 COVHUB_URL）'
+    String dest = args.dest ?: "${pwd()}/.covhub-classes/${args.version}"
+    String url = "${hubUrl(args)}/api/classes?service=${enc(args.service)}&version=${enc(args.version)}"
+    String script = """
+        set -e
+        tmp=\$(mktemp)
+        code=\$(curl -sS -H "X-Covhub-Token: \${COVHUB_TOKEN:-}" -o "\$tmp" -w '%{http_code}' '${url}')
+        case "\$code" in
+            2*) ;;
+            *) cat "\$tmp" >&2; echo >&2
+               echo "[covhub] 取 class 产物失败，HTTP \$code" >&2; rm -f "\$tmp"; exit 1 ;;
+        esac
+        rm -rf '${dest}' && mkdir -p '${dest}'
+        tar xzf "\$tmp" -C '${dest}'
+        rm -f "\$tmp"
+    """
+    if (args.tokenCredentialsId) {
+        withCredentials([string(credentialsId: args.tokenCredentialsId, variable: 'COVHUB_TOKEN')]) {
+            sh script
+        }
+    } else {
+        sh script
+    }
+    echo "[covhub] ${args.service} ${args.version} 的 class 产物已解到 ${dest}"
+    return dest
+}
+
+/**
  * 从 hub 下载某个已结算版本的 jacoco.xml，用于在本节点推 Sonar。
  * hub 的看板本身就是静态文件服务，报告直接按路径取。
  */

@@ -6,19 +6,22 @@
  *
  * 顺序是这套方案的核心，不能调整：
  *
- *   1. predeploy   —— 结算旧版本覆盖率。【必须在停服之前】
- *   2. deploy      —— 停旧实例、部署新版本、起新实例
- *   3. retarget    —— 更新 targets.json 的 version 与 classfiles
- *   4. verify      —— 确认新实例的 agent 已就绪
+ *   1. predeploy       —— 结算旧版本覆盖率。【必须在停服之前】
+ *   2. copy            —— 取新版本的 class 产物压缩包
+ *   3. deploy          —— 停旧实例、部署新版本、起新实例
+ *   4. upload-classes  —— 产物传给 hub，并把配置指过去（retarget）
+ *   5. verify          —— 确认新实例的 agent 已就绪
+ *   6. sonar           —— 推旧版本的运行期覆盖率
  *
  * 第 1 步一旦跑到停服之后，那段运行期覆盖率数据永久丢失 —— agent 随进程消失，
  * tcpserver 端口关闭，没有任何补救手段。
  *
- * 第 3 步最容易被漏。JaCoCo 按 CRC64 class id 把 exec 和 class 对应起来，
+ * 第 4 步最容易被漏。JaCoCo 按 CRC64 class id 把 exec 和 class 对应起来，
  * class 产物没跟着版本换，新采到的数据会和旧 class 对不上，报告全是"未覆盖"。
  *
  * 本流水线走远程模式：所有动作由 COVHUB_URL 指向的那一个 hub 完成，
- * 发版节点只需要 curl —— 不装 Python、不装 java、不放 targets.json。
+ * 发版节点只需要 curl —— 不装 Python、不装 java、不放 targets.json，
+ * 也不囤 class 产物：新产物传给 hub，旧产物推 Sonar 时再从 hub 取回。
  */
 
 pipeline {
@@ -66,9 +69,6 @@ pipeline {
         COVHUB_URL = 'http://covhub.internal:8900'
         // hub 上配了 serve.token 时，填存令牌的 Secret text 凭据 ID
         COVHUB_TOKEN_ID = ''
-        // 本节点存放 class 产物的位置。跨构建要留着：第 6 步推 Sonar 时
-        // -Dsonar.java.binaries 要的是**上一个版本**的 class，别放进工作区。
-        ARTIFACTS = '/opt/artifacts'
     }
 
     options {
@@ -104,13 +104,9 @@ pipeline {
                     target: 'incoming',
                     optional: false
                 )
-                sh """
-                    set -e
-                    dest="${env.ARTIFACTS}/${params.SERVICE}/${params.NEW_VERSION}"
-                    rm -rf "\$dest" && mkdir -p "\$dest"
-                    tar xzf incoming/coverage-classes-${params.NEW_VERSION}.tar.gz -C "\$dest" --strip-components=1
-                    echo "class 产物已就位：\$dest"
-                """
+                // 压缩包原样留在工作区，第 4 步整个传给 hub。
+                // 本节点不再囤 class 产物 —— 要用的时候（第 6 步）从 hub 取回。
+                sh "ls -l incoming/coverage-classes-${params.NEW_VERSION}.tar.gz"
             }
         }
 
@@ -212,18 +208,26 @@ pipeline {
                         echo '未指定 OLD_VERSION，跳过推送（归档报告仍可在看板查看）'
                         return
                     }
-                    // 结算报告在 hub 上，先取回本节点再推
+                    // 报告和 class 都在 hub 上，取回本节点再推。
+                    // binaries 必须是采集时运行的那份 class —— hub 上存的正是它。
                     def xml = covhub.fetchReport(
                         hub:     env.COVHUB_URL,
                         service: params.SERVICE,
                         version: old,
                         dest:    "${WORKSPACE}/jacoco-runtime-${old}.xml"
                     )
+                    def binaries = covhub.fetchClasses(
+                        hub:     env.COVHUB_URL,
+                        tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                        service: params.SERVICE,
+                        version: old,
+                        dest:    "${WORKSPACE}/.covhub-classes/${old}"
+                    )
                     covhub.pushSonar(
                         projectKey:  "${params.SERVICE}-runtime",
                         projectName: "${params.SERVICE} (runtime coverage)",
                         xmlReport:   xml,
-                        binaries:    "${env.ARTIFACTS}/${params.SERVICE}/${old}",
+                        binaries:    binaries,
                         sources:     "src/main/java"
                     )
                 }

@@ -36,6 +36,8 @@
 | Config File Provider | 提供 Maven `settings.xml`，`fileId` 按你们实际的改 |
 
 发版节点**不需要**能连到被测服务的 agent 端口 —— 连 agent 的是 hub。它只要能连上 hub 的 8900。
+也**不需要**本地的 class 产物库：新产物传给 hub，旧产物推 Sonar 时用
+`covhub.fetchClasses` 取回工作区。
 
 > **本地模式（兜底）**：Jenkins agent 恰好就跑在 hub 那台机器上时，可以给各步骤传
 > `home: '/opt/coverage-hub'` 而不是 `hub:`，库会退回到直接调 `covhub.py`。
@@ -60,7 +62,7 @@
 3. deploy          停旧实例、部署、起新实例（agent 经 JAVA_TOOL_OPTIONS 注入）
 4. upload-classes  把产物传给 hub，并把配置指过去（retarget）
 5. verify          轮询确认新实例 agent 就绪，打基线快照
-6. sonar           取回旧版本的 jacoco.xml 推上去
+6. sonar           取回旧版本的 jacoco.xml 与 class 产物，推上去
 ```
 
 **第 1 步跑到停服之后，那段数据就永久丢失了** —— agent 随进程消失，tcpserver 端口关闭，没有任何补救手段。所以 `predeploy` 在目标不可达时会让流水线**失败退出**，这是有意的设计；确实要跳过时才勾 `ALLOW_MISSING`。
@@ -141,6 +143,7 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 | `covhub.retarget(service:, version:, classfiles:)` | 更新 hub 配置里的版本与 class 路径 |
 | `covhub.uploadClasses(service:, version:, archive:, retarget:)` | 把 class 产物压缩包传给 hub |
 | `covhub.fetchAgent(dest:)` | 从 hub 下载 `jacocoagent.jar` |
+| `covhub.fetchClasses(service:, version:, dest:)` | 从 hub 取回某版本的 class 产物并解包，返回目录 |
 | `covhub.fetchReport(service:, version:, dest:)` | 从 hub 取回某版本的 `jacoco.xml` |
 | `covhub.pushSonar(projectKey:, xmlReport:, binaries:, sources:)` | 推 SonarQube |
 
