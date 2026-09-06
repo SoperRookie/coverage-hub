@@ -1,0 +1,63 @@
+@startuml 01-topology
+' coverage-hub v1.0.0 —— 部署拓扑与连接方向
+' 关键：箭头方向就是这套方案能「只部署一个服务端」的原因。
+' 采集由 hub 主动发起，被测端是纯被动的；发版节点只出不进。
+
+title coverage-hub v1.0.0 · 部署拓扑与连接方向
+
+left to right direction
+skinparam componentStyle rectangle
+skinparam shadowing false
+skinparam defaultTextAlignment center
+skinparam ArrowFontSize 11
+skinparam NoteFontSize 11
+skinparam nodesep 25
+skinparam ranksep 65
+
+node "发版节点 / 流水线" as deploy {
+  component "covhub-client.sh\n或 Jenkins 共享库" as client
+}
+
+node "covhub 服务端（全局唯一）" as hub {
+  component "serve ""--with-watch""  :8900\n控制 API · 静态看板 · 采集线程" as serve
+  component "jacococli\njava -jar 子进程" as cli
+  database "data/\nexec · 报告 · 版本归档" as data
+  artifact "targets.json" as cfg
+  artifact "lib/jacocoagent.jar\nlib/jacococli.jar" as libs
+}
+
+node "被测服务所在机器" as target {
+  component "业务 JVM\n+ jacocoagent\noutput=tcpserver  :6300" as agent
+}
+
+cloud "SonarQube" as sonar
+
+client -right-> serve : **①** HTTP\npredeploy / dump / status\nupload-classes / classes\nagent-opts / agent.jar
+serve --> cli
+serve --> data
+serve --> cfg : retarget 改写\n采集时每轮重读
+cli --> libs
+cli --> data : 写 exec / 出报告
+cli -right-> agent : **②  拉**\ndump ""--address --port""\n（predeploy 时带 ""--reset"" 清零）
+client --> sonar : **③** sonar-scanner\n推 jacoco.xml
+
+note bottom of client
+  只依赖 curl。不装 Python、
+  不装 java、不放 targets.json、
+  不囤 class 产物。
+end note
+
+note bottom of agent
+  唯一落在被测端的东西。
+  经 JAVA_TOOL_OPTIONS 注入，
+  不改业务代码、不改 pom。
+end note
+
+note bottom of serve
+  **方向就是设计的核心：**
+  hub 主动连 agent 拉数据，被测端
+  不需要知道 hub 在哪；发版节点只向
+  hub 发请求，hub 从不回连发版节点。
+end note
+
+@enduml

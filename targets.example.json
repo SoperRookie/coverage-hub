@@ -21,6 +21,7 @@
         "com.example.order.*"
       ],
       "excludes": [],
+      "classDumpDir": "/tmp/covhub-classes/order-service",
       "classfiles": [
         "/opt/artifacts/order-service/1.4.2"
       ],

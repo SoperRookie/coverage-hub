@@ -1,0 +1,75 @@
+@startuml 04-lifecycle
+' coverage-hub v1.0.0 —— 一个采集周期的状态流转
+' 为什么必须按版本切段：JaCoCo 按类的 CRC64 指纹（class id）把 exec 和 class
+' 对应起来。发版换了 class，旧 exec 就作废 —— 而且是静默作废。
+
+title 采集周期的状态流转 · v1.1.0
+
+skinparam shadowing false
+skinparam NoteFontSize 11
+skinparam ranksep 45
+skinparam state {
+  BackgroundColor #F4F6F5
+  BorderColor #8A9A98
+  FontSize 13
+}
+
+[*] --> Empty : 服务首次接入
+
+state "空周期" as Empty
+Empty : data/<service>/exec/ 下没有文件
+
+state "采集中" as Active
+Active : **exec/<时间戳>.exec**  每次 dump 追加一个快照
+Active : **current/**  基于本周期<b>全部</b> exec 重出的报告
+Active : ..html/ + jacoco.xml + jacoco.csv..
+Active : **state.json**  history / latest，看板趋势的数据源
+
+state "已归档  versions/<版本>/" as Sealed #EAEEED
+Sealed : **html/ + jacoco.xml + jacoco.csv**  终版报告，只读
+Sealed : **exec/**  本周期全部原始快照 —— 不可再生资产
+Sealed : **merged.exec**  整个周期压成一个文件，重出报告更快
+Sealed : **manifest.json**  记录这批 exec 对应哪份 class 产物 + 指纹
+
+state "数据作废（静默）" as Void #FADBD8
+
+Empty --> Active : 首次 dump
+Active --> Active : **dump**（不清零）\nwatch 轮询 / 手动 / POST /api/dump
+Active --> Sealed : **predeploy**\ncli dump ""--reset"" → 计数器清零\n+ 移走 exec + 写 manifest
+Sealed --> Empty : 新版本周期开始\n（exec 已移走，从零累加）
+Active --> Sealed : **自动断代**（v1.1.0）\n采集时发现 SessionInfo 启动时刻变了\n→ 进程重启过，替你结算上一周期
+Active --> Void : class 换了、进程却没重启\n（热部署 / 手工替换 class）
+
+note right of Active
+  **累加语义**：报告始终基于本周期
+  全部 exec 一起出，不是单个快照 ——
+  cli report 接受多个 exec 文件。
+end note
+
+note right of Sealed
+  归档目录可长期保存。需要跨机器留存
+  请另行归档到对象存储或制品库 ——
+  别指望 git（data/ 已被 .gitignore 排除）。
+end note
+
+note right of Void
+  仍然不报错的一条路径：
+
+  · 新 class 与旧 exec 的 class id 对不上
+  · 报告显示「全部未覆盖」，不是抛异常
+
+  v1.1.0 里进程重启会被自动断代兜住，
+  剩下这条要靠 ""diagnose"" 发现 ——
+  它会直接报出指纹匹配率。
+end note
+
+note bottom of Active
+  **自动断代不能替代 predeploy。**
+  agent 随进程消失，最后一次成功 dump
+  到重启之间的数据还是丢了，丢失上界
+  等于轮询间隔。能在停服前结算就还是要结算；
+  自动断代兜的是手工重启、OOM、K8s 驱逐
+  这些流水线根本不知道的情况。
+end note
+
+@enduml

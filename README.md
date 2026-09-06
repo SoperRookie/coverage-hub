@@ -1,4 +1,4 @@
-# coverage-hub v1.0.0
+# coverage-hub v1.1.0
 
 通用 JaCoCo 覆盖率方案：**构建期**自动出聚合报告推 SonarQube，**运行期**随服务启动自动采集、发版前自动结算、并提供实时在线看板。
 
@@ -7,6 +7,11 @@
 **整套方案只部署一个服务端。** 被测服务所在的机器、发版节点都不装 Python、不装
 java、不放 `targets.json` —— 它们只需要 `curl`，以及被测 JVM 里挂的那个
 `jacocoagent.jar`（还能直接从 hub 下载）。详见 [§ 二·六 单点部署](#二六-单点部署与远程-api)。
+
+**也不需要被测项目的构建流水线配合。** v1.1.0 起，出报告用的 class 由 agent 自己
+落盘（`classDumpDir`），版本切段由 hub 读 exec 里的会话信息自动判断 —— 不必改被测
+项目的 pom，也不必让它的构建流水线归档 class 产物。详见
+[§ 一·四 不依赖研发的采集](#一四-不依赖研发的采集)。
 
 > **要接入一个新服务，直接看 [ONBOARDING.md](ONBOARDING.md)** —— 从搭建到验收的完整步骤、四种部署方式的注入方法、验收清单和常见问题。本文说明的是设计与命令细节。
 
@@ -67,6 +72,73 @@ python covhub.py serve          # HTTP 服务：看板 + 控制 API，默认 890
 
 单次采集用 `python covhub.py dump my-service`（累加，不清零）。
 
+### 4. 不依赖研发的采集
+
+出报告要两样东西：exec，和**产生这批 exec 的那份 class**。后者过去要靠被测项目的
+构建流水线归档，这是整套方案里唯一需要研发配合的地方，也是最容易出错的地方 ——
+class 对不上，报告不会报错，只会全红。
+
+v1.1.0 把这两件事都挪到了运行期：
+
+**class 由 agent 自己交出来。** 配置里加一项 `classDumpDir`，agent 会把它实际加载
+到的每一个 class 落盘。这份 class 与 exec 的指纹不是「应该匹配」，是定义上必然匹配。
+
+```json
+"classDumpDir": "/tmp/covhub-classes/order-service",
+"classfiles":   ["/opt/artifacts/order-service/current"]
+```
+
+服务起来之后，由部署侧把这个目录送到 hub（一条命令，不碰研发的任何流程）：
+
+```bash
+tar czf cls.tgz -C /tmp/covhub-classes/order-service .
+covhub-client.sh upload-classes order-service 1.4.3 cls.tgz --retarget
+```
+
+> 落盘的文件名形如 `OrderService.3f2a91c4e8b70d15.class`，指纹就在文件名里 ——
+> 这个目录可以直接当 `classfiles` 用，covhub 也据此免去一次 JVM 调用。
+>
+> 另一个附带好处：Spring AOP、MyBatis 代理这类**运行时生成的类**在构建产物里根本
+> 不存在，只有 agent 见过。
+
+**版本切段由 hub 自己发现。** 每次采集时读 exec 里的 `SessionInfo`，被测进程的
+启动时刻一旦变化，就说明它重启过 —— hub 会自动把上一周期结算归档、开新桶，并在
+`state.json` 的 `breaks` 里记一笔：
+
+```
+[16:18:54] 检测到断代：会话启动时刻 Sun Sep 06 16:17:50 → Sun Sep 06 16:18:44
+[16:18:54]   被测进程重启过，先结算上一周期为版本 1.0.0
+[16:18:55]   已归档 → data/order-service/versions/1.0.0
+```
+
+它**不能替代** `predeploy`：agent 随进程消失，最后一次成功 dump 到重启之间的数据
+还是丢了，丢失上界等于轮询间隔（把 `watch.intervalSeconds` 调到 60 可以把窗口压到
+一分钟）。能在停服前调 `predeploy` 就仍然应该调，那是零丢失的。
+
+自动检测的价值在于**堵住 predeploy 覆盖不到的洞**：手工重启、OOM 被杀、K8s 驱逐
+—— 这些流水线根本不知道，以前的表现是新旧两个进程的数据混进同一个桶，且不报错。
+
+### 5. 报告全红了怎么查
+
+```bash
+covhub-client.sh diagnose order-service        # 或 python covhub.py diagnose order-service
+```
+
+它把 exec 里记录的 class 指纹和 `classfiles` 的指纹求交集，直接给结论：
+
+```
+exec        18 个快照 · 1832 个类
+            会话 "order-service"  启动于 Sun Sep 06 09:12:44 JST 2026
+classfiles  /opt/artifacts/order-service/1.4.3
+            1795 个类
+
+指纹匹配    219 / 1832  (12.0%)
+判定        class 产物对不上，报告会几乎全部显示未覆盖。
+            最可能的原因：classfiles 指向的是另一次构建的产物
+```
+
+匹配率、会话数、断代记录三样凑一起，接入时最贵的几个坑就都能当场定位，不用靠经验猜。
+
 ### 为什么必须按版本切段
 
 JaCoCo 用类的 CRC64 指纹（class id）把 exec 数据和 class 文件对应起来。**发版换了 class，旧 exec 就作废了** —— 拿新 class 去渲染旧 exec，只会得到一份"全部未覆盖"的假报告。
@@ -122,6 +194,7 @@ HTTP 接口，由 hub 代劳：
 | `/api/status[?service=X]` | GET | 连通性与最新覆盖率（JSON） |
 | `/api/agent-opts?service=X` | GET | 该服务应注入的 `-javaagent` 参数串（加 `&format=text` 出纯文本） |
 | `/api/agent.jar` | GET | 下载 `jacocoagent.jar` |
+| `/api/diagnose?service=X[&version=V]` | GET | 诊断 exec 与 class 是否对得上 |
 | `/api/dump?service=X` | POST | 拉一次快照（累加） |
 | `/api/predeploy?service=X&version=V` | POST | 结算并归档；加 `&allowMissing=1` 允许目标已离线 |
 | `/api/report?service=X` | POST | 用已有 exec 重出报告 |
@@ -203,6 +276,7 @@ hub 按两个来源找：先看 `artifacts/<版本>/`（`upload-classes` 传上�
       "bindAddress": "0.0.0.0",
       "includes":    ["com.example.*"],
       "excludes":    [],
+      "classDumpDir": "/tmp/covhub-classes/my-service",
       "classfiles":  ["/opt/artifacts/my-service/1.4.2/classes"],
       "sourcefiles": ["/opt/src/my-service/src/main/java"],
       "reportExcludes": ["com/example/**/dto/**", "com/example/*/mapper/**"],
@@ -216,7 +290,8 @@ hub 按两个来源找：先看 `artifacts/<版本>/`（`upload-classes` 传上�
 |---|---|
 | `address` / `port` | covhub 连过去拉数据的地址；`bindAddress` 是 agent 在被测端监听的地址 |
 | `includes` / `excludes` | **传给 agent 的**，类名用 `.` 分隔，多项用 `:`（工具会自动拼） |
-| `classfiles` | 出报告用的 class，**必须与运行中的服务是同一份产物** |
+| `classDumpDir` | 让 agent 把实际加载的 class 落到这个目录（**被测端路径**）。配了它就不必再依赖构建期归档 |
+| `classfiles` | 出报告用的 class，**必须与运行中的服务是同一份产物**。用 `upload-classes` 传上来的话这项会自动指过去 |
 | `reportExcludes` | **报告端过滤**，Ant 风格路径模式（用 `/`）。CLI 的 `report` 不支持排除，工具会先过滤出一份 class 副本再出报告 |
 | `sourcefiles` | 可选。配了才能在报告里下钻到源码行 |
 | `serve.token` | 控制 API 的访问令牌。不配则任何能连上 8900 的人都能调写接口 |
@@ -237,6 +312,7 @@ hub 按两个来源找：先看 `artifacts/<版本>/`（`upload-classes` 传上�
 | `dump <service>` | 拉一次快照并出报告（累加，不清零） |
 | `predeploy <service> [--version V]` | 发版/重启前结算：`dump --reset` + 归档 |
 | `report <service>` | 用已有 exec 重新出报告（改了 `reportExcludes` 后用） |
+| `diagnose <service> [--version V]` | 诊断 exec 与 class 产物是否对得上 |
 | `retarget <service> --version V [--classfiles ...]` | 发版后把配置指向新版本产物 |
 | `watch [--interval N]` | 守护进程，定时轮询全部目标 |
 | `serve [--port N] [--with-watch]` | HTTP 服务：看板 + 控制 API，`--with-watch` 顺带在同进程里采集 |
@@ -256,10 +332,10 @@ data/
       jacoco.xml                推 SonarQube 用
       jacoco.csv
     exec/<时间戳>.exec           本周期历次快照
-    versions/<版本>/             发版结算归档（报告 + exec + manifest）
+    versions/<版本>/             周期结算归档（报告 + exec + merged.exec + manifest）
     artifacts/<版本>/            经 upload-classes 传上来的 class 产物
     classes/                    按 reportExcludes 过滤后的 class 副本
-    state.json                  历史统计，看板趋势曲线的数据源
+    state.json                  历史统计、会话基线、断代记录
 ```
 
 ---
@@ -270,5 +346,6 @@ data/
   并且不要把 8900 暴露到公网。
 - **tcpserver 端口没有认证。** 任何能连上的人都能拉数据、并通过 `--reset` 清空计数器。生产/共享环境务必用防火墙或安全组限制来源，不要暴露到公网。
 - **性能开销通常在个位数百分比**，可用于测试环境常驻，但不建议长期挂在生产上。
+- **归档不会被覆盖。** 同名版本已有归档时会自动存成 `<版本>-2` —— 归档里的 exec 是不可再生的执行轨迹，宁可多一个目录也不能覆盖掉。
 - **exec 是不可再生资产**，尤其是手工测试采集的数据。归档时务必连同对应的 class 产物一起保存，否则日后无法重新出报告。
 - **覆盖率不是质量指标。** 它只说明代码被执行过，不说明断言是否有效。分支覆盖率通常比指令覆盖率更有参考价值。

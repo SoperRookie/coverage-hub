@@ -12,6 +12,7 @@
 | covhub 那一台（唯一的服务端） | Python 3、java、`covhub.py`、`lib/*.jar`、`targets.json` |
 | 被测服务所在机器 | `jacocoagent.jar`（`covhub fetch-agent` 下载），能被 hub 连上 6300 |
 | 发版节点 / 流水线 | `curl`（用 `integration/covhub-client.sh` 包一层） |
+| **被测项目本身** | **什么都不用改** —— 不改代码、不改 pom、不改构建流水线 |
 
 ---
 
@@ -134,11 +135,16 @@ export COVHUB_TOKEN=<上一步生成的 serve.token>
 
 - [ ] 服务是 JVM 应用，且**能设置环境变量或 JVM 参数**
 - [ ] covhub 所在机器能**网络访问**该服务的 agent 端口
-- [ ] 能拿到该服务**编译产物（class 文件）** —— 且必须是线上跑的那一份
+- [ ] 能在被测机器上执行一条命令（打包一个目录并 curl 上传）
 
-第三条是最容易在事后才发现做不到的。**JaCoCo 按类的 CRC64 指纹匹配数据，class 对不上，采到的数据就等于废的**，报告会显示全部未覆盖。所以先解决 class 产物归档，再谈其他。
+**注意第三条不再要求「拿到构建产物」**。v1.1.0 起 class 由 agent 自己落盘（`classDumpDir`），出报告用的就是运行时那一份 —— 指纹必然匹配，不再需要被测项目的构建流水线配合。
+
+只有一种情况仍需构建产物：想在报告里**下钻到源码行**，那还要配 `sourcefiles` 指向对应版本的源码。只看类和方法级别的覆盖数字则不需要。
 
 ### Step 2 · 构建期：加聚合模块（只影响单测覆盖率）
+
+> **这一步要改被测项目的 pom。** 如果你们的底线是不改研发的任何东西，直接跳过整个
+> Step 2 —— 运行期覆盖率完全不依赖它，方案收敛成纯运行期即可。
 
 只要运行期覆盖率的话，这步可以跳过。
 
@@ -171,36 +177,50 @@ sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregat
 
 > 注意：构建时**不能加 `-DskipTests`**，否则没有 exec 数据，聚合报告是空的。
 
-### Step 3 · 归档 class 产物（必须）
+### Step 3 · 让 agent 自己交出 class（必须）
 
-运行期出报告要用到，必须与线上版本一一对应。在构建流水线里加一步（`Jenkinsfile.build` 已经写好）：
+出报告要有 class，而且必须是**产生这批 exec 的那一份** —— JaCoCo 按类的 CRC64 指纹匹配，对不上报告就全红，而且**不会报错**。
 
-```bash
-rm -rf coverage-artifacts && mkdir -p coverage-artifacts
-find . -type d -path '*/target/classes' -not -path './coverage-artifacts/*' \
-  | while read -r dir; do
-      module=$(echo "$dir" | sed 's|^\./||; s|/target/classes$||; s|/|_|g')
-      cp -r "$dir" "coverage-artifacts/$module"
-    done
-tar czf coverage-classes-${VERSION}.tar.gz coverage-artifacts
+v1.1.0 的做法是让 agent 自己把它加载到的 class 落盘，这样匹配是定义上必然成立的，不需要被测项目做任何事。在 `targets.json` 里给该服务加一项（**被测端路径**）：
+
+```json
+"classDumpDir": "/tmp/covhub-classes/order-service"
 ```
 
-归档后把压缩包传给 hub —— **报告是 hub 出的，class 就必须在 hub 上**：
+`agent-opts` 会把它拼进参数串。服务起来之后，把这个目录送到 hub：
 
 ```bash
-covhub-client.sh upload-classes order-service 1.4.2 \
-                 coverage-classes-1.4.2.tar.gz --retarget
+# 裸机 / systemd
+tar czf cls.tgz -C /tmp/covhub-classes/order-service .
+
+# Docker
+docker cp order-service:/tmp/covhub-classes/order-service ./cls && tar czf cls.tgz -C ./cls .
+
+# K8s
+kubectl cp order-service-xxxxx:/tmp/covhub-classes/order-service ./cls && tar czf cls.tgz -C ./cls .
+
+covhub-client.sh upload-classes order-service 1.4.3 cls.tgz --retarget
+rm -rf cls cls.tgz /tmp/covhub-classes/order-service
 ```
 
-hub 会解到自己的 `data/order-service/artifacts/1.4.2/`，`--retarget` 顺手把配置指过去。两台机器之间不需要 NFS、不需要 scp 免密。
+`--retarget` 会顺手把 hub 配置里的 `classfiles` 指向这份产物。两台机器之间不需要 NFS、不需要 scp 免密。
 
-传上去之后本机那份就可以删了 —— 日后推 Sonar 需要这个版本的 class 时，从 hub 取回来即可：
+几个要点：
+
+- **落盘的文件名自带指纹**（`OrderService.3f2a91c4e8b70d15.class`），所以这个目录可以直接当 `classfiles` 用
+- **动态生成的类也在里面** —— Spring AOP、MyBatis 代理这类构建产物里根本没有的类，只有 agent 见过
+- **传完就删**，别让它一直占被测机的磁盘。用 `includes` 收窄范围后，典型服务在几十 MB 量级
+- 服务重启后 agent 会重新落一份，**换了版本记得重新传**
+
+> **仍然想走构建期归档？** 也支持：构建流水线打包 `target/classes` 后同样用
+> `upload-classes` 传上来即可（`Jenkinsfile.build` 里有现成的一步）。两者都有时优先
+> 用 classdumpdir 那份 —— 它才是运行时真相。
+
+日后推 Sonar 需要某个版本的 class 时，从 hub 取回来即可，本机不必囤：
 
 ```bash
 covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
 ```
-
-（hub 上本来就有产物的话，也可以跳过上传，直接在 `targets.json` 里把 `classfiles` 写成本地路径。）
 
 ### Step 4 · 在 targets.json 里加一条
 
@@ -213,6 +233,7 @@ covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
   "bindAddress": "0.0.0.0",
   "includes":    ["com.example.order.*"],
   "excludes":    [],
+  "classDumpDir": "/tmp/covhub-classes/order-service",
   "classfiles":  ["./data/order-service/artifacts/1.4.2"],
   "sourcefiles": ["/opt/src/order-service/src/main/java"],
   "reportExcludes": ["com/example/order/**/dto/**", "com/example/order/*/mapper/**"],
@@ -227,6 +248,7 @@ covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
 | `address` | covhub **连过去**的地址（被测服务所在主机） |
 | `bindAddress` | agent 在**被测端监听**的地址。容器/跨机必须 `0.0.0.0`，同机可用 `127.0.0.1` |
 | `includes` | 传给 agent，类名用 `.`，如 `com.example.order.*`。范围开太大会把框架类也插桩，拖慢启动 |
+| `classDumpDir` | **被测端**路径，agent 把加载到的 class 落在这里。配了它就不必依赖构建期归档 |
 | `reportExcludes` | 报告端过滤，Ant 路径风格用 `/`。和 `includes` 是两个层次，见下 |
 | `sourcefiles` | 可选，配了才能在报告里下钻到源码行 |
 
@@ -360,7 +382,11 @@ covhub-client.sh status order-service
 covhub-client.sh dump order-service
 #   返回体里应有覆盖率数字，且 classesHit 不为 0
 
-# 3. 看板
+# 3. 诊断：确认 exec 与 class 对得上
+covhub-client.sh diagnose order-service
+#   指纹匹配应接近 100%，判定为「正常」
+
+# 4. 看板
 #   打开 http://<covhub 机器>:8900/ 应看到该服务的卡片
 ```
 
@@ -393,8 +419,8 @@ covhub-client.sh dump order-service
 - [ ] `covhub-client.sh dump <service>` 能出数字，`classesHit` 不为 0
 - [ ] 手工操作几个页面后再 dump，覆盖率**有明显上涨**
 - [ ] 看板上能看到该服务卡片，点进去能下钻到源码行、看到绿色标记
-- [ ] `classfiles` 指向的 class 与线上运行版本一致（报告不是满屏全红）
-- [ ] 构建流水线归档了 class 产物
+- [ ] `covhub-client.sh diagnose <service>` 指纹匹配接近 100%、判定为「正常」
+- [ ] class 产物已经传到 hub（classdumpdir 那份，或构建期归档那份）
 - [ ] 发版流水线里 `predeploy` 排在停服之前
 - [ ] agent 端口没有和同机其他服务撞车
 - [ ] agent 端口**没有暴露到公网**（无认证，谁都能拉数据和清零）
@@ -406,6 +432,7 @@ covhub-client.sh dump order-service
 
 | 现象 | 原因 |
 |---|---|
+| **任何覆盖率数字不对劲** | **先跑 `covhub-client.sh diagnose <service>`** —— 指纹匹配率、会话数、断代记录三样能定位下面绝大多数情况 |
 | 客户端报 `HTTP 401` | `COVHUB_TOKEN` 没设或和 hub 的 `serve.token` 对不上 |
 | 客户端报"连不上 hub" | `COVHUB_URL` 写错；hub 没起；8900 被防火墙挡了 |
 | `status` 里 `"online": false` / 连通列是 `--` | 服务没起；`output` 不是 `tcpserver`；`bindAddress` 绑了回环但要跨机访问；容器端口没映射；防火墙 |
@@ -414,7 +441,8 @@ covhub-client.sh dump order-service
 | 部分类始终 0 | 被 `excludes` 排除了（采集阶段就没插桩），需改配置并**重启服务** |
 | 报告分母比预期大很多 | `reportExcludes` 没配，dto/mapper/domain 这类都算进去了 |
 | 源码页乱码 | `sourceEncoding` 没设成 `UTF-8` |
-| 覆盖率数字只涨不跌，跨了好几个版本 | 发版时没跑 `predeploy`，数据一直累加。运行期覆盖率必须按版本切段 |
+| 覆盖率数字只涨不跌，跨了好几个版本 | 发版时没跑 `predeploy`。v1.1.0 起 hub 会自动检测进程重启并结算，但重启前最后一个轮询周期的数据仍会丢 —— 能在停服前调 `predeploy` 就还是要调 |
+| 看板上莫名多出一个版本归档 | 这是自动断代：hub 发现被测进程重启过，替你结算了上一周期。`diagnose` 的「断代记录」里能看到前后的会话启动时刻 |
 | 服务启动明显变慢 | `includes` 范围太大，把框架类也插桩了。收窄到自己的业务包 |
 
 ---
@@ -430,6 +458,6 @@ covhub-client.sh dump order-service
 | compose | 不再传 `-f docker-compose.covhub.yml` |
 | k8s | `kubectl set env deployment/X JAVA_TOOL_OPTIONS-`（末尾减号表示删除该变量） |
 
-被测机器上再删掉 `/opt/jacoco-lib/jacocoagent.jar` 就干净了 —— 从头到尾这台机器上就只多过这一个文件。
+被测机器上再删掉 `/opt/jacoco-lib/jacocoagent.jar` 和 `classDumpDir` 指向的目录就干净了 —— 从头到尾这台机器上就只多过这一个文件。
 
 构建期的聚合模块留着无害 —— 它只在 `verify` 阶段多生成一份报告。

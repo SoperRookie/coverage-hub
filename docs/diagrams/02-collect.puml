@@ -1,0 +1,97 @@
+@startuml 02-collect
+' coverage-hub v1.0.0 —— 一次采集的数据流
+' 对应代码：watch_loop() / cmd_dump() -> _snapshot() -> do_dump() + make_report()
+' watch 与 dump 走的是同一条路径，区别只有 kind 标记和触发方式。
+
+title 一次采集的数据流（watch 轮询 / dump 手动 / POST /api/dump）· v1.1.0
+
+skinparam shadowing false
+skinparam ParticipantPadding 8
+skinparam BoxPadding 12
+skinparam NoteFontSize 11
+autonumber "<b>[0]"
+
+box "covhub 服务端" #F4F6F5
+  participant "触发方\nwatch_loop() / api_dispatch()" as T
+  participant "_snapshot()" as S
+  participant "jacococli\n(java -jar 子进程)" as CLI
+  database "data/<service>/" as D
+end box
+
+participant "被测 JVM\njacocoagent tcpserver:6300" as A
+
+T -> T : load_config(cfg_path)
+note right
+  **每轮重读配置。**
+  retarget 换了 classfiles 之后
+  不必重启采集进程。
+end note
+
+T -> A : reachable()：TCP connect 探活（2s 超时）
+alt 连不上
+  A --> T : 拒绝 / 超时
+  T -> T : 记日志跳过该服务\n（watch 不中断，dump 则报错退出）
+else 可连通
+  T -> S : _snapshot(reset=False, kind="watch")
+  S -> D : ensure_dirs()\n建 current/ exec/ versions/ classes/ artifacts/
+
+  == 取数（先落暂存）==
+  S -> CLI : dump ""--address --port""\n""--destfile"" .incoming.exec\n""--retry"" N [""--reset""]
+  CLI -> A : JaCoCo remote control 协议
+  A --> CLI : ExecutionData（class id → 探针位图）\n+ SessionInfo
+  note right of A
+    带 ""--reset"" 时 agent 计数器清零，
+    这是「按版本切段」的实现方式。
+    predeploy 走的就是这条。
+  end note
+  CLI -> D : 写入 .incoming.exec（暂存）
+  note left of S
+    先落暂存位置，是因为还不知道这份数据
+    属于哪个进程 —— 得看过 SessionInfo
+    才知道该把它归进哪个周期。
+  end note
+
+  == 断代检测（仅 reset=False 时做）==
+  S -> CLI : execinfo .incoming.exec
+  CLI --> S : Session "<id>": <启动时刻> - <dump 时刻>
+  alt 启动时刻与 state.json 里记的不同
+    S -> S : detect_break()：被测进程重启过
+    S -> CLI : report + merge（用**现有**的 exec 出终版）
+    S -> D : archive_cycle()\n封存旧周期到 versions/<版本>/\n并在 state.json 记一条 breaks
+    note right of S
+      重启意味着 agent 计数器已归零。
+      不先封存的话，新旧两个进程的数据
+      会混进同一个桶，而 JaCoCo 不报错。
+
+      ""--reset"" 自己也会推进启动时刻，
+      所以 predeploy 路径跳过这一段，
+      否则会把自己误判成一次重启。
+    end note
+  end
+  S -> D : 暂存文件移入 exec/<时间戳>.exec
+
+  == 出报告 ==
+  S -> D : 列出本周期**全部** exec
+  note right of S
+    累加视图始终基于整个周期的 exec，
+    不是单个快照。cli report 接受多个
+    exec 文件，等价于隐式 merge。
+  end note
+  S -> S : prepare_classfiles()\n按 reportExcludes 过滤出 classes/ 副本
+  S -> CLI : report <exec...> ""--classfiles"" ... ""--sourcefiles"" ...\n""--html --xml --csv --encoding""
+  CLI -> D : current/{html/, jacoco.xml, jacoco.csv}
+
+  == 记账 ==
+  S -> S : summarize(jacoco.csv)\n算指令/分支/类覆盖率
+  S -> D : record() 追加 state.json\n(history / latest / versions)
+  S --> T : 返回 entry
+end
+
+T -> D : render_dashboard()\n重写 data/index.html
+note left
+  看板是**静态文件**，采集后重新渲染。
+  serve 同时是 dataDir 的静态文件服务，
+  所以 jacoco.xml 能按 URL 路径直接下载。
+end note
+
+@enduml

@@ -14,6 +14,7 @@
     serve                       起 HTTP 服务：看板 + 远程控制 API（可同时跑采集）
     report <service>            从已有 exec 重新生成报告
     retarget <service>          发版后更新配置里的 version / classfiles
+    diagnose <service>          诊断 exec 与 class 产物是否对得上
 
 整套方案只需要**一个** covhub 服务端。被测服务所在的机器、发版节点都不需要装
 Python 或 java —— 它们通过 serve 暴露的 HTTP API 驱动 hub 干活（见 --help 或
@@ -25,6 +26,7 @@ integration/covhub-client.sh）。
 import argparse
 import contextlib
 import csv
+import hashlib
 import http.server
 import io
 import json
@@ -43,7 +45,7 @@ import urllib.parse
 import zipfile
 from datetime import datetime
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 
@@ -189,6 +191,10 @@ def agent_opts(cfg, svc):
         opts.append("includes=" + ":".join(svc["includes"]))
     if svc.get("excludes"):
         opts.append("excludes=" + ":".join(svc["excludes"]))
+    if svc.get("classDumpDir"):
+        # 让 agent 把它实际加载到的 class 落盘。这份 class 与 exec 的 class id
+        # 不是「应该匹配」，是定义上必然匹配 —— 出报告时用它，不会再有全红。
+        opts.append("classdumpdir=%s" % svc["classDumpDir"])
     opts.append("sessionid=%s" % svc.get("version", svc["name"]))
     return "-javaagent:%s=%s" % (cfg["jacocoAgent"], ",".join(opts))
 
@@ -209,6 +215,101 @@ def run_cli(cfg, args, quiet=True):
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "").strip()[:600])
     return proc.stdout
+
+
+# --------------------------------------------------------------------------
+# jacococli 输出解析
+#
+# classinfo / execinfo 这两个命令此前一次都没用上，而 JaCoCo 把判断「数据还
+# 有没有效」所需要的东西全放在它们的输出里了：
+#
+#   classinfo : "  <计数列>   class 0x<16位指纹> <类名>"
+#   execinfo  : 'Session "<id>": <启动时刻> - <dump 时刻>'
+#               "<16位指纹>  <命中> of <探针>   <类名>"
+#
+# 会话的**启动时刻**是判断被测进程有没有重启过的唯一凭据，且不需要任何人配合。
+# 它是 Java Date.toString() 的输出，带时区和 locale —— 不去解析它，只比对字符串
+# 是否变化，这样既准确又不受环境影响。
+# --------------------------------------------------------------------------
+
+RE_CLASSINFO = re.compile(r"class 0x([0-9a-f]{16})\s+(\S+)")
+RE_EXEC_CLASS = re.compile(r"^([0-9a-f]{16})\s+(\d+) of\s+(\d+)\s+(\S+)")
+RE_SESSION = re.compile(r'^Session "(.*)": (.+?) - (.+)$')
+# classdumpdir 落盘的文件名形如 Foo$Bar.cc23bf3ed0b8a2fb.class —— 指纹就在文件名里
+RE_DUMPED_CLASS = re.compile(r"\.([0-9a-f]{16})\.class$")
+
+
+def exec_sessions(cfg, execfiles):
+    """读出 exec 里的会话信息，返回 [{id, start, dump}]。"""
+    if not execfiles:
+        return []
+    out = run_cli(cfg, ["execinfo"] + list(execfiles), quiet=False)
+    sessions = []
+    for line in out.splitlines():
+        m = RE_SESSION.match(line.strip())
+        if m:
+            sessions.append({"id": m.group(1), "start": m.group(2).strip(),
+                             "dump": m.group(3).strip()})
+    return sessions
+
+
+def exec_class_ids(cfg, execfiles):
+    """读出 exec 里记录了哪些 class id，返回 {指纹: (命中, 探针, 类名)}。"""
+    if not execfiles:
+        return {}
+    out = run_cli(cfg, ["execinfo"] + list(execfiles), quiet=False)
+    found = {}
+    for line in out.splitlines():
+        m = RE_EXEC_CLASS.match(line.strip())
+        if m:
+            found[m.group(1)] = (int(m.group(2)), int(m.group(3)), m.group(4))
+    return found
+
+
+def class_file_ids(cfg, paths):
+    """读出 class 产物里有哪些 class id，返回 {指纹: 类名}。
+
+    classdumpdir 的产物文件名自带指纹，直接解析文件名即可，不必起 JVM ——
+    对动辄上千个类的服务，这条快路径省下的是几秒到几十秒。
+    """
+    from_names = {}
+    unresolved = []
+    for path in paths:
+        if not os.path.isdir(path):
+            unresolved.append(path)
+            continue
+        hits = 0
+        for dirpath, _, files in os.walk(path):
+            for name in files:
+                m = RE_DUMPED_CLASS.search(name)
+                if m:
+                    rel = os.path.relpath(os.path.join(dirpath, name), path)
+                    vm = rel.replace("\\", "/")[:-len(".class")]
+                    from_names[m.group(1)] = vm[:vm.rfind(".")] if "." in vm else vm
+                    hits += 1
+        if not hits:
+            unresolved.append(path)
+
+    if unresolved:
+        out = run_cli(cfg, ["classinfo"] + unresolved, quiet=False)
+        for line in out.splitlines():
+            m = RE_CLASSINFO.search(line)
+            if m:
+                from_names[m.group(1)] = m.group(2)
+    return from_names
+
+
+def fingerprint(cfg, svc, paths=None):
+    """把 class 产物的指纹集合压成一个短哈希，作为「这一版跑的是哪份代码」的身份。
+
+    比人填的版本号可信：人会填错，class 指纹不会。发布换了代码它必然变，
+    没换就必然不变。
+    """
+    ids = class_file_ids(cfg, paths if paths is not None else svc.get("classfiles", []))
+    if not ids:
+        return None
+    digest = hashlib.sha256(("".join(sorted(ids))).encode("ascii")).hexdigest()
+    return digest[:12]
 
 
 def do_dump(cfg, svc, dest, reset=False):
@@ -285,6 +386,14 @@ def save_state(cfg, svc, state):
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
+def update_state(cfg, svc, **fields):
+    """只改 state.json 里的若干字段，不动 history。"""
+    state = load_state(cfg, svc)
+    state.update(fields)
+    save_state(cfg, svc, state)
+    return state
+
+
 def record(cfg, svc, summary, kind, version=None, extra=None):
     state = load_state(cfg, svc)
     entry = {
@@ -307,6 +416,242 @@ def record(cfg, svc, summary, kind, version=None, extra=None):
         state.setdefault("versions", []).append(entry)
     save_state(cfg, svc, state)
     return entry
+
+
+# --------------------------------------------------------------------------
+# 周期封存与断代检测
+# --------------------------------------------------------------------------
+
+def auto_version(cfg, svc):
+    """给一个周期取名。优先用配置里的版本号，其次用 class 指纹，最后用时间戳。
+
+    指纹比人填的版本号可信 —— 换了代码它必然变，没换必然不变。
+    """
+    if svc.get("version"):
+        return svc["version"]
+    try:
+        fp = fingerprint(cfg, svc)
+    except Exception:
+        fp = None
+    return ("fp-" + fp) if fp else datetime.now().strftime("%Y%m%d-%H%M%S")
+
+
+def _safe_fingerprint(cfg, svc):
+    """算 class 指纹，失败不影响归档本身。"""
+    try:
+        return fingerprint(cfg, svc)
+    except Exception as exc:
+        log("  ! 指纹计算失败（不影响归档）：%s" % exc)
+        return None
+
+
+def _archive_path(root, version):
+    """已存在同名归档时另起一个名字。
+
+    归档里的 exec 是不可再生的执行轨迹，宁可多一个目录，也不能覆盖掉。
+    """
+    base = os.path.join(root, "versions", version)
+    if not os.path.exists(os.path.join(base, "manifest.json")):
+        return base
+    n = 2
+    while os.path.exists(os.path.join("%s-%d" % (base, n), "manifest.json")):
+        n += 1
+    log("  ! versions/%s 已有归档，本次存为 %s-%d" % (version, version, n))
+    return "%s-%d" % (base, n)
+
+
+def archive_cycle(cfg, svc, version, entry, out_dir, execs, reason):
+    """把一个采集周期封存到 versions/<版本>/。
+
+    predeploy（先 dump --reset 再封存）和断代检测（进程已经没了，用手上现有的
+    exec 封存）走的是同一段归档动作，抽在这里。
+    """
+    root = svc_dir(cfg, svc)
+    archive = _archive_path(root, version)
+    shutil.rmtree(archive, ignore_errors=True)
+    shutil.copytree(out_dir, archive)
+
+    exec_archive = os.path.join(archive, "exec")
+    os.makedirs(exec_archive, exist_ok=True)
+    moved = []
+    for path in execs:
+        dest = os.path.join(exec_archive, os.path.basename(path))
+        shutil.move(path, dest)
+        moved.append(dest)
+
+    # 一个版本压成一个 exec：重出报告更快，推 Sonar / 转存归档也只用带一个文件。
+    # 原始快照仍然保留 —— 它们各自带着会话信息，是日后取证的依据。
+    merged = None
+    if moved:
+        try:
+            merged = os.path.join(archive, "merged.exec")
+            run_cli(cfg, ["merge"] + moved + ["--destfile", merged])
+        except RuntimeError as exc:
+            log("  ! merge 失败，跳过（原始快照不受影响）：%s" % exc)
+            merged = None
+
+    with open(os.path.join(archive, "manifest.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "service": svc["name"], "version": version,
+            "sealedAt": entry["at"], "sealedBy": reason, "summary": entry,
+            "classfiles": svc["classfiles"],
+            "fingerprint": _safe_fingerprint(cfg, svc),
+            "execCount": len(moved),
+            "merged": os.path.basename(merged) if merged else None,
+            "note": "exec 仅对本 manifest 记录的 class 产物有效（JaCoCo 按 CRC64 class id 匹配）",
+        }, f, ensure_ascii=False, indent=2)
+
+    # 新周期从零开始：会话基线作废，等下一次采集重新认。
+    update_state(cfg, svc, sessionStart=None)
+    log("  已归档 → %s" % archive)
+    return archive
+
+
+def detect_break(cfg, svc, new_exec):
+    """比对 SessionInfo 的启动时刻，判断被测进程在两次采集之间重启过没有。
+
+    重启意味着 agent 随进程消失、计数器归零，上一周期的数据只到最后一次成功
+    dump 为止。此刻必须先把旧周期封存 —— 否则新旧两个进程的数据会混进同一个桶，
+    而 JaCoCo 不会为此报任何错。
+
+    注意 dump --reset 也会把启动时刻往前推，所以封存时会把基线清空，
+    由下一次采集重新认，避免把自己的 reset 误判成重启。
+    """
+    sessions = exec_sessions(cfg, [new_exec])
+    current = sessions[0]["start"] if sessions else None
+    if not current:
+        return None, None
+
+    state = load_state(cfg, svc)
+    prev = state.get("sessionStart")
+    if not prev or prev == current:
+        return current, None
+
+    root = svc_dir(cfg, svc)
+    exec_dir = os.path.join(root, "exec")
+    existing = sorted(os.path.join(exec_dir, f)
+                      for f in os.listdir(exec_dir) if f.endswith(".exec"))
+    if not existing:
+        return current, None
+
+    version = auto_version(cfg, svc)
+    log("检测到断代：会话启动时刻 %s → %s" % (prev, current))
+    log("  被测进程重启过，先结算上一周期为版本 %s" % version)
+    summary = make_report(cfg, svc, existing, os.path.join(root, "current"),
+                          "%s (%s)" % (svc["name"], version))
+    entry = record(cfg, svc, summary, "seal", version,
+                   extra={"reason": "restart-detected", "sessionStart": prev})
+    archive = archive_cycle(cfg, svc, version, entry, os.path.join(root, "current"),
+                            existing, "restart-detected")
+
+    state = load_state(cfg, svc)
+    state.setdefault("breaks", []).append({
+        "at": entry["at"], "from": prev, "to": current,
+        "sealedAs": os.path.basename(archive),
+    })
+    state["breaks"] = state["breaks"][-50:]
+    save_state(cfg, svc, state)
+    return current, archive
+
+
+# --------------------------------------------------------------------------
+# 诊断
+# --------------------------------------------------------------------------
+
+def diagnose(cfg, svc, version=None):
+    """回答「为什么我的报告是全红的」。
+
+    把 exec 里记录的 class id 和 classfiles 的 class id 求交集 —— 匹配率低就是
+    class 产物对不上，这是接入时最贵、最难查、而且**不会报错**的一个坑。
+    """
+    root = ensure_dirs(cfg, svc)
+    if version:
+        archive = os.path.join(root, "versions", version)
+        exec_dir = os.path.join(archive, "exec")
+        manifest = os.path.join(archive, "manifest.json")
+        classfiles = svc["classfiles"]
+        if os.path.isfile(manifest):
+            with open(manifest, encoding="utf-8") as f:
+                classfiles = json.load(f).get("classfiles") or classfiles
+    else:
+        exec_dir = os.path.join(root, "exec")
+        classfiles = svc["classfiles"]
+
+    execs = sorted(os.path.join(exec_dir, f)
+                   for f in os.listdir(exec_dir) if f.endswith(".exec")) \
+        if os.path.isdir(exec_dir) else []
+
+    result = {
+        "service": svc["name"], "version": version or svc.get("version"),
+        "execFiles": len(execs), "classfiles": classfiles,
+        "sessions": [], "execClasses": 0, "classFileClasses": 0,
+        "matched": 0, "matchRate": None, "verdict": None,
+        "missingSamples": [], "breaks": load_state(cfg, svc).get("breaks", [])[-5:],
+    }
+    if not execs:
+        result["verdict"] = "还没有任何 exec 数据"
+        return result
+
+    result["sessions"] = exec_sessions(cfg, execs)
+    in_exec = exec_class_ids(cfg, execs)
+    in_class = class_file_ids(cfg, classfiles)
+    result["execClasses"] = len(in_exec)
+    result["classFileClasses"] = len(in_class)
+
+    matched = set(in_exec) & set(in_class)
+    result["matched"] = len(matched)
+    rate = (100.0 * len(matched) / len(in_exec)) if in_exec else 0.0
+    result["matchRate"] = round(rate, 1)
+    result["missingSamples"] = sorted(
+        in_exec[i][2] for i in list(set(in_exec) - matched)[:8])
+
+    if not in_exec:
+        # 刚 reset 过、或服务起来还没被访问过，都会是这个状态 ——
+        # 这不是 class 对不上，别让诊断把人往错的方向引。
+        result["matchRate"] = None
+        result["verdict"] = ("exec 里没有任何类的执行记录。服务刚重启或刚结算过？"
+                             "再不然就是 includes 没匹配到任何类")
+    elif not in_class:
+        result["verdict"] = "classfiles 里一个 class 都没找到 —— 路径配错了"
+    elif rate >= 95:
+        result["verdict"] = "正常"
+    elif rate >= 50:
+        result["verdict"] = "部分对不上，报告会偏低。多半是 class 产物混了版本"
+    else:
+        result["verdict"] = ("class 产物对不上，报告会几乎全部显示未覆盖。"
+                             "最可能的原因：classfiles 指向的是另一次构建的产物")
+
+    starts = {s["start"] for s in result["sessions"]}
+    if len(starts) > 1:
+        result["verdict"] += "；另外这批 exec 跨了 %d 个进程会话，可能混了重启前后的数据" % len(starts)
+    return result
+
+
+def cmd_diagnose(cfg, args):
+    svc = find_service(cfg, args.service)
+    r = diagnose(cfg, svc, args.version)
+
+    print("服务        %s%s" % (r["service"], ("  版本 " + r["version"]) if r["version"] else ""))
+    print("exec        %d 个快照 · %d 个类" % (r["execFiles"], r["execClasses"]))
+    for s in r["sessions"]:
+        print('            会话 "%s"  启动于 %s' % (s["id"], s["start"]))
+    print("classfiles  %s" % (" ".join(r["classfiles"]) or "(未配置)"))
+    print("            %d 个类" % r["classFileClasses"])
+    print()
+    if r["matchRate"] is not None:
+        print("指纹匹配    %d / %d  (%.1f%%)" % (r["matched"], r["execClasses"], r["matchRate"]))
+    print("判定        %s" % r["verdict"])
+    if r["missingSamples"]:
+        print()
+        print("exec 里有、classfiles 里找不到的类（样例）：")
+        for name in r["missingSamples"]:
+            print("            %s" % name)
+    if r["breaks"]:
+        print()
+        print("断代记录（最近 %d 条）：" % len(r["breaks"]))
+        for b in r["breaks"]:
+            print("            %s  %s → %s  已结算为 %s"
+                  % (b["at"], b["from"], b["to"], b["sealedAs"]))
 
 
 # --------------------------------------------------------------------------
@@ -356,10 +701,22 @@ def _snapshot(cfg, svc, reset, kind, version=None):
     ensure_dirs(cfg, svc)
     root = svc_dir(cfg, svc)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    exec_path = os.path.join(root, "exec", "%s.exec" % ts)
 
+    # 先落到暂存位置：得先看清这份数据属于哪个进程，才知道该把它归进哪个周期。
+    staging = os.path.join(root, ".incoming.exec")
     log("%s：dump%s" % (svc["name"], "（含 --reset）" if reset else ""))
-    do_dump(cfg, svc, exec_path, reset=reset)
+    do_dump(cfg, svc, staging, reset=reset)
+
+    session_start = None
+    if not reset:
+        # --reset 自己就会把会话启动时刻往前推，只在普通采集时做断代判断，
+        # 否则每次 predeploy 都会被自己误判成一次重启。
+        session_start, sealed = detect_break(cfg, svc, staging)
+        if sealed:
+            log("  上一周期已封存，本次数据归入新周期")
+
+    exec_path = os.path.join(root, "exec", "%s.exec" % ts)
+    shutil.move(staging, exec_path)
 
     # 累加视图始终基于该版本周期内的全部 exec
     execs = sorted(
@@ -370,6 +727,8 @@ def _snapshot(cfg, svc, reset, kind, version=None):
     summary = make_report(cfg, svc, execs, out_dir,
                           "%s (%s)" % (svc["name"], version or svc.get("version", "runtime")))
     entry = record(cfg, svc, summary, kind, version)
+    if session_start:
+        update_state(cfg, svc, sessionStart=session_start)
     log("  指令 %.1f%%（%d/%d）  分支 %.1f%%  触达类 %d/%d" % (
         summary["INSTRUCTION"]["pct"], summary["INSTRUCTION"]["covered"],
         summary["INSTRUCTION"]["total"], summary["BRANCH"]["pct"],
@@ -403,24 +762,7 @@ def cmd_predeploy(cfg, args):
 
     log("结算版本 %s" % version)
     entry, out_dir, execs = _snapshot(cfg, svc, reset=True, kind="predeploy", version=version)
-
-    # 归档：报告 + 该周期全部 exec + manifest
-    archive = os.path.join(svc_dir(cfg, svc), "versions", version)
-    shutil.rmtree(archive, ignore_errors=True)
-    shutil.copytree(out_dir, archive)
-    exec_archive = os.path.join(archive, "exec")
-    os.makedirs(exec_archive, exist_ok=True)
-    for path in execs:
-        shutil.move(path, os.path.join(exec_archive, os.path.basename(path)))
-    with open(os.path.join(archive, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "service": svc["name"], "version": version,
-            "sealedAt": entry["at"], "summary": entry,
-            "classfiles": svc["classfiles"],
-            "note": "exec 仅对本 manifest 记录的 class 产物有效（JaCoCo 按 CRC64 class id 匹配）",
-        }, f, ensure_ascii=False, indent=2)
-
-    log("  已归档 → %s" % archive)
+    archive = archive_cycle(cfg, svc, version, entry, out_dir, execs, "predeploy")
     log("  Sonar 可读取：%s" % os.path.join(archive, "jacoco.xml"))
     render_dashboard(cfg)
 
@@ -514,6 +856,7 @@ def cmd_watch(cfg, args):
 #   GET  /api/status[?service=X]                连通性与最新覆盖率（JSON）
 #   GET  /api/agent-opts?service=X              应注入的 -javaagent 参数串
 #   GET  /api/agent.jar                         下载 jacocoagent.jar
+#   GET  /api/diagnose?service=X[&version=V]    诊断 exec 与 class 是否对得上
 #   POST /api/dump?service=X                    拉一次快照（累加）
 #   POST /api/predeploy?service=X&version=V     结算并归档，停服前调用
 #         &allowMissing=1                       目标已离线时不报错
@@ -703,6 +1046,15 @@ def api_dispatch(cfg_path, method, route, params):
         if method != "GET":
             return 405, {"ok": False, "error": "/api/agent-opts 只接受 GET"}
         return 200, {"ok": True, "service": name, "agentOpts": agent_opts(cfg, svc)}
+
+    if route == "/api/diagnose":
+        if method != "GET":
+            return 405, {"ok": False, "error": "/api/diagnose 只接受 GET"}
+        try:
+            with _LOCK:
+                return 200, {"ok": True, "diagnose": diagnose(cfg, svc, params.get("version"))}
+        except Exception as exc:
+            return 500, {"ok": False, "error": str(exc)}
 
     if method != "POST":
         return 405, {"ok": False, "error": "%s 只接受 POST" % route}
@@ -946,6 +1298,7 @@ def cmd_init(cfg_path, _args):
             "bindAddress": "0.0.0.0",
             "includes": ["com.example.*"],
             "excludes": [],
+            "classDumpDir": "/tmp/covhub-classes/example-service",
             "classfiles": ["/path/to/classes"],
             "sourcefiles": ["/path/to/src/main/java"],
             "reportExcludes": ["com/example/**/dto/**"],
@@ -1161,6 +1514,10 @@ def main():
     p = sub.add_parser("report", help="用已有 exec 重新出报告")
     p.add_argument("service")
 
+    p = sub.add_parser("diagnose", help="诊断 exec 与 class 产物是否对得上")
+    p.add_argument("service")
+    p.add_argument("--version", help="诊断某个已归档版本，缺省诊断当前周期")
+
     p = sub.add_parser("retarget", help="发版后更新配置里的 version / classfiles")
     p.add_argument("service")
     p.add_argument("--version", help="新版本标识")
@@ -1192,6 +1549,7 @@ def main():
     handlers = {
         "agent-opts": cmd_agent_opts, "status": cmd_status, "dump": cmd_dump,
         "predeploy": cmd_predeploy, "report": cmd_report, "retarget": cmd_retarget,
+        "diagnose": cmd_diagnose,
         "watch": cmd_watch, "serve": cmd_serve,
     }
     try:

@@ -16,6 +16,7 @@
 #   covhub-client.sh dump <service>
 #   covhub-client.sh predeploy <service> [version] [--allow-missing]
 #   covhub-client.sh report <service>
+#   covhub-client.sh diagnose <service> [version]
 #   covhub-client.sh retarget <service> <version> [classfiles[,更多]]
 #   covhub-client.sh upload-classes <service> <version> <包路径> [--retarget]
 #   covhub-client.sh fetch-classes <service> <version> <目标目录>
@@ -25,7 +26,7 @@
 
 set -e
 
-usage() { sed -n '2,25p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; }
+usage() { sed -n '2,26p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; }
 
 [ -n "${COVHUB_URL:-}" ] || {
     echo "[covhub] 请设置 COVHUB_URL，例如 http://covhub.internal:8900" >&2
@@ -85,6 +86,16 @@ fetch-agent)
     DEST=${1:-jacocoagent.jar}
     curl -sSf -H "$AUTH" -o "$DEST" "$URL/api/agent.jar"
     echo "[covhub] 已下载 agent -> $DEST"
+    ;;
+
+diagnose)
+    # 回答「为什么我的报告是全红的」：比对 exec 与 classfiles 的 class 指纹。
+    need "${1:-}" "用法：$0 diagnose <service> [version]"
+    QS="service=$(enc "$1")"
+    if [ -n "${2:-}" ]; then
+        QS="$QS&version=$(enc "$2")"
+    fi
+    call GET "/api/diagnose?$QS"
     ;;
 
 dump|report)

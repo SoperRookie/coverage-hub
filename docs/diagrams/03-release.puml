@@ -1,0 +1,99 @@
+@startuml 03-release
+' coverage-hub v1.0.0 —— 发版全流程数据流
+' 对应 integration/covhub-client.sh 与 integration/jenkins/Jenkinsfile.deploy 的六个阶段。
+' 顺序是这套方案的核心，不能调整：第 1 步必须在停服之前。
+
+title 发版全流程数据流 · 六个阶段
+
+skinparam shadowing false
+skinparam ParticipantPadding 8
+skinparam BoxPadding 12
+skinparam NoteFontSize 11
+skinparam SequenceGroupBodyBackgroundColor transparent
+autonumber "<b>[0]"
+
+actor "发版流水线" as J
+participant "covhub-client.sh\n（只有 curl）" as C
+
+box "covhub 服务端（唯一）" #F4F6F5
+  participant "控制 API\n:8900" as API
+  participant "jacococli" as CLI
+  database "data/" as D
+  entity "targets.json" as CFG
+end box
+
+participant "旧实例 agent" as OLD
+participant "新实例 agent" as NEW
+participant "SonarQube" as SONAR
+
+== 1 · 结算旧版本（必须在停服之前）==
+J -> C : predeploy order-service 1.4.2
+C -> API : POST /api/predeploy?service&version
+API -> OLD : cli dump ""--reset""  ← 清零
+OLD --> API : 最后一段 ExecutionData
+API -> D : 出终版报告 → 归档 versions/1.4.2/\n{html, jacoco.xml, exec/, manifest.json}
+note right of D
+  manifest.json 记下这批 exec
+  对应哪份 class 产物 ——
+  日后重新出报告的唯一依据。
+end note
+API --> C : 200 + 执行日志
+alt 目标已离线（服务已停）
+  API --> C : **409**「这段数据已永久丢失」
+  C --> J : 非零退出 → 中止发版
+  note left of C
+    有意设计：让流水线停下来，
+    而不是静默丢数据。
+    确需跳过时才加 ""--allow-missing""。
+  end note
+end
+
+== 2 · 取新版本 class 产物 ==
+J -> J : copyArtifacts 取构建期归档的\ncoverage-classes-1.4.3.tar.gz
+
+== 3 · 部署新版本 ==
+J -> C : agent-opts order-service
+C -> API : GET /api/agent-opts?...&format=text
+API --> C : -javaagent:...=output=tcpserver,port=6300,...
+opt 本机没有 agent jar
+  C -> API : GET /api/agent.jar
+  API --> C : jacocoagent.jar
+end
+J -> NEW : 停旧实例 → 部署 → 起新实例\n（agent 经 JAVA_TOOL_OPTIONS 注入）
+note right of NEW
+  旧实例一停，它的 agent 随进程消失。
+  这就是第 1 步不能往后挪的原因。
+end note
+
+== 4 · 产物传给 hub 并指过去 ==
+J -> C : upload-classes order-service 1.4.3 *.tar.gz ""--retarget""
+C -> API : POST /api/upload-classes（正文为二进制）
+API -> D : 解包到 artifacts/1.4.3/\n（拒绝绝对路径与 .. 跳出）
+API -> CFG : cmd_retarget()\n改写 version 与 classfiles
+note right of CFG
+  最容易漏的一步。class 产物没跟着换，
+  新周期的 exec 会和旧 class 对不上，
+  报告全是「未覆盖」且**不会报错**。
+end note
+
+== 5 · 确认采集恢复 ==
+loop 直到就绪或超时
+  C -> API : GET /api/status?service
+  API -> NEW : TCP 探活
+  API --> C : {"online": true/false}
+end
+C -> API : POST /api/dump（打基线快照，新周期从这里开始）
+
+== 6 · 推旧版本覆盖率到 Sonar ==
+C -> API : GET /order-service/versions/1.4.2/jacoco.xml\n（看板的静态文件服务）
+API --> C : jacoco.xml
+C -> API : GET /api/classes?service&version=1.4.2
+API -> D : pack_classes()\n优先 artifacts/1.4.2/，回退 manifest 记的路径
+API --> C : classes-order-service-1.4.2.tar.gz
+C -> SONAR : sonar-scanner\n-Dsonar.java.binaries=<解包目录>\n-Dsonar.coverage.jacoco.xmlReportPaths=<xml>
+note right of SONAR
+  binaries 必须是**采集时运行的那份 class**，
+  所以要从 hub 取回，而不是用本机的。
+end note
+
+@enduml
