@@ -35,6 +35,7 @@ import re
 import shutil
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import tarfile
@@ -45,7 +46,7 @@ import urllib.parse
 import zipfile
 from datetime import datetime
 
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 
@@ -182,11 +183,25 @@ def prepare_classfiles(cfg, svc):
 
 def agent_opts(cfg, svc):
     """生成 -javaagent 参数串。通用做法：塞进 JAVA_TOOL_OPTIONS 环境变量。"""
-    opts = [
-        "output=tcpserver",
-        "address=%s" % svc.get("bindAddress", "0.0.0.0"),
-        "port=%d" % svc["port"],
-    ]
+    if service_channel(svc) == "push":
+        # agent 主动连回 hub。address 必须是**被测端能访问到的** hub 地址，
+        # 不是 hub 自己的监听地址 —— 跨网段、容器里最容易在这儿配错。
+        collect = cfg.get("collect") or {}
+        addr = collect.get("advertiseAddress")
+        if not addr:
+            die("服务 %s 用的是 push 通道，需要配置 collect.advertiseAddress"
+                "（被测端连回 hub 用的地址）" % svc["name"])
+        opts = [
+            "output=tcpclient",
+            "address=%s" % addr,
+            "port=%d" % collect.get("port", 6400),
+        ]
+    else:
+        opts = [
+            "output=tcpserver",
+            "address=%s" % svc.get("bindAddress", "0.0.0.0"),
+            "port=%d" % svc["port"],
+        ]
     if svc.get("includes"):
         opts.append("includes=" + ":".join(svc["includes"]))
     if svc.get("excludes"):
@@ -195,11 +210,16 @@ def agent_opts(cfg, svc):
         # 让 agent 把它实际加载到的 class 落盘。这份 class 与 exec 的 class id
         # 不是「应该匹配」，是定义上必然匹配 —— 出报告时用它，不会再有全红。
         opts.append("classdumpdir=%s" % svc["classDumpDir"])
-    opts.append("sessionid=%s" % svc.get("version", svc["name"]))
+    # push 通道靠 sessionid 认领连接，必须是服务名；pull 通道沿用版本号做标记
+    opts.append("sessionid=%s" % (svc["name"] if service_channel(svc) == "push"
+                                  else svc.get("version", svc["name"])))
     return "-javaagent:%s=%s" % (cfg["jacocoAgent"], ",".join(opts))
 
 
 def reachable(svc, timeout=2.0):
+    if service_channel(svc) == "push":
+        # push 通道没有可探的端口，「在线」等于当前有实例连着
+        return bool(collector_instances(svc["name"]))
     try:
         with socket.create_connection((svc["address"], svc["port"]), timeout):
             return True
@@ -215,6 +235,318 @@ def run_cli(cfg, args, quiet=True):
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "").strip()[:600])
     return proc.stdout
+
+
+# --------------------------------------------------------------------------
+# JaCoCo exec 二进制格式与 remote control 协议
+#
+# 为什么要自己实现：jacococli 只有 dump（去连 output=tcpserver 的 agent），
+# 没有「收集端」命令。要接 output=tcpclient —— agent 主动连过来的那种 —— 方向
+# 反了，官方工具帮不上忙，这段协议只能自己写。
+#
+# 格式定义在 org.jacoco.core.data.ExecutionDataWriter / CompactDataOutput，
+# 下面的常量是从真实 exec 文件头实测出来的，不是照抄文档：
+#     01 c0 c0 10 07 | 10 00 0b 63 6f 76 ...
+#     ^块类型 ^magic ^版本 | ^SESSIONINFO ^UTF长度 ^id
+#
+# 数值一律大端；字符串是 Java 的 modified UTF-8（2 字节长度 + 内容）；
+# 布尔数组是 varint 长度 + 位压缩，每字节低位在前。
+# --------------------------------------------------------------------------
+
+EXEC_MAGIC = 0xC0C0
+EXEC_VERSION = 0x1007
+BLOCK_HEADER = 0x01
+BLOCK_SESSIONINFO = 0x10
+BLOCK_EXECUTIONDATA = 0x11
+BLOCK_CMDDUMP = 0x40
+BLOCK_CMDOK = 0x20
+
+
+def _enc_varint(value):
+    out = bytearray()
+    while True:
+        if value & ~0x7F:
+            out.append(0x80 | (value & 0x7F))
+            value >>= 7
+        else:
+            out.append(value)
+            return bytes(out)
+
+
+def _enc_utf(text):
+    raw = text.encode("utf-8")
+    if len(raw) > 0xFFFF:
+        raise RuntimeError("字符串过长，超出 JaCoCo 的 UTF 长度上限")
+    return struct.pack(">H", len(raw)) + raw
+
+
+def _enc_bools(bits):
+    out = bytearray(_enc_varint(len(bits)))
+    buf = size = 0
+    for b in bits:
+        if b:
+            buf |= 1 << size
+        size += 1
+        if size == 8:
+            out.append(buf)
+            buf = size = 0
+    if size:
+        out.append(buf)
+    return bytes(out)
+
+
+class ExecReader:
+    """从一个 file-like（socket.makefile('rb') 或普通文件）按 JaCoCo 格式读记录。"""
+
+    def __init__(self, fp):
+        self.fp = fp
+
+    def raw(self, n):
+        buf = b""
+        while len(buf) < n:
+            chunk = self.fp.read(n - len(buf))
+            if not chunk:
+                raise EOFError("连接在读取中断开")
+            buf += chunk
+        return buf
+
+    def u8(self):
+        return self.raw(1)[0]
+
+    def u16(self):
+        return struct.unpack(">H", self.raw(2))[0]
+
+    def i64(self):
+        return struct.unpack(">q", self.raw(8))[0]
+
+    def boolean(self):
+        return self.u8() != 0
+
+    def varint(self):
+        value = shift = 0
+        while True:
+            b = self.u8()
+            value |= (b & 0x7F) << shift
+            if not b & 0x80:
+                return value
+            shift += 7
+
+    def utf(self):
+        return self.raw(self.u16()).decode("utf-8", "replace")
+
+    def bools(self):
+        count = self.varint()
+        bits = []
+        buf = 0
+        for i in range(count):
+            if i % 8 == 0:
+                buf = self.u8()
+            bits.append(bool(buf & (1 << (i % 8))))
+        return bits
+
+
+def exec_header():
+    return struct.pack(">BHH", BLOCK_HEADER, EXEC_MAGIC, EXEC_VERSION)
+
+
+def write_exec_file(path, sessions, execdata):
+    """把收上来的记录写成 jacococli 能直接读的 .exec。"""
+    with open(path, "wb") as f:
+        f.write(exec_header())
+        for sid, start, dump in sessions:
+            f.write(struct.pack(">B", BLOCK_SESSIONINFO) + _enc_utf(sid)
+                    + struct.pack(">qq", start, dump))
+        for cid, name, probes in execdata:
+            f.write(struct.pack(">Bq", BLOCK_EXECUTIONDATA, cid) + _enc_utf(name)
+                    + _enc_bools(probes))
+    return path
+
+
+def remote_dump(rfile, wfile, reset=False):
+    """在一条已建立的连接上发 dump 命令并收数据，返回 (sessions, execdata)。
+
+    双方在连接建立后各自先发一个 header —— agent 的 reader 上来就要读它，
+    不先发过去，对方会一直卡在那儿。
+    """
+    wfile.write(exec_header())
+    wfile.write(struct.pack(">B??", BLOCK_CMDDUMP, True, bool(reset)))
+    wfile.flush()
+
+    reader = ExecReader(rfile)
+    sessions, execdata = [], []
+    while True:
+        block = reader.u8()
+        if block == BLOCK_HEADER:
+            magic, version = reader.u16(), reader.u16()
+            if magic != EXEC_MAGIC:
+                raise RuntimeError("对端不是 JaCoCo agent（magic 0x%04x）" % magic)
+            if version != EXEC_VERSION:
+                # 只警告不拒绝：格式版本变了通常仍能读，读错了下面自然会炸
+                log("  ! agent 的 exec 格式版本是 0x%04x，本工具按 0x%04x 解析"
+                    % (version, EXEC_VERSION))
+        elif block == BLOCK_SESSIONINFO:
+            sessions.append((reader.utf(), reader.i64(), reader.i64()))
+        elif block == BLOCK_EXECUTIONDATA:
+            execdata.append((reader.i64(), reader.utf(), reader.bools()))
+        elif block == BLOCK_CMDOK:
+            return sessions, execdata
+        else:
+            raise RuntimeError("协议里出现未知块类型 0x%02x" % block)
+
+
+# --------------------------------------------------------------------------
+# push 通道：agent 主动连上来（output=tcpclient）
+#
+# 适用于 pull 够不着的场景：被测端不能开入站端口、容器网络只出不进、多副本还会
+# 自动扩缩 —— 后者用 pull 得给每个副本配一条，用 push 则是副本自己连过来，
+# 数据天然汇到同一个服务桶里。
+#
+# 有两点和 pull 不一样，写在这儿免得后来人踩：
+#
+#   1. **agent 不会主动报自己是谁。** 连上来只有一个 TCP 连接，要等 dump 回来的
+#      SessionInfo 才知道 sessionid。所以 accept 之后立刻 dump 一次做认领，
+#      那一次的数据本身也是有效数据，直接存下。
+#
+#   2. **收集端必须和采集在同一个进程里。** 连接是长连接、握在收集端手上，
+#      另起一个 watch 进程够不着它。所以 push 通道要求 serve --with-watch。
+# --------------------------------------------------------------------------
+
+def service_channel(svc):
+    return (svc.get("channel") or "pull").lower()
+
+
+def endpoint_label(svc):
+    """一句话描述这个服务在哪儿取数。push 服务没有 address/port，别直接摸那两个字段。"""
+    if service_channel(svc) == "push":
+        return "push · %d 个实例" % len(collector_instances(svc["name"]))
+    return "%s:%d" % (svc["address"], svc["port"])
+
+
+def _sessionid_to_service(cfg, sessionid):
+    """sessionid 形如 <服务名> 或 <服务名>#<任意后缀>，取前段去匹配服务。"""
+    head = re.split(r"[#@]", sessionid or "", 1)[0]
+    for svc in cfg.get("services", []):
+        if svc["name"] in (sessionid, head):
+            return svc["name"]
+    return None
+
+
+class PushCollector:
+    """接收 tcpclient agent 的长连接，并在需要时向它们要数据。"""
+
+    def __init__(self, cfg_path):
+        self.cfg_path = cfg_path
+        self.conns = {}
+        self.lock = threading.Lock()
+        self.seq = 0
+        self.srv = None
+
+    # ---- 生命周期 ----
+
+    def start(self, port, bind="0.0.0.0"):
+        self.srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.srv.bind((bind, port))
+        self.srv.listen(64)
+        threading.Thread(target=self._accept_loop, daemon=True).start()
+        log("push 收集端已监听 %s:%d（等待 output=tcpclient 的 agent 连入）" % (bind, port))
+
+    def _accept_loop(self):
+        while True:
+            try:
+                sock, peer = self.srv.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._claim, args=(sock, peer), daemon=True).start()
+
+    def _claim(self, sock, peer):
+        """认领一条新连接：立刻 dump 一次，从 SessionInfo 里读出它是谁。"""
+        who = "%s:%d" % peer
+        try:
+            sock.settimeout(30)
+            rfile, wfile = sock.makefile("rb"), sock.makefile("wb")
+            sessions, execdata = remote_dump(rfile, wfile, reset=False)
+        except Exception as exc:
+            log("push：来自 %s 的连接握手失败 —— %s" % (who, exc))
+            try:
+                sock.close()
+            except OSError:
+                pass
+            return
+
+        sessionid = sessions[0][0] if sessions else ""
+        cfg = load_config(self.cfg_path)
+        service = _sessionid_to_service(cfg, sessionid)
+        with self.lock:
+            self.seq += 1
+            cid = self.seq
+            self.conns[cid] = {
+                "id": cid, "peer": who, "sessionid": sessionid, "service": service,
+                "since": datetime.now().isoformat(timespec="seconds"),
+                "last": None, "sock": sock, "rfile": rfile, "wfile": wfile,
+                "sessionStart": sessions[0][1] if sessions else None,
+            }
+
+        if not service:
+            log('push：%s 连上来了，但 sessionid "%s" 匹配不到任何服务 —— '
+                "配置里的服务名和 agent 的 sessionid 要对上" % (who, sessionid))
+            return
+
+        log('push：%s 连入，认领为服务 %s（sessionid "%s"）' % (who, service, sessionid))
+        # 握手那一次拿到的数据本身就是有效数据，直接存下，别浪费
+        try:
+            svc = find_service(cfg, service)
+            with _LOCK:
+                self._store(cfg, svc, cid, sessions, execdata)
+        except Exception as exc:
+            log("push：%s 的首次数据落盘失败 —— %s" % (who, exc))
+
+    # ---- 数据 ----
+
+    def _store(self, cfg, svc, cid, sessions, execdata):
+        root = ensure_dirs(cfg, svc)
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        path = os.path.join(root, "exec", "%s-push%d.exec" % (ts, cid))
+        write_exec_file(path, sessions, execdata)
+        with self.lock:
+            if cid in self.conns:
+                self.conns[cid]["last"] = datetime.now().isoformat(timespec="seconds")
+        return path
+
+    def instances(self, service):
+        with self.lock:
+            return [c for c in self.conns.values() if c["service"] == service]
+
+    def drop(self, cid, why):
+        with self.lock:
+            conn = self.conns.pop(cid, None)
+        if conn:
+            log("push：实例 %s 已断开（%s）" % (conn["peer"], why))
+            for key in ("rfile", "wfile", "sock"):
+                try:
+                    conn[key].close()
+                except Exception:
+                    pass
+
+    def dump_service(self, cfg, svc, reset=False):
+        """向该服务当前所有在线实例各要一次数据，返回落盘的文件数。"""
+        written = 0
+        for conn in self.instances(svc["name"]):
+            try:
+                sessions, execdata = remote_dump(conn["rfile"], conn["wfile"], reset=reset)
+                self._store(cfg, svc, conn["id"], sessions, execdata)
+                written += 1
+            except Exception as exc:
+                # 实例没了。它最后一段数据随进程消失 —— 和 pull 一样没有补救手段
+                self.drop(conn["id"], str(exc))
+        return written
+
+
+_COLLECTOR = None
+
+
+def collector_instances(service):
+    return _COLLECTOR.instances(service) if _COLLECTOR else []
 
 
 # --------------------------------------------------------------------------
@@ -672,9 +1004,19 @@ def service_status(cfg, svc):
     """单个服务的状态快照。CLI 表格与 HTTP API 共用同一份数据。"""
     state = load_state(cfg, svc)
     latest = state.get("latest")
+    channel = service_channel(svc)
+    insts = collector_instances(svc["name"]) if channel == "push" else []
+    endpoint = endpoint_label(svc)
+    # push 的实例握在收集端进程手上。在别的进程里（比如直接跑 CLI）看不到它们，
+    # 那不等于「离线」—— 得如实说不知道，否则会让人以为服务挂了。
+    unknown = channel == "push" and _COLLECTOR is None
     return {
         "name": svc["name"],
-        "endpoint": "%s:%d" % (svc["address"], svc["port"]),
+        "channel": channel,
+        "endpoint": "push · 未知（当前进程没有收集端）" if unknown else endpoint,
+        "unknown": unknown,
+        "instances": [{"peer": c["peer"], "since": c["since"], "last": c["last"]}
+                      for c in insts],
         "online": reachable(svc),
         "version": (latest or {}).get("version") or svc.get("version"),
         "classfiles": svc.get("classfiles", []),
@@ -692,9 +1034,17 @@ def cmd_status(cfg, args):
     print("-" * 78)
     for row in collect_status(cfg, args.service):
         latest = row["latest"] or {}
+        # push 服务把在线实例数一并显示出来，"连通" 对它来说是「有几个连着」
+        if row.get("channel") == "push":
+            if row.get("unknown"):
+                conn = "?"
+            else:
+                conn = ("ok(%d)" % len(row["instances"])) if row["online"] else "--"
+        else:
+            conn = "ok" if row["online"] else "--"
         print("%-22s %-8s %-9s %-9s %-10s %s" % (
             row["name"],
-            "ok" if row["online"] else "--",
+            conn,
             ("%.1f" % latest["instruction"]) if latest else "-",
             ("%.1f" % latest["branch"]) if latest else "-",
             row["version"] or "-",
@@ -707,21 +1057,36 @@ def _snapshot(cfg, svc, reset, kind, version=None):
     root = svc_dir(cfg, svc)
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
 
-    # 先落到暂存位置：得先看清这份数据属于哪个进程，才知道该把它归进哪个周期。
-    staging = os.path.join(root, ".incoming.exec")
-    log("%s：dump%s" % (svc["name"], "（含 --reset）" if reset else ""))
-    do_dump(cfg, svc, staging, reset=reset)
-
     session_start = None
-    if not reset:
-        # --reset 自己就会把会话启动时刻往前推，只在普通采集时做断代判断，
-        # 否则每次 predeploy 都会被自己误判成一次重启。
-        session_start, sealed = detect_break(cfg, svc, staging)
-        if sealed:
-            log("  上一周期已封存，本次数据归入新周期")
+    if service_channel(svc) == "push":
+        # 实例是自己连上来的，向每一个各要一次。多副本的数据落成多个 exec，
+        # 出报告时一起喂给 cli report，等价于隐式 merge —— 这正是 push 通道
+        # 在多副本场景比 pull 省事的地方。
+        if _COLLECTOR is None:
+            raise RuntimeError("push 通道要求收集端在同一进程里，请用 serve --with-watch 启动")
+        log("%s：向 %d 个在线实例取数%s"
+            % (svc["name"], len(collector_instances(svc["name"])),
+               "（含 --reset）" if reset else ""))
+        got = _COLLECTOR.dump_service(cfg, svc, reset=reset)
+        if not got:
+            # 探活和取数之间实例断开就会走到这儿，属于正常情况，
+            # 交给上层记日志跳过，不能是致命错误
+            raise RuntimeError("%s 当前没有实例在线，取不到数据" % svc["name"])
+        # push 的会话基线是每条连接各自的，不做全局断代判断（见 detect_break 注释）
+    else:
+        # 先落到暂存位置：得先看清这份数据属于哪个进程，才知道该把它归进哪个周期。
+        staging = os.path.join(root, ".incoming.exec")
+        log("%s：dump%s" % (svc["name"], "（含 --reset）" if reset else ""))
+        do_dump(cfg, svc, staging, reset=reset)
 
-    exec_path = os.path.join(root, "exec", "%s.exec" % ts)
-    shutil.move(staging, exec_path)
+        if not reset:
+            # --reset 自己就会把会话启动时刻往前推，只在普通采集时做断代判断，
+            # 否则每次 predeploy 都会被自己误判成一次重启。
+            session_start, sealed = detect_break(cfg, svc, staging)
+            if sealed:
+                log("  上一周期已封存，本次数据归入新周期")
+
+        shutil.move(staging, os.path.join(root, "exec", "%s.exec" % ts))
 
     # 累加视图始终基于该版本周期内的全部 exec
     execs = sorted(
@@ -744,8 +1109,11 @@ def _snapshot(cfg, svc, reset, kind, version=None):
 def cmd_dump(cfg, args):
     svc = find_service(cfg, args.service)
     if not reachable(svc):
-        die("连不上 %s:%d —— 确认服务在跑，且 agent 用的是 output=tcpserver"
-            % (svc["address"], svc["port"]))
+        if service_channel(svc) == "push":
+            die("%s 当前没有实例连上来 —— 确认被测端 agent 用的是 "
+                "output=tcpclient 且能访问到 collect.advertiseAddress" % svc["name"])
+        die("连不上 %s —— 确认服务在跑，且 agent 用的是 output=tcpserver"
+            % endpoint_label(svc))
     _snapshot(cfg, svc, reset=False, kind="dump")
     render_dashboard(cfg)
 
@@ -759,7 +1127,8 @@ def cmd_predeploy(cfg, args):
     version = args.version or svc.get("version") or datetime.now().strftime("%Y%m%d-%H%M%S")
 
     if not reachable(svc):
-        msg = "连不上 %s:%d，无法结算版本 %s 的覆盖率" % (svc["address"], svc["port"], version)
+        msg = "取不到 %s（%s）的数据，无法结算版本 %s" % (
+            svc["name"], endpoint_label(svc), version)
         if args.allow_missing:
             log("警告：" + msg + "（--allow-missing，跳过）")
             return
@@ -829,7 +1198,10 @@ def watch_once(cfg):
                 continue
             with _LOCK:
                 _snapshot(cfg, svc, reset=False, kind="watch")
-        except Exception as exc:                      # 单个目标失败不能拖垮守护进程
+        except (Exception, SystemExit) as exc:
+            # 也接住 SystemExit：die() 抛的就是它，穿过 except Exception 会把
+            # 采集线程静默杀死 —— 守护进程无声停摆是最坏的失败模式。
+            # KeyboardInterrupt 不在此列，Ctrl+C 仍然能正常退出。
             log("%s：采集失败 —— %s" % (svc["name"], exc))
     render_dashboard(cfg)
 
@@ -839,7 +1211,7 @@ def watch_loop(cfg_path, interval):
     while True:
         try:
             watch_once(load_config(cfg_path))
-        except Exception as exc:
+        except (Exception, SystemExit) as exc:
             log("轮询失败 —— %s" % exc)
         time.sleep(interval)
 
@@ -1274,6 +1646,14 @@ def cmd_serve(cfg, args):
         allow_reuse_address = True
         daemon_threads = True
 
+    collect = cfg.get("collect") or {}
+    if collect.get("port"):
+        global _COLLECTOR
+        _COLLECTOR = PushCollector(cfg_path)
+        _COLLECTOR.start(int(collect["port"]), collect.get("bindAddress", "0.0.0.0"))
+        if not getattr(args, "with_watch", False):
+            log("  ! 收集端已起，但没带 --with-watch —— 连上来的实例不会被定时取数")
+
     if getattr(args, "with_watch", False):
         interval = args.interval or cfg.get("watch", {}).get("intervalSeconds", 300)
         threading.Thread(target=watch_loop, args=(cfg_path, interval), daemon=True).start()
@@ -1294,6 +1674,8 @@ def cmd_init(cfg_path, _args):
         "jacocoCli": "./lib/jacococli.jar",
         "dataDir": "./data",
         "serve": {"port": 8900},
+        "collect": {"port": 6400, "bindAddress": "0.0.0.0",
+                    "advertiseAddress": "改成被测端能访问到的 hub 地址"},
         "watch": {"intervalSeconds": 300},
         "services": [{
             "name": "example-service",
@@ -1326,7 +1708,7 @@ def render_dashboard(cfg):
         latest = state.get("latest")
         rows.append({
             "name": svc["name"],
-            "endpoint": "%s:%d" % (svc["address"], svc["port"]),
+            "endpoint": endpoint_label(svc),
             "online": reachable(svc, timeout=1.0),
             "latest": latest,
             "history": state.get("history", [])[-40:],

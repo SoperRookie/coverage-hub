@@ -1,4 +1,4 @@
-# coverage-hub v1.1.1
+# coverage-hub v1.2.0
 
 通用 JaCoCo 覆盖率方案：**构建期**自动出聚合报告推 SonarQube，**运行期**随服务启动自动采集、发版前自动结算、并提供实时在线看板。
 
@@ -118,7 +118,59 @@ covhub-client.sh upload-classes order-service 1.4.3 cls.tgz --retarget
 自动检测的价值在于**堵住 predeploy 覆盖不到的洞**：手工重启、OOM 被杀、K8s 驱逐
 —— 这些流水线根本不知道，以前的表现是新旧两个进程的数据混进同一个桶，且不报错。
 
-### 5. 报告全红了怎么查
+### 5. 多副本 / 不能开入站端口：push 通道
+
+默认的 `pull` 通道要求 covhub 能连到被测端的 agent 端口。三种场景下这个前提不成立：
+被测端不允许开入站端口、容器网络只出不进、多副本还会自动扩缩（用 pull 得给每个副本
+配一条，扩缩容一变就得改配置）。
+
+这时把服务配成 `push`，方向反过来 —— agent 主动连回 hub：
+
+```json
+{
+  "collect": { "port": 6400, "bindAddress": "0.0.0.0",
+               "advertiseAddress": "covhub.internal" },
+  "services": [
+    { "name": "order-service", "channel": "push", "includes": ["com.example.order.*"],
+      "classDumpDir": "/tmp/covhub-classes/order-service",
+      "classfiles": ["./data/order-service/artifacts/current"] }
+  ]
+}
+```
+
+`advertiseAddress` 是**被测端能访问到的 hub 地址**，不是 hub 自己的监听地址 ——
+跨网段、容器里最容易在这儿配错。push 服务不需要 `address` / `port` / `bindAddress`。
+
+`agent-opts` 会相应生成 `output=tcpclient`：
+
+```
+-javaagent:...=output=tcpclient,address=covhub.internal,port=6400,includes=com.example.order.*,sessionid=order-service
+```
+
+**多副本天然汇聚。** 每个副本各连一条，hub 每轮向所有在线实例各取一次数，落成多个
+exec 文件；出报告时一起喂给 `cli report`，等价于隐式合并。副本扩缩不用改任何配置。
+
+`status` 会显示在线实例数：
+
+```
+服务                   连通     指令%     分支%     版本       最后更新
+order-service          ok(3)    62.4      48.1      1.4.3      2026-09-06T18:14:17
+```
+
+三个限制要知道：
+
+- **push 通道要求 `serve --with-watch`。** 连接是长连接、握在收集端手上，另起一个
+  `watch` 进程够不着它们。单独跑 `serve` 会起收集端但不取数，启动日志里会警告。
+- **收集端口没有认证**，和 agent 端口一样，靠网络策略限制来源。
+- **断代自动检测对 push 不生效。** 每个副本有各自的会话，全局比对会互相打架。
+  push 服务的版本切段靠 `predeploy`，或 class 指纹变化。
+
+> 协议是自己实现的：`jacococli` 只有 `dump`（去连 tcpserver），没有收集端命令，
+> 接 tcpclient 方向反了，官方工具帮不上忙。实现在 `covhub.py` 的
+> 「JaCoCo exec 二进制格式与 remote control 协议」一节，格式常量是从真实 exec
+> 文件头实测出来的，读写与 JaCoCo 字节级一致。
+
+### 6. 报告全红了怎么查
 
 ```bash
 covhub-client.sh diagnose order-service        # 或 python covhub.py diagnose order-service
@@ -265,6 +317,8 @@ hub 按两个来源找：先看 `artifacts/<版本>/`（`upload-classes` 传上�
 能调**，包括 `predeploy` 那个会清零计数器的动作 —— 共享环境务必配上。
 
 看板本身（静态报告）不校验令牌，它和 agent 端口一样，应当靠网络策略限制来源。
+push 通道的收集端口（`collect.port`）同样没有认证 —— 任何能连上它的进程都能往里
+报数据，务必用防火墙或安全组限定来源网段。
 
 ---
 
@@ -310,6 +364,8 @@ hub 按两个来源找：先看 `artifacts/<版本>/`（`upload-classes` 传上�
 | `classfiles` | 出报告用的 class，**必须与运行中的服务是同一份产物**。用 `upload-classes` 传上来的话这项会自动指过去 |
 | `reportExcludes` | **报告端过滤**，Ant 风格路径模式（用 `/`）。CLI 的 `report` 不支持排除，工具会先过滤出一份 class 副本再出报告 |
 | `sourcefiles` | 可选。配了才能在报告里下钻到源码行 |
+| `channel` | `pull`（默认，hub 去连 agent）或 `push`（agent 连回 hub，见 §一·五） |
+| `collect.advertiseAddress` | push 通道用：**被测端连回 hub 的地址**，不是 hub 的监听地址 |
 | `serve.token` | 控制 API 的访问令牌。不配则任何能连上 8900 的人都能调写接口 |
 
 `includes`/`excludes` 与 `reportExcludes` 是两个层次：前者决定**是否插桩**（被排除的类连数据都不会产生，事后无法找回），后者只影响**报告统计口径**（随时可调，重出报告即可）。
