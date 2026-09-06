@@ -1,4 +1,4 @@
-# coverage-hub v1.2.0
+# coverage-hub v1.2.1
 
 通用 JaCoCo 覆盖率方案：**构建期**自动出聚合报告推 SonarQube，**运行期**随服务启动自动采集、发版前自动结算、并提供实时在线看板。
 
