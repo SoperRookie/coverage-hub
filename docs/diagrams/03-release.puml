@@ -31,7 +31,15 @@ J -> C : predeploy order-service 1.4.2
 C -> API : POST /api/predeploy?service&version
 API -> OLD : cli dump ""--reset""  ← 清零
 OLD --> API : 最后一段 ExecutionData
-API -> D : 出终版报告 → 归档 versions/1.4.2/\n{html, jacoco.xml, exec/, manifest.json}
+API -> CLI : check_data_health()\nclassinfo + execinfo 比对指纹
+CLI --> API : 指纹匹配率
+note right of API
+  匹配率低只告警、**不阻断结算** ——
+  服务马上要停，exec 不可再生，
+  因为对不上就拒绝归档只会两头落空。
+  结论写进 manifest，日后能追。
+end note
+API -> D : 出终版报告 → 归档 versions/1.4.2/\n{html, jacoco.xml, exec/, merged.exec, manifest.json}
 note right of D
   manifest.json 记下这批 exec
   对应哪份 class 产物 ——

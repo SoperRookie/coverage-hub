@@ -1,4 +1,4 @@
-# coverage-hub v1.2.1
+# coverage-hub v1.2.2
 
 通用 JaCoCo 覆盖率方案：**构建期**自动出聚合报告推 SonarQube，**运行期**随服务启动自动采集、发版前自动结算、并提供实时在线看板。
 
@@ -49,7 +49,19 @@ COVHUB_URL=http://covhub.internal:8900 \
   integration/covhub-client.sh predeploy my-service 1.4.2
 ```
 
-它会：dump 并 `--reset` → 生成终版报告 → 连同该周期全部 exec 归档到 `data/<service>/versions/1.4.2/` → 写 manifest 记录对应的 class 产物。
+它会：dump 并 `--reset` → 生成终版报告 → **体检 exec 与 class 指纹对不对得上** → 连同该周期全部 exec 归档到 `data/<service>/versions/1.4.2/` → 写 manifest 记录对应的 class 产物与体检结论。
+
+体检匹配率低时会大声告警，但**不会阻断结算**：
+
+```
+[18:44:59]   !! 指纹匹配率只有 0.0% —— 这一版的报告基本是废的
+[18:44:59]      class 产物对不上，报告会几乎全部显示未覆盖……
+[18:44:59]      exec 照常归档（不可再生），但重出报告前得先把 class 产物对上
+```
+
+不阻断是有意的：走到这一步服务马上要停，exec 是不可再生的 —— 因为指纹对不上就拒绝
+归档，只会让这段数据既对不上、又没留下。结论会写进 `manifest.json` 的 `matchRate`，
+日后能追。
 
 > **顺序不能反。** 服务一停，agent 随之消失，那段覆盖率数据永久丢失。`predeploy` 必须在停服之前执行 —— 把它放进部署脚本的第一步。
 

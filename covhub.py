@@ -46,7 +46,7 @@ import urllib.parse
 import zipfile
 from datetime import datetime
 
-__version__ = "1.2.1"
+__version__ = "1.2.2"
 
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 
@@ -792,7 +792,34 @@ def _archive_path(root, version):
     return "%s-%d" % (base, n)
 
 
-def archive_cycle(cfg, svc, version, entry, out_dir, execs, reason):
+def check_data_health(cfg, svc):
+    """结算前体检 exec 与 class 指纹对不对得上，返回 diagnose 结果。
+
+    **不阻断结算。** 走到 predeploy 说明服务马上要停，exec 是不可再生的 ——
+    因为指纹对不上就拒绝归档，只会让这段数据既对不上、又没留下。
+    所以这里只负责把话说清楚，并把结论写进 manifest，日后能追。
+    """
+    try:
+        result = diagnose(cfg, svc)
+    except Exception as exc:
+        log("  ! 数据体检跳过（不影响归档）：%s" % exc)
+        return None
+
+    rate = result.get("matchRate")
+    if rate is None:
+        return result
+    if rate < 50:
+        log("  !! 指纹匹配率只有 %.1f%% —— 这一版的报告基本是废的" % rate)
+        log("     %s" % result["verdict"])
+        log("     exec 照常归档（不可再生），但重出报告前得先把 class 产物对上")
+    elif rate < 95:
+        log("  ! 指纹匹配率 %.1f%%，报告会偏低 —— %s" % (rate, result["verdict"]))
+    else:
+        log("  数据体检：指纹匹配 %.1f%%，正常" % rate)
+    return result
+
+
+def archive_cycle(cfg, svc, version, entry, out_dir, execs, reason, health=None):
     """把一个采集周期封存到 versions/<版本>/。
 
     predeploy（先 dump --reset 再封存）和断代检测（进程已经没了，用手上现有的
@@ -829,9 +856,18 @@ def archive_cycle(cfg, svc, version, entry, out_dir, execs, reason):
             "classfiles": svc["classfiles"],
             "fingerprint": _safe_fingerprint(cfg, svc),
             "execCount": len(moved),
+            "matchRate": (health or {}).get("matchRate"),
+            "healthVerdict": (health or {}).get("verdict"),
             "merged": os.path.basename(merged) if merged else None,
             "note": "exec 仅对本 manifest 记录的 class 产物有效（JaCoCo 按 CRC64 class id 匹配）",
         }, f, ensure_ascii=False, indent=2)
+
+    # 体检结论跟着这一版的结算记录走，日后查「这版数字能不能信」不用翻 manifest
+    if health and health.get("matchRate") is not None:
+        state = load_state(cfg, svc)
+        if state.get("versions"):
+            state["versions"][-1]["matchRate"] = health["matchRate"]
+            save_state(cfg, svc, state)
 
     # 新周期从零开始：会话基线作废，等下一次采集重新认。
     update_state(cfg, svc, sessionStart=None)
@@ -1136,7 +1172,9 @@ def cmd_predeploy(cfg, args):
 
     log("结算版本 %s" % version)
     entry, out_dir, execs = _snapshot(cfg, svc, reset=True, kind="predeploy", version=version)
-    archive = archive_cycle(cfg, svc, version, entry, out_dir, execs, "predeploy")
+    # 体检要赶在归档之前 —— archive_cycle 会把 exec 移走
+    health = check_data_health(cfg, svc)
+    archive = archive_cycle(cfg, svc, version, entry, out_dir, execs, "predeploy", health)
     log("  Sonar 可读取：%s" % os.path.join(archive, "jacoco.xml"))
     render_dashboard(cfg)
 

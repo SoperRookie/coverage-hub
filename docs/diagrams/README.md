@@ -1,6 +1,6 @@
 # 数据流图
 
-covhub **v1.0.0 当前实现**的 PlantUML 图。四张图分别回答四个问题。
+covhub **当前实现**的 PlantUML 图（跟随 v1.2 起的架构）。五张图各回答一个问题。
 
 | 文件 | 回答的问题 | 图类型 |
 |---|---|---|
@@ -8,8 +8,9 @@ covhub **v1.0.0 当前实现**的 PlantUML 图。四张图分别回答四个问�
 | `02-collect.puml` | 一次采集内部发生了什么 | 时序图 |
 | `03-release.puml` | 发版六个阶段各自动了哪些数据 | 时序图 |
 | `04-lifecycle.puml` | 一个采集周期怎么流转、什么时候数据会作废 | 状态图 |
+| `05-push.puml` | push 通道怎么认领连接、怎么向多副本取数 | 时序图 |
 
-看图的顺序建议 01 → 02 → 03 → 04：先看方向，再看单次采集，再看跨机器的发版全程，最后看周期与失效条件。
+看图的顺序建议 01 → 02 → 03 → 04：先看方向，再看单次采集，再看跨机器的发版全程，最后看周期与失效条件。05 只在用到 push 通道时才需要看。
 
 ## 与代码的对应关系
 
@@ -19,6 +20,9 @@ covhub **v1.0.0 当前实现**的 PlantUML 图。四张图分别回答四个问�
 |---|---|
 | `agent_opts()` / `reachable()` / `do_dump()` | 01、02 |
 | `_snapshot()` / `make_report()` / `record()` | 02 |
+| `PushCollector` / `remote_dump()` / `write_exec_file()` | 01、05 |
+| `check_data_health()` / `diagnose()` | 03 |
+| `dashboard_rows()` / `build_dashboard_html()` | 看板，图里没画 |
 | `cmd_predeploy()` / `store_classes()` / `pack_classes()` / `cmd_retarget()` | 03、04 |
 | `api_dispatch()` 的路由表 | 01、03 |
 | `integration/covhub-client.sh`、`Jenkinsfile.deploy` 的阶段划分 | 03 |

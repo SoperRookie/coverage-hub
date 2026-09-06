@@ -3,7 +3,7 @@
 ' 对应代码：watch_loop() / cmd_dump() -> _snapshot() -> do_dump() + make_report()
 ' watch 与 dump 走的是同一条路径，区别只有 kind 标记和触发方式。
 
-title 一次采集的数据流（watch 轮询 / dump 手动 / POST /api/dump）· v1.1.0
+title 一次采集的数据流 · pull 通道（push 见 05）
 
 skinparam shadowing false
 skinparam ParticipantPadding 8

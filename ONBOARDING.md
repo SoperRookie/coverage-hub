@@ -134,7 +134,8 @@ export COVHUB_TOKEN=<上一步生成的 serve.token>
 三个条件，缺一个就接不了：
 
 - [ ] 服务是 JVM 应用，且**能设置环境变量或 JVM 参数**
-- [ ] covhub 所在机器能**网络访问**该服务的 agent 端口
+- [ ] covhub 所在机器能**网络访问**该服务的 agent 端口 —— 连不通也不要紧，改用
+      push 通道让被测端连回来（见 Step 5 末尾）
 - [ ] 能在被测机器上执行一条命令（打包一个目录并 curl 上传）
 
 **注意第三条不再要求「拿到构建产物」**。v1.1.0 起 class 由 agent 自己落盘（`classDumpDir`），出报告用的就是运行时那一份 —— 指纹必然匹配，不再需要被测项目的构建流水线配合。
@@ -249,6 +250,7 @@ covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
 | `bindAddress` | agent 在**被测端监听**的地址。容器/跨机必须 `0.0.0.0`，同机可用 `127.0.0.1` |
 | `includes` | 传给 agent，类名用 `.`，如 `com.example.order.*`。范围开太大会把框架类也插桩，拖慢启动 |
 | `classDumpDir` | **被测端**路径，agent 把加载到的 class 落在这里。配了它就不必依赖构建期归档 |
+| `channel` | `pull`（默认，hub 去连 agent）或 `push`（agent 连回 hub）。push 服务不需要 `address` / `port` / `bindAddress` |
 | `reportExcludes` | 报告端过滤，Ant 路径风格用 `/`。和 `includes` 是两个层次，见下 |
 | `sourcefiles` | 可选，配了才能在报告里下钻到源码行 |
 
@@ -366,6 +368,63 @@ kubectl -n prod rollout status deployment/order-service
 
 多副本时每个 Pod 是独立采集目标，需要 Service 暴露到固定地址，或干脆固定单副本。
 
+#### E. push 通道：端口连不通，或者多副本
+
+上面 A–D 是**部署形态**，下面这条是**采集方向**，和用哪种部署形态无关。
+
+默认 pull 要求 covhub 能连到被测端的 agent 端口。三种情况下这个前提不成立，改用
+push 让被测端主动连回来：
+
+- 被测端不允许开入站端口，或容器网络只出不进
+- 服务有多副本，且会自动扩缩（用 pull 得给每个副本在 `targets.json` 里配一条，
+  一扩缩就得改配置）
+- 跨网段、跨防火墙，只有单向可达
+
+hub 侧加一段全局配置（一次性）：
+
+```json
+"collect": {
+  "port": 6400,
+  "bindAddress": "0.0.0.0",
+  "advertiseAddress": "covhub.internal"
+}
+```
+
+`advertiseAddress` 是**被测端能访问到的 hub 地址**，不是 hub 自己的监听地址 ——
+跨网段和容器里最容易在这儿配错。
+
+服务改成 push，并去掉 `address` / `port` / `bindAddress`：
+
+```json
+{
+  "name": "order-service",
+  "channel": "push",
+  "includes": ["com.example.order.*"],
+  "classDumpDir": "/tmp/covhub-classes/order-service",
+  "classfiles": ["./data/order-service/artifacts/current"]
+}
+```
+
+之后 `agent-opts` 会自动生成 `output=tcpclient`，注入方式和 A–D 完全一样：
+
+```bash
+covhub-client.sh agent-opts order-service
+# -javaagent:...=output=tcpclient,address=covhub.internal,port=6400,...,sessionid=order-service
+```
+
+**多副本不用做任何额外配置** —— 每个副本各连一条，hub 每轮向所有在线实例各取一次，
+出报告时一起合并。`status` 会显示在线实例数（`ok(3)`）。
+
+三件事要知道：
+
+- **hub 必须用 `serve --with-watch` 启动。** 连接是长连接、握在收集端手上，
+  另起一个 `watch` 进程够不着它们。单独跑 `serve` 会起收集端但不取数，
+  启动日志里会告警。
+- **`sessionid` 必须是服务名**（`agent-opts` 会自动设好）。收集端靠它认领连接 ——
+  手工拼参数串时改了它，hub 会报「匹配不到任何服务」。
+- **断代自动检测对 push 不生效**（每个副本有各自的会话）。push 的版本切段靠
+  `predeploy`，或 class 指纹变化。
+
 ### Step 6 · 验证接入
 
 在任意一台能访问 hub 的机器上（不需要是 hub 本机）：
@@ -433,6 +492,9 @@ covhub-client.sh diagnose order-service
 | 现象 | 原因 |
 |---|---|
 | **任何覆盖率数字不对劲** | **先跑 `covhub-client.sh diagnose <service>`** —— 指纹匹配率、会话数、断代记录三样能定位下面绝大多数情况 |
+| push：日志说「匹配不到任何服务」 | agent 的 `sessionid` 和 `targets.json` 里的服务名对不上。用 `agent-opts` 生成参数串就不会错 |
+| push：实例连上了但没数据 | hub 没带 `--with-watch`，收集端起了但没人去取数 |
+| push：`status` 显示 `?` | 你在**另一个进程**里跑的 CLI，看不到收集端手上的连接 —— 那是「不知道」不是「离线」，看 API 或看板 |
 | 客户端报 `HTTP 401` | `COVHUB_TOKEN` 没设或和 hub 的 `serve.token` 对不上 |
 | 客户端报"连不上 hub" | `COVHUB_URL` 写错；hub 没起；8900 被防火墙挡了 |
 | `status` 里 `"online": false` / 连通列是 `--` | 服务没起；`output` 不是 `tcpserver`；`bindAddress` 绑了回环但要跨机访问；容器端口没映射；防火墙 |
@@ -457,6 +519,8 @@ covhub-client.sh diagnose order-service
 | Docker | 去掉 `-e JAVA_TOOL_OPTIONS` 重新起容器 |
 | compose | 不再传 `-f docker-compose.covhub.yml` |
 | k8s | `kubectl set env deployment/X JAVA_TOOL_OPTIONS-`（末尾减号表示删除该变量） |
+
+push 通道的服务撤下时，被测进程一停连接自然断开，hub 侧无需操作。
 
 被测机器上再删掉 `/opt/jacoco-lib/jacocoagent.jar` 和 `classDumpDir` 指向的目录就干净了 —— 从头到尾这台机器上就只多过这一个文件。
 
