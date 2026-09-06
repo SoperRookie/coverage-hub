@@ -16,6 +16,9 @@
  *
  * 第 3 步最容易被漏。JaCoCo 按 CRC64 class id 把 exec 和 class 对应起来，
  * class 产物没跟着版本换，新采到的数据会和旧 class 对不上，报告全是"未覆盖"。
+ *
+ * 本流水线走远程模式：所有动作由 COVHUB_URL 指向的那一个 hub 完成，
+ * 发版节点只需要 curl —— 不装 Python、不装 java、不放 targets.json。
  */
 
 pipeline {
@@ -37,7 +40,7 @@ pipeline {
         string(name: 'CONTAINER_NAME', defaultValue: 'my-service', description: 'docker：容器名')
         string(name: 'APP_PORT',       defaultValue: '8080:8080',  description: 'docker：业务端口映射')
         string(name: 'AGENT_PORT',     defaultValue: '6300:6300',  description: 'docker / compose：agent 端口映射，必须映射出来否则连不上')
-        string(name: 'AGENT_LIB_DIR',  defaultValue: '/opt/coverage-hub/lib', description: 'docker / compose：宿主机上 jacocoagent.jar 所在目录')
+        string(name: 'AGENT_LIB_DIR',  defaultValue: '', description: 'docker / compose：宿主机上 jacocoagent.jar 所在目录。留空则从 hub 下载到工作区')
 
         // --- compose ---
         string(name: 'COMPOSE_FILE',   defaultValue: 'docker-compose.yml', description: 'compose：主 compose 文件')
@@ -59,8 +62,13 @@ pipeline {
     }
 
     environment {
-        COVHUB_HOME = '/opt/coverage-hub'
-        ARTIFACTS   = '/opt/artifacts'
+        // 全局唯一的 covhub 服务端。发版节点通过它干活，本地不需要装任何东西。
+        COVHUB_URL = 'http://covhub.internal:8900'
+        // hub 上配了 serve.token 时，填存令牌的 Secret text 凭据 ID
+        COVHUB_TOKEN_ID = ''
+        // 本节点存放 class 产物的位置。跨构建要留着：第 6 步推 Sonar 时
+        // -Dsonar.java.binaries 要的是**上一个版本**的 class，别放进工作区。
+        ARTIFACTS = '/opt/artifacts'
     }
 
     options {
@@ -73,11 +81,12 @@ pipeline {
         stage('1 · 结算旧版本覆盖率') {
             steps {
                 // 先看一眼目标状态，日志里留个底
-                script { covhub.status(home: env.COVHUB_HOME, service: params.SERVICE) }
+                script { covhub.status(hub: env.COVHUB_URL, tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null, service: params.SERVICE) }
 
                 script {
                     covhub.predeploy(
-                        home:         env.COVHUB_HOME,
+                        hub:          env.COVHUB_URL,
+                        tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
                         service:      params.SERVICE,
                         version:      params.OLD_VERSION ?: null,
                         allowMissing: params.ALLOW_MISSING
@@ -110,8 +119,20 @@ pipeline {
                 script {
                     // agent 一律通过 JAVA_TOOL_OPTIONS 注入，被测服务本身不需要任何改动。
                     // 这是各种部署方式唯一的共同点。
-                    def agentOpts = covhub.agentOpts(home: env.COVHUB_HOME, service: params.SERVICE)
+                    def agentOpts = covhub.agentOpts(hub: env.COVHUB_URL,
+                                                     tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                                                     service: params.SERVICE)
                     echo "将注入 JAVA_TOOL_OPTIONS：${agentOpts}"
+
+                    // agent jar 也从 hub 取，宿主机不必预先铺一份、不必和 hub 共享目录
+                    def agentLibDir = params.AGENT_LIB_DIR
+                    if (!agentLibDir && params.DEPLOY_MODE in ['docker', 'compose']) {
+                        sh "mkdir -p ${WORKSPACE}/.covhub-lib"
+                        covhub.fetchAgent(hub: env.COVHUB_URL,
+                                          tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                                          dest: "${WORKSPACE}/.covhub-lib/jacocoagent.jar")
+                        agentLibDir = "${WORKSPACE}/.covhub-lib"
+                    }
 
                     deployTarget.run(
                         mode:            params.DEPLOY_MODE,
@@ -124,7 +145,7 @@ pipeline {
                         containerName:  params.CONTAINER_NAME,
                         appPort:        params.APP_PORT,
                         agentPort:      params.AGENT_PORT,
-                        agentLibDir:    params.AGENT_LIB_DIR,
+                        agentLibDir:    agentLibDir,
 
                         // compose
                         composeFile:    params.COMPOSE_FILE,
@@ -150,11 +171,15 @@ pipeline {
         stage('4 · 指向新版本产物') {
             steps {
                 script {
-                    covhub.retarget(
-                        home:       env.COVHUB_HOME,
-                        service:    params.SERVICE,
-                        version:    params.NEW_VERSION,
-                        classfiles: ["${env.ARTIFACTS}/${params.SERVICE}/${params.NEW_VERSION}"]
+                    // 报告是 hub 出的，class 必须在 hub 上 —— 把产物传过去，
+                    // 顺带把配置指向它。两台机器之间不需要任何共享目录。
+                    covhub.uploadClasses(
+                        hub:      env.COVHUB_URL,
+                        tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                        service:  params.SERVICE,
+                        version:  params.NEW_VERSION,
+                        archive:  "incoming/coverage-classes-${params.NEW_VERSION}.tar.gz",
+                        retarget: true
                     )
                 }
             }
@@ -166,11 +191,15 @@ pipeline {
                     // 服务启动需要时间，给 agent 端口一点等待余量
                     timeout(time: 5, unit: 'MINUTES') {
                         waitUntil(initialRecurrencePeriod: 10000) {
-                            return covhub.online(home: env.COVHUB_HOME, service: params.SERVICE)
+                            return covhub.online(hub: env.COVHUB_URL,
+                                                 tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                                                 service: params.SERVICE)
                         }
                     }
                     // 打一个基线快照，新版本的采集周期从这里开始
-                    covhub.dump(home: env.COVHUB_HOME, service: params.SERVICE)
+                    covhub.dump(hub: env.COVHUB_URL,
+                                tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                                service: params.SERVICE)
                 }
             }
         }
@@ -183,10 +212,17 @@ pipeline {
                         echo '未指定 OLD_VERSION，跳过推送（归档报告仍可在看板查看）'
                         return
                     }
+                    // 结算报告在 hub 上，先取回本节点再推
+                    def xml = covhub.fetchReport(
+                        hub:     env.COVHUB_URL,
+                        service: params.SERVICE,
+                        version: old,
+                        dest:    "${WORKSPACE}/jacoco-runtime-${old}.xml"
+                    )
                     covhub.pushSonar(
                         projectKey:  "${params.SERVICE}-runtime",
                         projectName: "${params.SERVICE} (runtime coverage)",
-                        xmlReport:   "${env.COVHUB_HOME}/data/${params.SERVICE}/versions/${old}/jacoco.xml",
+                        xmlReport:   xml,
                         binaries:    "${env.ARTIFACTS}/${params.SERVICE}/${old}",
                         sources:     "src/main/java"
                     )
@@ -201,7 +237,7 @@ pipeline {
 旧实例可能已停但覆盖率已结算 —— 归档数据是完整的，可在看板查看。'''
         }
         always {
-            script { covhub.status(home: env.COVHUB_HOME) }
+            script { covhub.status(hub: env.COVHUB_URL, tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null) }
         }
     }
 }

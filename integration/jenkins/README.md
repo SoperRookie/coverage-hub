@@ -23,17 +23,24 @@
 
 之后在 Jenkinsfile 顶部写 `@Library('covhub') _` 即可使用。
 
-## 二、构建节点前置条件
+## 二、节点前置条件
+
+**节点上不需要装 covhub。** 覆盖率相关的活全由那一个 hub 完成，流水线只是发 HTTP 请求：
 
 | 依赖 | 说明 |
 |---|---|
-| Python 3 | covhub 只用标准库，不需要装任何包 |
-| `java` | 用于跑 jacococli |
-| covhub 安装目录 | 默认 `/opt/coverage-hub`，含 `covhub.py`、`lib/`、`targets.json` |
+| `curl` | 就这一个。不需要 Python、不需要 java、不需要 `targets.json` |
+| 环境变量 `COVHUB_URL` | hub 地址，如 `http://covhub.internal:8900`。已写在 `Jenkinsfile.deploy` 的 `environment` 块里，改成你们的 |
+| 凭据（可选） | hub 配了 `serve.token` 时，建一个 Secret text 凭据存令牌，把 ID 填进 `COVHUB_TOKEN_ID` |
 | Jenkins 插件 | Pipeline Utility Steps、Copy Artifacts、SonarQube Scanner；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
 | Config File Provider | 提供 Maven `settings.xml`，`fileId` 按你们实际的改 |
 
-发版节点需要能连到被测服务的 agent 端口（默认 6300）。
+发版节点**不需要**能连到被测服务的 agent 端口 —— 连 agent 的是 hub。它只要能连上 hub 的 8900。
+
+> **本地模式（兜底）**：Jenkins agent 恰好就跑在 hub 那台机器上时，可以给各步骤传
+> `home: '/opt/coverage-hub'` 而不是 `hub:`，库会退回到直接调 `covhub.py`。
+> 此时才需要节点上有 Python 3、java 和 `targets.json`。没设 `COVHUB_URL` 也没传
+> `hub:` 时自动走这条路。
 
 ## 三、构建期流水线要点
 
@@ -48,17 +55,17 @@
 ## 四、发版流水线的顺序
 
 ```
-1. predeploy   结算旧版本覆盖率   ← 必须在停服之前
-2. copy        取新版本 class 产物
-3. deploy      停旧实例、部署、起新实例（agent 经 JAVA_TOOL_OPTIONS 注入）
-4. retarget    更新 targets.json 的 version 与 classfiles
-5. verify      轮询确认新实例 agent 就绪，打基线快照
-6. sonar       把旧版本的 jacoco.xml 推上去
+1. predeploy       结算旧版本覆盖率   ← 必须在停服之前
+2. copy            取新版本 class 产物
+3. deploy          停旧实例、部署、起新实例（agent 经 JAVA_TOOL_OPTIONS 注入）
+4. upload-classes  把产物传给 hub，并把配置指过去（retarget）
+5. verify          轮询确认新实例 agent 就绪，打基线快照
+6. sonar           取回旧版本的 jacoco.xml 推上去
 ```
 
 **第 1 步跑到停服之后，那段数据就永久丢失了** —— agent 随进程消失，tcpserver 端口关闭，没有任何补救手段。所以 `predeploy` 在目标不可达时会让流水线**失败退出**，这是有意的设计；确实要跳过时才勾 `ALLOW_MISSING`。
 
-**第 4 步最容易漏。** class 产物必须跟着版本一起换，否则新版本采到的 exec 和旧 class 对不上。
+**第 4 步最容易漏。** class 产物必须跟着版本一起换，否则新版本采到的 exec 和旧 class 对不上。报告是 hub 出的，所以产物要传到 hub 上去 —— `covhub.uploadClasses(..., retarget: true)` 一步做完上传和指向。
 
 流水线加了 `disableConcurrentBuilds()`：同一服务的发版不能并行，否则两次结算会互相干扰。
 
@@ -70,7 +77,7 @@
 
 | 方式 | 做法 | 关键参数 |
 |---|---|---|
-| `docker` | `docker rm -f` 旧容器 → `pull` → `run` 带 `-e JAVA_TOOL_OPTIONS` | `IMAGE`、`CONTAINER_NAME`、`APP_PORT`、`AGENT_PORT`、`AGENT_LIB_DIR` |
+| `docker` | `docker rm -f` 旧容器 → `pull` → `run` 带 `-e JAVA_TOOL_OPTIONS` | `IMAGE`、`CONTAINER_NAME`、`APP_PORT`、`AGENT_PORT`、`AGENT_LIB_DIR`（留空则从 hub 下载 agent 到工作区） |
 | `compose` | 生成 `docker-compose.covhub.yml` override 注入环境变量与端口，**不改原始 compose 文件** → `compose up -d` | `COMPOSE_FILE`、`COMPOSE_SERVICE`、`IMAGE`、`AGENT_PORT` |
 | `k8s` | `kubectl set image` + `set env` 合并成一次滚动更新 → `rollout status` 等待完成 | `K8S_NAMESPACE`、`K8S_DEPLOYMENT`、`K8S_CONTAINER`、`IMAGE` |
 | `systemd` | 写 drop-in 片段 `/etc/systemd/system/<unit>.d/covhub.conf` 注入环境变量，**不改原始 unit 文件** → `daemon-reload` + `restart` | `SYSTEMD_UNIT`、`ARTIFACT_SRC`、`ARTIFACT_DEST` |
@@ -118,3 +125,24 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 ## 六、K8s 滚动更新的额外注意
 
 滚动更新会直接杀掉旧 Pod，`preStop` 钩子里来不及做完整的 dump + 归档。正确做法是在触发滚动更新**之前**，先在流水线里跑 `predeploy`（也就是 `Jenkinsfile.deploy` 的第 1 步），而不是依赖 Pod 生命周期钩子。
+
+## 六、Shared Library 提供的步骤
+
+公共参数：`hub`（或环境变量 `COVHUB_URL`）、`tokenCredentialsId`；
+本地模式下则是 `home` / `config` / `python`。
+
+| 步骤 | 用途 |
+|---|---|
+| `covhub.agentOpts(service:)` | 取该服务应注入的 `-javaagent` 参数串 |
+| `covhub.predeploy(service:, version:, allowMissing:)` | 结算并归档，**停服之前**调用 |
+| `covhub.dump(service:)` | 拉一次快照（累加） |
+| `covhub.status([service:])` | 打印连通性与最新覆盖率 |
+| `covhub.online(service:)` | 目标 agent 是否可连通，返回 boolean |
+| `covhub.retarget(service:, version:, classfiles:)` | 更新 hub 配置里的版本与 class 路径 |
+| `covhub.uploadClasses(service:, version:, archive:, retarget:)` | 把 class 产物压缩包传给 hub |
+| `covhub.fetchAgent(dest:)` | 从 hub 下载 `jacocoagent.jar` |
+| `covhub.fetchReport(service:, version:, dest:)` | 从 hub 取回某版本的 `jacoco.xml` |
+| `covhub.pushSonar(projectKey:, xmlReport:, binaries:, sources:)` | 推 SonarQube |
+
+除 `agentOpts` / `online` / `status` 外，任何一步在 hub 返回非 2xx 时都会让流水线失败 ——
+覆盖率结算失败必须停住发版，而不是带着已丢失的数据继续。

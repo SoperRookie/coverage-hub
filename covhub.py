@@ -11,15 +11,22 @@
     dump <service>              拉一次快照并生成报告（累加，不清零）
     predeploy <service>         发版/重启前结算：dump --reset + 归档 + 出终版报告
     watch                       守护进程：按间隔轮询全部目标
-    serve                       起 HTTP 服务托管看板
+    serve                       起 HTTP 服务：看板 + 远程控制 API（可同时跑采集）
     report <service>            从已有 exec 重新生成报告
+    retarget <service>          发版后更新配置里的 version / classfiles
+
+整套方案只需要**一个** covhub 服务端。被测服务所在的机器、发版节点都不需要装
+Python 或 java —— 它们通过 serve 暴露的 HTTP API 驱动 hub 干活（见 --help 或
+integration/covhub-client.sh）。
 
 配置文件默认取当前目录的 targets.json，可用 -c 指定。
 """
 
 import argparse
+import contextlib
 import csv
 import http.server
+import io
 import json
 import os
 import re
@@ -28,7 +35,12 @@ import socket
 import socketserver
 import subprocess
 import sys
+import tarfile
+import tempfile
+import threading
 import time
+import urllib.parse
+import zipfile
 from datetime import datetime
 
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
@@ -91,7 +103,7 @@ def svc_dir(cfg, svc):
 
 def ensure_dirs(cfg, svc):
     root = svc_dir(cfg, svc)
-    for sub in ("current", "exec", "versions", "classes"):
+    for sub in ("current", "exec", "versions", "classes", "artifacts"):
         os.makedirs(os.path.join(root, sub), exist_ok=True)
     return root
 
@@ -303,20 +315,36 @@ def cmd_agent_opts(cfg, args):
     print(agent_opts(cfg, svc))
 
 
+def service_status(cfg, svc):
+    """单个服务的状态快照。CLI 表格与 HTTP API 共用同一份数据。"""
+    state = load_state(cfg, svc)
+    latest = state.get("latest")
+    return {
+        "name": svc["name"],
+        "endpoint": "%s:%d" % (svc["address"], svc["port"]),
+        "online": reachable(svc),
+        "version": (latest or {}).get("version") or svc.get("version"),
+        "classfiles": svc.get("classfiles", []),
+        "latest": latest,
+    }
+
+
+def collect_status(cfg, name=None):
+    names = [name] if name else [s["name"] for s in cfg["services"]]
+    return [service_status(cfg, find_service(cfg, n)) for n in names]
+
+
 def cmd_status(cfg, args):
-    names = [args.service] if args.service else [s["name"] for s in cfg["services"]]
     print("%-22s %-8s %-9s %-9s %-10s %s" % ("服务", "连通", "指令%", "分支%", "版本", "最后更新"))
     print("-" * 78)
-    for name in names:
-        svc = find_service(cfg, name)
-        state = load_state(cfg, svc)
-        latest = state.get("latest") or {}
+    for row in collect_status(cfg, args.service):
+        latest = row["latest"] or {}
         print("%-22s %-8s %-9s %-9s %-10s %s" % (
-            name,
-            "ok" if reachable(svc) else "--",
+            row["name"],
+            "ok" if row["online"] else "--",
             ("%.1f" % latest["instruction"]) if latest else "-",
             ("%.1f" % latest["branch"]) if latest else "-",
-            latest.get("version") or svc.get("version") or "-",
+            row["version"] or "-",
             latest.get("at", "从未采集"),
         ))
 
@@ -408,26 +436,247 @@ def cmd_report(cfg, args):
     render_dashboard(cfg)
 
 
+def cmd_retarget(cfg, args):
+    """发版后把配置指向新版本的 class 产物。
+
+    JaCoCo 按 CRC64 class id 匹配数据，class 产物不跟着版本换，新周期采到的 exec
+    就和旧 class 对不上，报告全是"未覆盖"。这一步是发版流水线里最容易漏的。
+
+    直接改配置文件原文（而不是回写 load_config 解析后的结果），避免把相对路径
+    固化成绝对路径 —— 整个目录要能原样搬到别的机器上。
+    """
+    path = args.config
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    hit = next((s for s in raw.get("services", []) if s["name"] == args.service), None)
+    if hit is None:
+        die("配置里没有名为 %r 的服务" % args.service)
+    if args.version:
+        hit["version"] = args.version
+    if args.classfiles:
+        hit["classfiles"] = list(args.classfiles)
+    if args.sourcefiles:
+        hit["sourcefiles"] = list(args.sourcefiles)
+
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+    log("%s -> version=%s classfiles=%s"
+        % (args.service, hit.get("version"), hit.get("classfiles")))
+
+
+# 采集、结算、改配置都会写 data/ 与 targets.json，单进程内一律串行，
+# 避免看板 API 与后台轮询同时对同一个服务动手。
+_LOCK = threading.RLock()
+
+
+def watch_once(cfg):
+    for svc in cfg["services"]:
+        try:
+            if not reachable(svc):
+                log("%s：离线，跳过" % svc["name"])
+                continue
+            with _LOCK:
+                _snapshot(cfg, svc, reset=False, kind="watch")
+        except Exception as exc:                      # 单个目标失败不能拖垮守护进程
+            log("%s：采集失败 —— %s" % (svc["name"], exc))
+    render_dashboard(cfg)
+
+
+def watch_loop(cfg_path, interval):
+    """每轮重新加载配置 —— retarget 换了 classfiles 之后不必重启采集进程。"""
+    while True:
+        try:
+            watch_once(load_config(cfg_path))
+        except Exception as exc:
+            log("轮询失败 —— %s" % exc)
+        time.sleep(interval)
+
+
 def cmd_watch(cfg, args):
     interval = args.interval or cfg.get("watch", {}).get("intervalSeconds", 300)
     log("守护进程启动，每 %d 秒轮询 %d 个目标（Ctrl+C 退出）"
         % (interval, len(cfg["services"])))
-    while True:
-        for svc in cfg["services"]:
-            try:
-                if not reachable(svc):
-                    log("%s：离线，跳过" % svc["name"])
+    watch_loop(args.config, interval)
+
+
+# --------------------------------------------------------------------------
+# 远程控制 API
+#
+# 整套方案只需要一个服务端。被测服务所在的机器和发版节点不装 Python、不装 java、
+# 不放 targets.json，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。
+#
+#   GET  /api/health                            存活探测，不需要令牌
+#   GET  /api/status[?service=X]                连通性与最新覆盖率（JSON）
+#   GET  /api/agent-opts?service=X              应注入的 -javaagent 参数串
+#   GET  /api/agent.jar                         下载 jacocoagent.jar
+#   POST /api/dump?service=X                    拉一次快照（累加）
+#   POST /api/predeploy?service=X&version=V     结算并归档，停服前调用
+#         &allowMissing=1                       目标已离线时不报错
+#   POST /api/report?service=X                  用已有 exec 重出报告
+#   POST /api/retarget?service=X&version=V      更新 version / classfiles
+#         &classfiles=/a,/b
+#   POST /api/upload-classes?service=X          上传该版本的 class 产物压缩包
+#         &version=V[&retarget=1]               （tar.gz / zip，正文为二进制）
+#
+# 参数可用 query string，也可用 JSON body。配置了 serve.token（或设了环境变量
+# COVHUB_TOKEN）时，除 /api/health 外都要带 X-Covhub-Token 头或 ?token=。
+# --------------------------------------------------------------------------
+
+def _members_ok(names):
+    """压缩包来自流水线，仍按不可信输入处理：绝对路径、跳出目录一律拒绝。"""
+    for name in names:
+        clean = name.replace("\\", "/")
+        if clean.startswith("/") or ".." in clean.split("/") or ":" in clean.split("/")[0][1:2]:
+            raise RuntimeError("压缩包里有不安全的路径：%s" % name)
+
+
+def _common_prefix(names):
+    """构建期打包习惯上会带一层顶层目录（coverage-artifacts/），自动剥掉。"""
+    tops = {n.replace("\\", "/").split("/")[0] for n in names if n.strip("/")}
+    if len(tops) != 1:
+        return ""
+    top = tops.pop()
+    return top + "/" if any(n.replace("\\", "/").startswith(top + "/") for n in names) else ""
+
+
+def store_classes(cfg, svc, version, blob):
+    """把上传的 class 产物解包到 <dataDir>/<service>/artifacts/<version>/。
+
+    有了它，被测服务、发版节点都不必和 hub 共享文件系统：产物 POST 过来即可。
+    报告是 hub 出的，class 就必须在 hub 上 —— 且必须是线上跑的那一份。
+    """
+    ensure_dirs(cfg, svc)
+    dest = os.path.join(svc_dir(cfg, svc), "artifacts", version)
+    shutil.rmtree(dest, ignore_errors=True)
+    os.makedirs(dest, exist_ok=True)
+
+    if zipfile.is_zipfile(blob):
+        with zipfile.ZipFile(blob) as zf:
+            names = zf.namelist()
+            _members_ok(names)
+            prefix = _common_prefix(names)
+            for name in names:
+                if name.endswith("/"):
                     continue
-                _snapshot(cfg, svc, reset=False, kind="watch")
-            except Exception as exc:                      # 单个目标失败不能拖垮守护进程
-                log("%s：采集失败 —— %s" % (svc["name"], exc))
-        render_dashboard(cfg)
-        time.sleep(interval)
+                rel = name[len(prefix):] if prefix and name.startswith(prefix) else name
+                target = os.path.join(dest, rel)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                with zf.open(name) as src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+    else:
+        with tarfile.open(blob, "r:*") as tf:
+            members = [m for m in tf.getmembers() if m.isfile() or m.isdir()]
+            _members_ok([m.name for m in members])
+            prefix = _common_prefix([m.name for m in members])
+            for m in members:
+                if not m.isfile():
+                    continue
+                rel = m.name[len(prefix):] if prefix and m.name.startswith(prefix) else m.name
+                target = os.path.join(dest, rel)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                src = tf.extractfile(m)
+                if src is None:
+                    continue
+                with src, open(target, "wb") as out:
+                    shutil.copyfileobj(src, out)
+
+    count = sum(len([f for f in files if f.endswith(".class")])
+                for _, _, files in os.walk(dest))
+    log("%s：已接收 %s 的 class 产物 %d 个 -> %s" % (svc["name"], version, count, dest))
+    if not count:
+        log("  ! 包里一个 .class 都没有，检查打包方式")
+    return dest, count
+
+
+def _token(cfg):
+    return os.environ.get("COVHUB_TOKEN") or (cfg.get("serve") or {}).get("token") or ""
+
+
+def _as_list(value):
+    if not value:
+        return []
+    if isinstance(value, list):
+        return value
+    return [p.strip() for p in str(value).split(",") if p.strip()]
+
+
+def _capture(fn, *a):
+    """在锁内执行子命令，把它打印的日志一起回给调用方。
+
+    die() 走的是 SystemExit，这里翻译成 409 —— 让流水线那边非零退出，
+    而不是拿到一个"成功"的空响应继续往下走。
+    """
+    buf = io.StringIO()
+    with _LOCK, contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        try:
+            fn(*a)
+            code = 200
+        except SystemExit as exc:
+            code = 409 if exc.code else 200
+        except Exception as exc:
+            print("[covhub] 错误：%s" % exc)
+            code = 500
+    return code, buf.getvalue()
+
+
+def api_dispatch(cfg_path, method, route, params):
+    """返回 (状态码, JSON 可序列化对象)。配置每次重读，retarget 后立即生效。"""
+    cfg = load_config(cfg_path)
+
+    if route == "/api/health":
+        return 200, {"ok": True, "services": [s["name"] for s in cfg.get("services", [])]}
+
+    if route == "/api/status" and method == "GET":
+        name = params.get("service")
+        if name and not any(s["name"] == name for s in cfg.get("services", [])):
+            return 404, {"ok": False, "error": "配置里没有名为 %r 的服务" % name}
+        return 200, {"ok": True, "services": collect_status(cfg, name)}
+
+    name = params.get("service")
+    if not name:
+        return 400, {"ok": False, "error": "缺少参数 service"}
+    if not any(s["name"] == name for s in cfg.get("services", [])):
+        return 404, {"ok": False, "error": "配置里没有名为 %r 的服务" % name}
+    svc = find_service(cfg, name)
+
+    if route == "/api/agent-opts":
+        if method != "GET":
+            return 405, {"ok": False, "error": "/api/agent-opts 只接受 GET"}
+        return 200, {"ok": True, "service": name, "agentOpts": agent_opts(cfg, svc)}
+
+    if method != "POST":
+        return 405, {"ok": False, "error": "%s 只接受 POST" % route}
+
+    ns = argparse.Namespace(config=cfg_path, service=name)
+    if route == "/api/dump":
+        fn = cmd_dump
+    elif route == "/api/report":
+        fn = cmd_report
+    elif route == "/api/predeploy":
+        fn = cmd_predeploy
+        ns.version = params.get("version")
+        ns.allow_missing = str(params.get("allowMissing", "")).lower() in ("1", "true", "yes")
+    elif route == "/api/retarget":
+        fn = cmd_retarget
+        ns.version = params.get("version")
+        ns.classfiles = _as_list(params.get("classfiles"))
+        ns.sourcefiles = _as_list(params.get("sourcefiles"))
+    else:
+        return 404, {"ok": False, "error": "未知接口 " + route}
+
+    code, output = _capture(fn, cfg, ns)
+    body = {"ok": code == 200, "service": name, "log": output}
+    if code == 200:
+        body["latest"] = load_state(load_config(cfg_path), svc).get("latest")
+    return code, body
 
 
 def cmd_serve(cfg, args):
     port = args.port or cfg.get("serve", {}).get("port", 8900)
     root = cfg["dataDir"]
+    cfg_path = args.config
     os.makedirs(root, exist_ok=True)
     render_dashboard(cfg)
 
@@ -438,11 +687,145 @@ def cmd_serve(cfg, args):
         def log_message(self, fmt, *a):
             pass
 
+        def do_GET(self):
+            route = self._route()
+            if route.startswith("/api/") or route == "/agent.jar":
+                return self._api("GET")
+            return super().do_GET()
+
+        def do_POST(self):
+            return self._api("POST")
+
+        # ---- 以下是控制 API ----
+
+        def _route(self):
+            path = urllib.parse.urlsplit(self.path).path
+            return path.rstrip("/") or "/"
+
+        def _params(self):
+            query = urllib.parse.urlsplit(self.path).query
+            params = {k: v[-1] for k, v in urllib.parse.parse_qs(query).items()}
+            length = int(self.headers.get("Content-Length") or 0)
+            # 上传接口的正文是二进制压缩包，留给 _upload 自己读，这里绝不能碰
+            if length and self._route() != "/api/upload-classes":
+                raw = self.rfile.read(length).decode("utf-8", "replace").strip()
+                if raw.startswith("{"):
+                    try:
+                        params.update(json.loads(raw))
+                    except ValueError:
+                        pass
+                elif raw:
+                    params.update({k: v[-1] for k, v in urllib.parse.parse_qs(raw).items()})
+            return params
+
+        def _authorized(self, current, params):
+            expected = _token(current)
+            if not expected or self._route() == "/api/health":
+                return True
+            given = self.headers.get("X-Covhub-Token") or params.get("token") or ""
+            return given == expected
+
+        def _send(self, code, payload, ctype="application/json; charset=utf-8"):
+            if isinstance(payload, bytes):
+                data = payload
+            else:
+                data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _upload(self, current, params):
+            """接收 class 产物压缩包（tar.gz / zip），可选顺手 retarget。
+
+            正文是二进制，不能走 _params()，所以这里单独读 —— 大包直接落盘，
+            不整个读进内存。
+            """
+            name, version = params.get("service"), params.get("version")
+            if not name or not version:
+                return self._send(400, {"ok": False, "error": "需要参数 service 与 version"})
+            if not any(s["name"] == name for s in current.get("services", [])):
+                return self._send(404, {"ok": False, "error": "配置里没有名为 %r 的服务" % name})
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return self._send(400, {"ok": False, "error": "请求体为空，用 --data-binary 上传压缩包"})
+
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".upload")
+            try:
+                remaining = length
+                while remaining > 0:
+                    chunk = self.rfile.read(min(1 << 20, remaining))
+                    if not chunk:
+                        break
+                    tmp.write(chunk)
+                    remaining -= len(chunk)
+                tmp.close()
+                svc = find_service(current, name)
+                with _LOCK:
+                    dest, count = store_classes(current, svc, version, tmp.name)
+            except Exception as exc:
+                return self._send(400, {"ok": False, "error": str(exc)})
+            finally:
+                os.unlink(tmp.name)
+
+            body = {"ok": True, "service": name, "version": version,
+                    "path": dest, "classes": count}
+            # retarget=1：上传完直接把配置指向这份产物，省一次调用
+            if str(params.get("retarget", "")).lower() in ("1", "true", "yes"):
+                ns = argparse.Namespace(config=cfg_path, service=name, version=version,
+                                        classfiles=[dest], sourcefiles=None)
+                code, out = _capture(cmd_retarget, current, ns)
+                body["retarget"] = out
+                if code != 200:
+                    body["ok"] = False
+                    return self._send(code, body)
+            self._send(200, body)
+
+        def _api(self, method):
+            route = self._route()
+            try:
+                params = self._params()
+                current = load_config(cfg_path)
+            except SystemExit:
+                return self._send(500, {"ok": False, "error": "配置文件读取失败"})
+            if not self._authorized(current, params):
+                return self._send(401, {"ok": False, "error": "令牌无效或缺失"})
+
+            # agent jar 直接从 hub 下载：被测机器不必预先铺一份，
+            # 容器的 initContainer 一条 curl 就能拿到。
+            if route in ("/api/agent.jar", "/agent.jar"):
+                jar = current["jacocoAgent"]
+                if not os.path.isfile(jar):
+                    return self._send(404, {"ok": False, "error": "找不到 " + jar})
+                with open(jar, "rb") as f:
+                    return self._send(200, f.read(), "application/java-archive")
+
+            if route == "/api/upload-classes":
+                return self._upload(current, params)
+
+            code, body = api_dispatch(cfg_path, method, route, params)
+            if route != "/api/health":
+                log("%s %s -> %d" % (method, self.path, code))
+
+            # 纯文本模式，方便 shell 里直接 $(curl ...) 取参数串
+            if code == 200 and params.get("format") == "text" and "agentOpts" in body:
+                return self._send(200, (body["agentOpts"] + "\n").encode("utf-8"),
+                                  "text/plain; charset=utf-8")
+            self._send(code, body)
+
     class Server(socketserver.ThreadingTCPServer):
         allow_reuse_address = True
         daemon_threads = True
 
+    if getattr(args, "with_watch", False):
+        interval = args.interval or cfg.get("watch", {}).get("intervalSeconds", 300)
+        threading.Thread(target=watch_loop, args=(cfg_path, interval), daemon=True).start()
+        log("采集线程已启动，每 %d 秒轮询一次" % interval)
+
     log("看板已启动： http://127.0.0.1:%d/  （根目录 %s）" % (port, root))
+    log("控制 API： http://127.0.0.1:%d/api/health%s"
+        % (port, "" if _token(cfg) else "    [未设置 serve.token，任何人都能调写接口]"))
     with Server(("0.0.0.0", port), Handler) as httpd:
         httpd.serve_forever()
 
@@ -677,11 +1060,20 @@ def main():
     p = sub.add_parser("report", help="用已有 exec 重新出报告")
     p.add_argument("service")
 
+    p = sub.add_parser("retarget", help="发版后更新配置里的 version / classfiles")
+    p.add_argument("service")
+    p.add_argument("--version", help="新版本标识")
+    p.add_argument("--classfiles", nargs="+", help="新版本 class 产物路径，可多个")
+    p.add_argument("--sourcefiles", nargs="+", help="新版本源码路径，可多个")
+
     p = sub.add_parser("watch", help="守护进程：定时轮询全部目标")
     p.add_argument("--interval", type=int, help="间隔秒数")
 
-    p = sub.add_parser("serve", help="起 HTTP 服务托管看板")
+    p = sub.add_parser("serve", help="起 HTTP 服务：看板 + 远程控制 API")
     p.add_argument("--port", type=int)
+    p.add_argument("--with-watch", action="store_true",
+                   help="同一进程内跑采集轮询，整套方案只需要这一个服务端")
+    p.add_argument("--interval", type=int, help="--with-watch 的轮询间隔秒数")
 
     args = parser.parse_args()
 
@@ -689,15 +1081,17 @@ def main():
         return cmd_init(args.config, args)
 
     cfg = load_config(args.config)
-    for key in ("jacocoCli", "jacocoAgent"):
+    needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": ()}.get(
+        args.cmd, ("jacocoCli", "jacocoAgent"))
+    for key in needs:
         if not os.path.isfile(cfg.get(key, "")):
             die("配置项 %s 指向的文件不存在：%s" % (key, cfg.get(key)))
     os.makedirs(cfg["dataDir"], exist_ok=True)
 
     handlers = {
         "agent-opts": cmd_agent_opts, "status": cmd_status, "dump": cmd_dump,
-        "predeploy": cmd_predeploy, "report": cmd_report, "watch": cmd_watch,
-        "serve": cmd_serve,
+        "predeploy": cmd_predeploy, "report": cmd_report, "retarget": cmd_retarget,
+        "watch": cmd_watch, "serve": cmd_serve,
     }
     try:
         handlers[args.cmd](cfg, args)

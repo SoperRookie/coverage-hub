@@ -49,6 +49,8 @@ runtime project 只关心覆盖率，代码异味/重复率/安全热点这些�
 发版流水线第 6 步会自动推。手工推用 `push-runtime.sh`：
 
 ```bash
+# 报告在 hub 上，脚本会自己下回来；本机只要有 curl 和 sonar-scanner
+export COVHUB_URL=http://covhub.internal:8900
 ./push-runtime.sh order-service 1.4.2
 ```
 
@@ -61,7 +63,11 @@ sonar-scanner \
   -Dsonar.projectVersion=1.4.2 \
   -Dsonar.sources=/opt/src/order-service/src/main/java \
   -Dsonar.java.binaries=/opt/artifacts/order-service/1.4.2 \
-  -Dsonar.coverage.jacoco.xmlReportPaths=/opt/coverage-hub/data/order-service/versions/1.4.2/jacoco.xml
+  -Dsonar.coverage.jacoco.xmlReportPaths=jacoco-runtime.xml
+
+# 其中的 jacoco.xml 先从 hub 取回来：
+curl -sSf -o jacoco-runtime.xml \
+  "http://covhub.internal:8900/order-service/versions/1.4.2/jacoco.xml"
 ```
 
 ### 两个前置条件

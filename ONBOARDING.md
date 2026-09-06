@@ -4,13 +4,24 @@
 
 接入不需要修改被测项目的业务代码。构建期要加一个聚合模块（只为出单测聚合报告），运行期完全靠 JVM 参数注入，零侵入。
 
+**服务端全公司只有一个。** 每接一个服务，被测机器上多出来的东西只有一个
+`jacocoagent.jar`（还能从 hub 现下）；发版节点上一行 Python 都不需要装。谁需要装什么，一张表说清：
+
+| 机器 | 需要什么 |
+|---|---|
+| covhub 那一台（唯一的服务端） | Python 3、java、`covhub.py`、`lib/*.jar`、`targets.json` |
+| 被测服务所在机器 | `jacocoagent.jar`（`covhub fetch-agent` 下载），能被 hub 连上 6300 |
+| 发版节点 / 流水线 | `curl`（用 `integration/covhub-client.sh` 包一层） |
+
 ---
 
 ## 第一部分：搭建 coverage-hub（一次性）
 
 ### 1. 选一台机器
 
-要求：能连到所有被测服务的 agent 端口，装有 Python 3 和 java。通常就放在跑 Jenkins agent 的机器，或者测试环境的一台管理机。
+**只需要一台**，整个团队共用。要求：能连到所有被测服务的 agent 端口，装有 Python 3 和 java。通常放测试环境的一台管理机。
+
+被测服务和发版节点都不在这台机器上跑任何 covhub 进程 —— 它们通过 HTTP 让这台机器干活。
 
 ### 2. 部署
 
@@ -28,45 +39,45 @@ cp <jacoco 发行包>/lib/jacococli.jar   lib/
 python3 covhub.py init          # 生成 targets.json 模板
 ```
 
+打开 `targets.json`，把 `serve.token` 改成一串随机字符串：
+
+```bash
+python3 - <<'PY'
+import json, secrets, pathlib
+p = pathlib.Path("targets.json"); c = json.loads(p.read_text(encoding="utf-8"))
+c.setdefault("serve", {})["token"] = secrets.token_urlsafe(24)
+p.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
+print("serve.token =", c["serve"]["token"])
+PY
+```
+
+这个令牌是控制 API 的唯一门禁 —— 不配就是**任何能连上 8900 的人都能拉数据、清零计数器**。记下来，发版节点要用。
+
 验证：
 
 ```bash
 python3 covhub.py status        # 应打印表头，服务列表为空或示例
 ```
 
-### 3. 起看板
+### 3. 起服务端
+
+一个进程包含全部三件事：看板、控制 API、定时采集。
 
 ```bash
-nohup python3 covhub.py serve --port 8900 > serve.log 2>&1 &
-nohup python3 covhub.py watch  > watch.log 2>&1 &
+nohup python3 covhub.py serve --with-watch --port 8900 > covhub.log 2>&1 &
 ```
 
-生产化建议做成两个 systemd unit：
+生产化做成一个 systemd unit：
 
 ```ini
-# /etc/systemd/system/covhub-serve.service
+# /etc/systemd/system/covhub.service
 [Unit]
-Description=covhub dashboard
+Description=covhub —— 覆盖率看板 / 控制 API / 采集
 After=network.target
 
 [Service]
 WorkingDirectory=/opt/coverage-hub
-ExecStart=/usr/bin/python3 /opt/coverage-hub/covhub.py serve --port 8900
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```ini
-# /etc/systemd/system/covhub-watch.service
-[Unit]
-Description=covhub collector
-After=network.target
-
-[Service]
-WorkingDirectory=/opt/coverage-hub
-ExecStart=/usr/bin/python3 /opt/coverage-hub/covhub.py watch
+ExecStart=/usr/bin/python3 /opt/coverage-hub/covhub.py serve --with-watch --port 8900
 Restart=always
 
 [Install]
@@ -75,12 +86,31 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now covhub-serve covhub-watch
+sudo systemctl enable --now covhub
 ```
 
-打开 `http://<这台机器>:8900/` 应能看到空看板。
+打开 `http://<这台机器>:8900/` 应能看到空看板，`curl http://<这台机器>:8900/api/health` 应返回 `{"ok": true, ...}`。
 
-### 4. 规划 agent 端口
+> 采集轮询和 API 在同一个进程里，写操作会互相排队 —— 这正是要的：结算和轮询不会打架。
+> 想拆成两个进程也行（`serve` 不带 `--with-watch`，另起一个 `watch`），但那样就有两个进程在写同一份数据，只在你确定采集耗时会拖慢 API 时才这么做。
+
+### 4. 把客户端脚本发给各团队
+
+```bash
+# 发版节点 / 被测机器上，只要这一个脚本 + curl
+sudo cp integration/covhub-client.sh /opt/bin/covhub-client.sh
+sudo chmod +x /opt/bin/covhub-client.sh
+```
+
+用之前设两个环境变量：
+
+```bash
+export COVHUB_URL=http://<covhub 机器>:8900
+export COVHUB_TOKEN=<上一步生成的 serve.token>
+/opt/bin/covhub-client.sh health
+```
+
+### 5. 规划 agent 端口
 
 **一台宿主机上的多个服务必须用不同端口。** 提前定好，写进表里避免撞车：
 
@@ -155,11 +185,16 @@ find . -type d -path '*/target/classes' -not -path './coverage-artifacts/*' \
 tar czf coverage-classes-${VERSION}.tar.gz coverage-artifacts
 ```
 
-归档后按版本投放到 covhub 机器上：
+归档后把压缩包传给 hub —— **报告是 hub 出的，class 就必须在 hub 上**：
 
+```bash
+covhub-client.sh upload-classes order-service 1.4.2 \
+                 coverage-classes-1.4.2.tar.gz --retarget
 ```
-/opt/artifacts/order-service/1.4.2/
-```
+
+hub 会解到自己的 `data/order-service/artifacts/1.4.2/`，`--retarget` 顺手把配置指过去。两台机器之间不需要 NFS、不需要 scp 免密。
+
+（hub 上本来就有产物的话，也可以跳过上传，直接在 `targets.json` 里把 `classfiles` 写成本地路径。）
 
 ### Step 4 · 在 targets.json 里加一条
 
@@ -172,7 +207,7 @@ tar czf coverage-classes-${VERSION}.tar.gz coverage-artifacts
   "bindAddress": "0.0.0.0",
   "includes":    ["com.example.order.*"],
   "excludes":    [],
-  "classfiles":  ["/opt/artifacts/order-service/1.4.2"],
+  "classfiles":  ["./data/order-service/artifacts/1.4.2"],
   "sourcefiles": ["/opt/src/order-service/src/main/java"],
   "reportExcludes": ["com/example/order/**/dto/**", "com/example/order/*/mapper/**"],
   "sourceEncoding": "UTF-8"
@@ -189,6 +224,8 @@ tar czf coverage-classes-${VERSION}.tar.gz coverage-artifacts
 | `reportExcludes` | 报告端过滤，Ant 路径风格用 `/`。和 `includes` 是两个层次，见下 |
 | `sourcefiles` | 可选，配了才能在报告里下钻到源码行 |
 
+`classfiles` / `sourcefiles` 都是 **hub 那台机器上**的路径 —— 报告是 hub 出的。用 `upload-classes --retarget` 传产物的话，这一项会被自动填成 hub 的 `data/<service>/artifacts/<版本>/`，不用手写。
+
 **`excludes` 与 `reportExcludes` 的区别很重要：**
 
 - `excludes` 传给 agent，决定**是否插桩**。被排除的类连数据都不会产生，事后无法找回，改了要重启服务。
@@ -198,13 +235,19 @@ tar czf coverage-classes-${VERSION}.tar.gz coverage-artifacts
 
 ### Step 5 · 注入 agent
 
-先取参数串：
+先在被测机器上把 agent jar 拿下来，再取参数串。**这台机器不需要装 covhub**：
 
 ```bash
-cd /opt/coverage-hub
-python3 covhub.py agent-opts order-service
-# -javaagent:/opt/coverage-hub/lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*,sessionid=1.4.2
+export COVHUB_URL=http://<covhub 机器>:8900
+export COVHUB_TOKEN=<serve.token>
+
+sudo mkdir -p /opt/jacoco-lib
+covhub-client.sh fetch-agent /opt/jacoco-lib/jacocoagent.jar
+covhub-client.sh agent-opts  order-service
+# -javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*,sessionid=1.4.2
 ```
+
+参数串里的 jar 路径取自 hub 的 `targets.json` 里的 `jacocoAgent`。被测机器上放在别处的话，把那一项配成**被测端的路径**（容器场景就是容器内路径）。
 
 按部署方式选一种注入。**共同点只有一条：设成目标 JVM 的 `JAVA_TOOL_OPTIONS`。**
 
@@ -214,7 +257,7 @@ python3 covhub.py agent-opts order-service
 sudo mkdir -p /etc/systemd/system/order-service.service.d
 sudo tee /etc/systemd/system/order-service.service.d/covhub.conf <<'EOF'
 [Service]
-Environment="JAVA_TOOL_OPTIONS=-javaagent:/opt/coverage-hub/lib/jacocoagent.jar=output=tcpserver,address=127.0.0.1,port=6300,includes=com.example.order.*"
+Environment="JAVA_TOOL_OPTIONS=-javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*"
 EOF
 sudo systemctl daemon-reload
 sudo systemctl restart order-service
@@ -226,7 +269,7 @@ sudo systemctl restart order-service
 
 ```bash
 docker run -d --name order-service \
-  -v /opt/coverage-hub/lib:/opt/jacoco:ro \
+  -v /opt/jacoco-lib:/opt/jacoco:ro \
   -e JAVA_TOOL_OPTIONS="-javaagent:/opt/jacoco/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*" \
   -p 8080:8080 \
   -p 6300:6300 \
@@ -235,7 +278,7 @@ docker run -d --name order-service \
 
 三个必须注意的点：
 
-1. agent jar 要**挂进容器**，且 `targets.json` 里的 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
+1. agent jar 要**挂进容器**（宿主机那份用 `covhub-client.sh fetch-agent` 下载），且 hub 的 `targets.json` 里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
 2. `bindAddress` 必须 `0.0.0.0`，绑回环地址容器外连不进去
 3. **6300 端口要映射出来**，否则 covhub 连不上
 
@@ -250,7 +293,7 @@ services:
     environment:
       JAVA_TOOL_OPTIONS: "-javaagent:/opt/jacoco/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*"
     volumes:
-      - /opt/coverage-hub/lib:/opt/jacoco:ro
+      - /opt/jacoco-lib:/opt/jacoco:ro
     ports:
       - "6300:6300"
 ```
@@ -272,8 +315,8 @@ spec:
           emptyDir: {}
       initContainers:
         - name: fetch-agent
-          image: myrepo/coverage-hub:latest
-          command: ["sh","-c","cp /opt/jacoco/jacocoagent.jar /shared/"]
+          image: curlimages/curl:latest        # 不必自己维护带 jar 的镜像
+          command: ["sh","-c","curl -sSf -o /shared/jacocoagent.jar http://covhub.internal:8900/api/agent.jar"]
           volumeMounts:
             - { name: jacoco, mountPath: /shared }
       containers:
@@ -297,16 +340,19 @@ kubectl -n prod rollout status deployment/order-service
 
 ### Step 6 · 验证接入
 
+在任意一台能访问 hub 的机器上（不需要是 hub 本机）：
+
 ```bash
-cd /opt/coverage-hub
+export COVHUB_URL=http://<covhub 机器>:8900
+export COVHUB_TOKEN=<serve.token>
 
 # 1. 连通性
-python3 covhub.py status order-service
-#   「连通」列应为 ok
+covhub-client.sh status order-service
+#   "online": true
 
 # 2. 拉一次快照
-python3 covhub.py dump order-service
-#   应打印覆盖率数字，且「触达类」不为 0
+covhub-client.sh dump order-service
+#   返回体里应有覆盖率数字，且 classesHit 不为 0
 
 # 3. 看板
 #   打开 http://<covhub 机器>:8900/ 应看到该服务的卡片
@@ -319,13 +365,15 @@ python3 covhub.py dump order-service
 装好 Shared Library 后（见 `integration/jenkins/README.md`），发版流水线按这个顺序：
 
 ```
-1. predeploy   结算旧版本覆盖率   ← 必须在停服之前
-2. copy        取新版本 class 产物
-3. deploy      停 → 部署 → 起（agent 经 JAVA_TOOL_OPTIONS 注入）
-4. retarget    更新 targets.json 的 version 与 classfiles
-5. verify      确认新实例 agent 就绪
-6. sonar       推旧版本的 jacoco.xml
+1. predeploy       结算旧版本覆盖率   ← 必须在停服之前
+2. copy            取新版本 class 产物
+3. deploy          停 → 部署 → 起（agent 经 JAVA_TOOL_OPTIONS 注入）
+4. upload-classes  把新产物传给 hub 并指过去（= retarget）
+5. verify          确认新实例 agent 就绪
+6. sonar           推旧版本的 jacoco.xml
 ```
+
+六步全是发给 hub 的 HTTP 请求，**发版节点只要有 curl**。不用 Jenkins 的话，`integration/deployment-snippets.md` 里有等价的裸 shell 版本。
 
 第 1 步**一旦跑到停服之后，那段数据就永久丢失** —— agent 随进程消失，没有任何补救手段。
 
@@ -335,8 +383,8 @@ python3 covhub.py dump order-service
 
 ## 接入验收清单
 
-- [ ] `covhub.py status <service>` 连通列为 `ok`
-- [ ] `covhub.py dump <service>` 能出数字，触达类不为 0
+- [ ] `covhub-client.sh status <service>` 里 `"online": true`
+- [ ] `covhub-client.sh dump <service>` 能出数字，`classesHit` 不为 0
 - [ ] 手工操作几个页面后再 dump，覆盖率**有明显上涨**
 - [ ] 看板上能看到该服务卡片，点进去能下钻到源码行、看到绿色标记
 - [ ] `classfiles` 指向的 class 与线上运行版本一致（报告不是满屏全红）
@@ -344,6 +392,7 @@ python3 covhub.py dump order-service
 - [ ] 发版流水线里 `predeploy` 排在停服之前
 - [ ] agent 端口没有和同机其他服务撞车
 - [ ] agent 端口**没有暴露到公网**（无认证，谁都能拉数据和清零）
+- [ ] hub 配了 `serve.token`，且 8900 端口也没有暴露到公网
 
 ---
 
@@ -351,7 +400,9 @@ python3 covhub.py dump order-service
 
 | 现象 | 原因 |
 |---|---|
-| `status` 连通列是 `--` | 服务没起；`output` 不是 `tcpserver`；`bindAddress` 绑了回环但要跨机访问；容器端口没映射；防火墙 |
+| 客户端报 `HTTP 401` | `COVHUB_TOKEN` 没设或和 hub 的 `serve.token` 对不上 |
+| 客户端报"连不上 hub" | `COVHUB_URL` 写错；hub 没起；8900 被防火墙挡了 |
+| `status` 里 `"online": false` / 连通列是 `--` | 服务没起；`output` 不是 `tcpserver`；`bindAddress` 绑了回环但要跨机访问；容器端口没映射；防火墙 |
 | dump 成功但覆盖率恒为 0 | `includes` 写错（用了 `/` 而不是 `.`，或包名拼错） |
 | 报告满屏全红，触达类为 0 | `classfiles` 与运行中的版本对不上 —— 最常见的坑 |
 | 部分类始终 0 | 被 `excludes` 排除了（采集阶段就没插桩），需改配置并**重启服务** |
@@ -372,5 +423,7 @@ python3 covhub.py dump order-service
 | Docker | 去掉 `-e JAVA_TOOL_OPTIONS` 重新起容器 |
 | compose | 不再传 `-f docker-compose.covhub.yml` |
 | k8s | `kubectl set env deployment/X JAVA_TOOL_OPTIONS-`（末尾减号表示删除该变量） |
+
+被测机器上再删掉 `/opt/jacoco-lib/jacocoagent.jar` 就干净了 —— 从头到尾这台机器上就只多过这一个文件。
 
 构建期的聚合模块留着无害 —— 它只在 `verify` 阶段多生成一份报告。
