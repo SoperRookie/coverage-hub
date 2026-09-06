@@ -5,9 +5,15 @@
  * 做三件事：
  *   1. 跑测试并产出各模块 jacoco.exec
  *   2. 由聚合模块产出 jacoco-aggregate/jacoco.xml
- *   3. 推 SonarQube，并归档 class 产物 —— 归档这步是给运行期覆盖率用的
+ *   3. 推 SonarQube，并归档 class 产物（可选，见下）
  *
- * 前置：被测项目已加入 integration/maven-aggregate-module 那个聚合模块。
+ * 【前置】被测项目已加入 integration/maven-aggregate-module 那个聚合模块 ——
+ * 这要改研发的 pom。不能改的话这整条流水线都用不上，运行期覆盖率不依赖它，
+ * 直接看 Jenkinsfile.deploy 即可。
+ *
+ * 【归档那一步现在是可选的】v1.1.0 起 class 由 agent 的 classDumpDir 在运行期
+ * 自己交出，与 exec 的指纹必然匹配。构建期归档保留下来只是给「愿意改构建、
+ * 且想两份都留着」的项目用；两份都有时 covhub 优先用 classdumpdir 那份。
  */
 
 pipeline {
@@ -100,10 +106,13 @@ pipeline {
             }
         }
 
-        stage('Archive for runtime coverage') {
-            // 关键：运行期覆盖率出报告时，--classfiles 必须是【运行中那个版本】的 class。
-            // 这里归档下来，发版时 covhub.retarget 就能指过去；
-            // 没有它，日后拿不到对应 class，归档的 exec 就成了废数据。
+        stage('Archive for runtime coverage (可选)') {
+            // 运行期出报告时，--classfiles 必须是【运行中那个版本】的 class。
+            //
+            // v1.1.0 起这不再是唯一来源：agent 的 classDumpDir 会在运行期把实际
+            // 加载到的 class 落盘，指纹必然匹配，且不需要构建流水线配合。
+            // 这一步保留给「愿意改构建、想两份都留着」的项目 —— 两份都有时
+            // covhub 优先用 classdumpdir 那份。整段删掉不影响运行期覆盖率。
             steps {
                 sh '''
                     rm -rf coverage-artifacts && mkdir -p coverage-artifacts
@@ -122,7 +131,7 @@ pipeline {
 
     post {
         success {
-            echo "构建期覆盖率已推送 Sonar；class 产物已归档，可供发版流水线取用。"
+            echo "构建期覆盖率已推送 Sonar；class 产物已归档（运行期另有 classDumpDir 一路，不依赖这里）。"
         }
     }
 }

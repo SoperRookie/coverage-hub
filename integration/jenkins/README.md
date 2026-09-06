@@ -6,7 +6,7 @@
 |---|---|
 | `vars/covhub.groovy` | Shared Library，把 covhub 命令封装成 pipeline 步骤 |
 | `vars/deployTarget.groovy` | Shared Library，五种部署方式的实现 |
-| `Jenkinsfile.build` | 构建期：跑测试 → 聚合报告 → 推 Sonar → **归档 class 产物** |
+| `Jenkinsfile.build` | 构建期：跑测试 → 聚合报告 → 推 Sonar → 归档 class 产物（**要改研发的 pom，不能改就整条跳过**） |
 | `Jenkinsfile.deploy` | 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复 |
 
 ## 一、安装 Shared Library
@@ -52,7 +52,9 @@
 
 `API_VERSION=1.44` 这一条针对用 Testcontainers 的项目：Docker Engine 29+ 的最低 API 版本是 1.40，而 Testcontainers 1.21.x 内置的 docker-java 默认用 1.32，会被服务端以 HTTP 400 拒绝，症状是 `Could not find a valid Docker environment`。注意属性名是 `api.version`，不是 docker CLI 的 `DOCKER_API_VERSION`（后者设了完全无效）。
 
-**归档 class 产物那一步不是可选的。** 运行期覆盖率出报告时，`--classfiles` 必须是当时运行的那份 class —— JaCoCo 按 CRC64 class id 匹配数据，class 对不上，报告全是"未覆盖"。构建时不归档，日后就没有任何办法为归档的 exec 重新出报告。
+**归档 class 产物那一步现在是可选的。** 运行期出报告时 `--classfiles` 必须是当时运行的那份 class（JaCoCo 按 CRC64 class id 匹配，对不上报告全是"未覆盖"），但 v1.1.0 起这份 class 由 agent 的 `classDumpDir` 在运行期自己交出，不再需要构建流水线配合。
+
+保留构建期归档只对「愿意改构建、想两份都留着」的项目有意义；两份都有时 covhub 优先用 classdumpdir 那份 —— 它是运行时真相，还包含构建产物里根本不存在的动态生成类。
 
 ## 四、发版流水线的顺序
 
