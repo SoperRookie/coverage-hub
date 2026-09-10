@@ -19,7 +19,7 @@ box "covhub 服务端（唯一）" #F4F6F5
   participant "控制 API\n:8900" as API
   participant "jacococli" as CLI
   database "data/" as D
-  entity "targets.json" as CFG
+  entity "targets.yaml" as CFG
 end box
 
 participant "旧实例 agent" as OLD

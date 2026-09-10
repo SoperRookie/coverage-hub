@@ -37,7 +37,7 @@ void run(Map args) {
  *      agentMountPath（容器内挂载点，默认 /opt/jacoco）、
  *      extraArgs（追加到 docker run 的其他参数）、network、envs（Map）
  *
- * 注意：targets.json 里该服务的 jacocoAgent 必须写成【容器内】路径，
+ * 注意：hub 配置里该服务的 jacocoAgent 必须写成【容器内】路径，
  * 也就是 agentMountPath 下的 jacocoagent.jar —— agent 是在容器里加载的。
  */
 void docker(Map args) {

@@ -9,7 +9,7 @@
 
 | 机器 | 需要什么 |
 |---|---|
-| covhub 那一台（唯一的服务端） | Python 3、java、`covhub.py`、`lib/*.jar`、`targets.json` |
+| covhub 那一台（唯一的服务端） | Python 3、java、`covhub.py`、`lib/*.jar`、`targets.yaml`（YAML 配置要 `pip install PyYAML`；也可以用 `targets.json`，零依赖） |
 | 被测服务所在机器 | `jacocoagent.jar`（`covhub fetch-agent` 下载），能被 hub 连上 6300 |
 | 发版节点 / 流水线 | `curl`（用 `integration/covhub-client.sh` 包一层） |
 | **被测项目本身** | **什么都不用改** —— 不改代码、不改 pom、不改构建流水线 |
@@ -37,22 +37,21 @@ mkdir -p lib
 cp <jacoco 发行包>/lib/jacocoagent.jar lib/
 cp <jacoco 发行包>/lib/jacococli.jar   lib/
 
-python3 covhub.py init          # 生成 targets.json 模板
+python3 covhub.py init          # 生成 targets.yaml 模板（--json 生成 JSON 版）
 ```
 
-打开 `targets.json`，把 `serve.token` 改成一串随机字符串：
+生成一串随机字符串，填进 `targets.yaml` 的 `serve.token`：
 
 ```bash
-python3 - <<'PY'
-import json, secrets, pathlib
-p = pathlib.Path("targets.json"); c = json.loads(p.read_text(encoding="utf-8"))
-c.setdefault("serve", {})["token"] = secrets.token_urlsafe(24)
-p.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
-print("serve.token =", c["serve"]["token"])
-PY
+python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 ```
 
-这个令牌是控制 API 的唯一门禁 —— 不配就是**任何能连上 8900 的人都能拉数据、清零计数器**。记下来，发版节点要用。
+这个令牌是 8900 的唯一门禁，控制 API 和静态报告目录都归它管 —— 不配就是**任何能连上
+8900 的人都能拉数据、清零计数器，并下载 `data/` 底下的一切**（含 `artifacts/` 里线上
+跑的那份字节码）。记下来，发版节点和浏览器都要用。
+
+配了令牌之后**浏览器第一次打开看板要带上它**：`http://<hub>:8900/?token=<令牌>`。
+hub 会种一个 Cookie 再跳回干净地址，之后点报告、翻历史版本都不必再带。
 
 验证：
 
@@ -182,7 +181,7 @@ sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregat
 
 出报告要有 class，而且必须是**产生这批 exec 的那一份** —— JaCoCo 按类的 CRC64 指纹匹配，对不上报告就全红，而且**不会报错**。
 
-v1.1.0 的做法是让 agent 自己把它加载到的 class 落盘，这样匹配是定义上必然成立的，不需要被测项目做任何事。在 `targets.json` 里给该服务加一项（**被测端路径**）：
+v1.1.0 的做法是让 agent 自己把它加载到的 class 落盘，这样匹配是定义上必然成立的，不需要被测项目做任何事。在配置里给该服务加一项（**被测端路径**）：
 
 ```json
 "classDumpDir": "/tmp/covhub-classes/order-service"
@@ -223,24 +222,29 @@ rm -rf cls cls.tgz /tmp/covhub-classes/order-service
 covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
 ```
 
-### Step 4 · 在 targets.json 里加一条
+### Step 4 · 在配置的 services 里加一条
 
-```json
-{
-  "name":        "order-service",
-  "version":     "1.4.2",
-  "address":     "10.0.1.21",
-  "port":        6300,
-  "bindAddress": "0.0.0.0",
-  "includes":    ["com.example.order.*"],
-  "excludes":    [],
-  "classDumpDir": "/tmp/covhub-classes/order-service",
-  "classfiles":  ["./data/order-service/artifacts/1.4.2"],
-  "sourcefiles": ["/opt/src/order-service/src/main/java"],
-  "reportExcludes": ["com/example/order/**/dto/**", "com/example/order/*/mapper/**"],
-  "sourceEncoding": "UTF-8"
-}
+```yaml
+  - name: order-service
+    version: "1.4.2"          # 版本号一律加引号，裸写的 1.4 会被读成数字
+    address: 10.0.1.21
+    port: 6300
+    bindAddress: 0.0.0.0
+    includes:
+      - com.example.order.*
+    excludes: []
+    classDumpDir: /tmp/covhub-classes/order-service
+    classfiles:
+      - ./data/order-service/artifacts/1.4.2
+    sourcefiles:
+      - /opt/src/order-service/src/main/java
+    reportExcludes:
+      - com/example/order/**/dto/**
+      - com/example/order/*/mapper/**
+    sourceEncoding: UTF-8
 ```
+
+> 用 `targets.json` 的话，同样一条写成 JSON 对象放进 `services` 数组，字段名完全一样。
 
 几个容易配错的地方：
 
@@ -277,7 +281,7 @@ covhub-client.sh agent-opts  order-service
 # -javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*,sessionid=1.4.2
 ```
 
-参数串里的 jar 路径取自 hub 的 `targets.json` 里的 `jacocoAgent`。被测机器上放在别处的话，把那一项配成**被测端的路径**（容器场景就是容器内路径）。
+参数串里的 jar 路径取自 hub 配置里的 `jacocoAgent`。被测机器上放在别处的话，把那一项配成**被测端的路径**（容器场景就是容器内路径）。
 
 按部署方式选一种注入。**共同点只有一条：设成目标 JVM 的 `JAVA_TOOL_OPTIONS`。**
 
@@ -308,7 +312,7 @@ docker run -d --name order-service \
 
 三个必须注意的点：
 
-1. agent jar 要**挂进容器**（宿主机那份用 `covhub-client.sh fetch-agent` 下载），且 hub 的 `targets.json` 里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
+1. agent jar 要**挂进容器**（宿主机那份用 `covhub-client.sh fetch-agent` 下载），且 hub 配置里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
 2. `bindAddress` 必须 `0.0.0.0`，绑回环地址容器外连不进去
 3. **6300 端口要映射出来**，否则 covhub 连不上
 
@@ -376,7 +380,7 @@ kubectl -n prod rollout status deployment/order-service
 push 让被测端主动连回来：
 
 - 被测端不允许开入站端口，或容器网络只出不进
-- 服务有多副本，且会自动扩缩（用 pull 得给每个副本在 `targets.json` 里配一条，
+- 服务有多副本，且会自动扩缩（用 pull 得给每个副本在配置里配一条，
   一扩缩就得改配置）
 - 跨网段、跨防火墙，只有单向可达
 
@@ -422,8 +426,9 @@ covhub-client.sh agent-opts order-service
   启动日志里会告警。
 - **`sessionid` 必须是服务名**（`agent-opts` 会自动设好）。收集端靠它认领连接 ——
   手工拼参数串时改了它，hub 会报「匹配不到任何服务」。
-- **断代自动检测对 push 不生效**（每个副本有各自的会话）。push 的版本切段靠
-  `predeploy`，或 class 指纹变化。
+- **push 的断代检测抓的是混版本，不是重启**（副本各自重启、扩缩容都是常态）。
+  滚动发版中途新旧副本同时在线时，hub 会告警并在看板上标出来，但**不自动封存**。
+  版本切段仍然靠 `predeploy`。
 
 ### Step 6 · 验证接入
 
@@ -484,6 +489,7 @@ covhub-client.sh diagnose order-service
 - [ ] agent 端口没有和同机其他服务撞车
 - [ ] agent 端口**没有暴露到公网**（无认证，谁都能拉数据和清零）
 - [ ] hub 配了 `serve.token`，且 8900 端口也没有暴露到公网
+- [ ] 不带令牌访问 `http://<hub>:8900/svc/state.json` 返回 401（没返回就是令牌没生效）
 
 ---
 
@@ -492,10 +498,12 @@ covhub-client.sh diagnose order-service
 | 现象 | 原因 |
 |---|---|
 | **任何覆盖率数字不对劲** | **先跑 `covhub-client.sh diagnose <service>`** —— 指纹匹配率、会话数、断代记录三样能定位下面绝大多数情况 |
-| push：日志说「匹配不到任何服务」 | agent 的 `sessionid` 和 `targets.json` 里的服务名对不上。用 `agent-opts` 生成参数串就不会错 |
+| push：日志说「匹配不到任何服务」 | agent 的 `sessionid` 和配置里的服务名对不上。用 `agent-opts` 生成参数串就不会错 |
 | push：实例连上了但没数据 | hub 没带 `--with-watch`，收集端起了但没人去取数 |
 | push：`status` 显示 `?` | 你在**另一个进程**里跑的 CLI，看不到收集端手上的连接 —— 那是「不知道」不是「离线」，看 API 或看板 |
 | 客户端报 `HTTP 401` | `COVHUB_TOKEN` 没设或和 hub 的 `serve.token` 对不上 |
+| 浏览器打开看板是一段 401 JSON | 配了 `serve.token` 但地址没带令牌。用 `http://<hub>:8900/?token=<令牌>` 打开一次，之后靠 Cookie |
+| 看板本来能开，某天开始要令牌 | hub 加了 `serve.token`（或设了 `COVHUB_TOKEN` 环境变量）。令牌现在同时管着静态目录 |
 | 客户端报"连不上 hub" | `COVHUB_URL` 写错；hub 没起；8900 被防火墙挡了 |
 | `status` 里 `"online": false` / 连通列是 `--` | 服务没起；`output` 不是 `tcpserver`；`bindAddress` 绑了回环但要跨机访问；容器端口没映射；防火墙 |
 | dump 成功但覆盖率恒为 0 | `includes` 写错（用了 `/` 而不是 `.`，或包名拼错） |
@@ -505,6 +513,8 @@ covhub-client.sh diagnose order-service
 | 源码页乱码 | `sourceEncoding` 没设成 `UTF-8` |
 | 覆盖率数字只涨不跌，跨了好几个版本 | 发版时没跑 `predeploy`。v1.1.0 起 hub 会自动检测进程重启并结算，但重启前最后一个轮询周期的数据仍会丢 —— 能在停服前调 `predeploy` 就还是要调 |
 | 看板上莫名多出一个版本归档 | 这是自动断代：hub 发现被测进程重启过，替你结算了上一周期。`diagnose` 的「断代记录」里能看到前后的会话启动时刻 |
+| push：看板报「在线实例跑着两份不同的 class」 | 滚动发版正在进行，新旧副本同时在线。这批 exec 跨了两个版本，对着任一份 class 产物都只能对上一半 —— 发版流程里补一次 `predeploy`，把旧版本先结算掉 |
+| push：某个副本的数据突然不见了 | 取数超时（默认 20 秒）后该实例会被丢弃，日志里是「已断开（timed out）」。副本会重连，但那一段覆盖率随实例消失，和 pull 一样没有补救手段 |
 | 服务启动明显变慢 | `includes` 范围太大，把框架类也插桩了。收窄到自己的业务包 |
 
 ---

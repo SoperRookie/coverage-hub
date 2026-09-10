@@ -1,11 +1,11 @@
-# coverage-hub v1.2.2
+# coverage-hub v1.3.0
 
 通用 JaCoCo 覆盖率方案：**构建期**自动出聚合报告推 SonarQube，**运行期**随服务启动自动采集、发版前自动结算、并提供实时在线看板。
 
 与被测服务无关 —— 任何 Java 服务只要能加 JVM 参数就能接入，不需要改被测项目的代码或 pom。
 
 **整套方案只部署一个服务端。** 被测服务所在的机器、发版节点都不装 Python、不装
-java、不放 `targets.json` —— 它们只需要 `curl`，以及被测 JVM 里挂的那个
+java、不放配置文件 —— 它们只需要 `curl`，以及被测 JVM 里挂的那个
 `jacocoagent.jar`（还能直接从 hub 下载）。详见 [§ 二·六 单点部署](#二六单点部署与远程-api)。
 
 **也不需要被测项目的构建流水线配合。** v1.1.0 起，出报告用的 class 由 agent 自己
@@ -28,7 +28,7 @@ export JAVA_TOOL_OPTIONS="$(python covhub.py agent-opts my-service)"
 # 然后照常启动服务
 ```
 
-`agent-opts` 会根据 `targets.json` 里该服务的配置生成完整参数串，例如：
+`agent-opts` 会根据配置里该服务的这几项生成完整参数串，例如：
 
 ```
 -javaagent:/opt/coverage-hub/lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,sessionid=1.4.2
@@ -174,8 +174,17 @@ order-service          ok(3)    62.4      48.1      1.4.3      2026-09-06T18:14:
 - **push 通道要求 `serve --with-watch`。** 连接是长连接、握在收集端手上，另起一个
   `watch` 进程够不着它们。单独跑 `serve` 会起收集端但不取数，启动日志里会警告。
 - **收集端口没有认证**，和 agent 端口一样，靠网络策略限制来源。
-- **断代自动检测对 push 不生效。** 每个副本有各自的会话，全局比对会互相打架。
-  push 服务的版本切段靠 `predeploy`，或 class 指纹变化。
+- **断代检测在 push 下换了个目标。** pull 靠比对进程启动时刻判断重启；push 是多副本，
+  副本各自重启和扩缩容都是常态，照搬那套会把每次扩容都当成一次断代。所以 push 抓的
+  是**混版本**——滚动发版中途新旧副本的数据落进同一批 exec，对着任何一份 class 产物
+  都只能对上一半，而 JaCoCo 不会为此报错。
+
+  判断只看各实例 class id 集合的包含关系：同一份产物、加载进度不同 → 互为子集（不报）；
+  真换了版本 → 双方都有对方没有的 id（报）。这条不依赖任何人填的版本号。
+
+  检出时**只告警、记进 `breaks` 让看板亮起来，不自动封存** —— 两批数据都真实有效，
+  只是分属两个版本，「到此为止」的语义不成立；多副本下自动封存还会凭空造出一堆归档。
+  版本切段仍然靠 `predeploy` 显式驱动。
 
 > 协议是自己实现的：`jacococli` 只有 `dump`（去连 tcpserver），没有收集端命令，
 > 接 tcpclient 方向反了，官方工具帮不上忙。实现在 `covhub.py` 的
@@ -325,53 +334,91 @@ hub 按两个来源找：先看 `artifacts/<版本>/`（`upload-classes` 传上�
 ### 访问控制
 
 配了 `serve.token`（或给 hub 进程设了环境变量 `COVHUB_TOKEN`）之后，除
-`/api/health` 外所有接口都要带 `X-Covhub-Token` 请求头或 `?token=`。**不配就是谁都
-能调**，包括 `predeploy` 那个会清零计数器的动作 —— 共享环境务必配上。
+`/api/health` 外，**8900 上的一切都要令牌** —— 控制接口和 `dataDir` 底下的静态文件
+一视同仁。**不配就是谁都能访问**，包括 `predeploy` 那个会清零计数器的动作 ——
+共享环境务必配上。
 
-看板本身（静态报告）不校验令牌，它和 agent 端口一样，应当靠网络策略限制来源。
-push 通道的收集端口（`collect.port`）同样没有认证 —— 任何能连上它的进程都能往里
+静态目录必须一起拦，是因为它底下不只有报告：`artifacts/` 是线上跑的那份字节码
+（反编译即源码），`exec/` 是不可再生的执行轨迹，`state.json` 有全部历史。只护住
+`/api/` 而把这棵树敞开，等于那道门白装。
+
+三种带令牌的方式：
+
+| 场景 | 怎么带 |
+|---|---|
+| 浏览器看看板 | 地址后加 `?token=<serve.token>`。hub 会种一个 `covhub_token` Cookie 再跳回干净地址，之后点进报告的相对链接都不必再带 |
+| `curl` / 流水线 | `-H "X-Covhub-Token: <token>"`，或 `?token=` |
+| 客户端脚本 | 设 `COVHUB_TOKEN` 环境变量，`covhub-client.sh` 会自己加头 |
+
+> 令牌只在 URL 里出现那一次：hub 收到 `?token=` 后立刻 302 跳到不带令牌的地址，
+> 免得它被浏览器历史和 `Referer` 一起带走。Cookie 是 `HttpOnly` + `SameSite=Strict`。
+
+push 通道的收集端口（`collect.port`）没有认证 —— 任何能连上它的进程都能往里
 报数据，务必用防火墙或安全组限定来源网段。
 
 ---
 
 ## 三、配置
 
-`targets.json`（可从 `targets.example.json` 复制，或用 `covhub.py init` 生成）。它含各环境地址与路径，每台机器不同，已被 `.gitignore` 排除 —— 版本库里维护的是 `targets.example.json`。
+配置文件可以是 **YAML 或 JSON**，按扩展名自动分派；`-c` 不给时按
+`targets.yaml` → `targets.yml` → `targets.json` 的顺序探测。多服务场景推荐 YAML ——
+能写注释、不用数逗号引号。可从 `targets.example.yaml` 复制，或用 `covhub.py init`
+生成（加 `--json` 生成 JSON 模板）。
+
+> YAML 需要 `pip install PyYAML`，这是本工具唯一的第三方依赖。装不上第三方包的
+> 机器（离线内网、老镜像）继续用 JSON 即可，两种格式功能完全等价。
+
+它含各环境地址与路径，每台机器不同，已被 `.gitignore` 排除 —— 版本库里维护的是
+`targets.example.yaml` 和等价的 `targets.example.json`。
 
 同样被排除的还有 `lib/*.jar`（由 JaCoCo 发行包提供，按需放入）和 `data/`（采集产物）。
 
 > `data/<service>/versions/` 下的 exec 是**不可再生**的真实执行轨迹。需要长期留存的话请归档到对象存储或制品库，别指望 git。
 
-```json
-{
-  "jacocoAgent": "./lib/jacocoagent.jar",
-  "jacocoCli":   "./lib/jacococli.jar",
-  "dataDir":     "./data",
-  "serve":  { "port": 8900, "token": "改成一串随机字符串" },
-  "watch":  { "intervalSeconds": 300 },
-  "collect": {
-    "port": 6400,
-    "bindAddress": "0.0.0.0",
-    "advertiseAddress": "covhub.internal"
-  },
-  "services": [
-    {
-      "name":        "my-service",
-      "version":     "1.4.2",
-      "channel":     "pull",
-      "address":     "127.0.0.1",
-      "port":        6300,
-      "bindAddress": "0.0.0.0",
-      "includes":    ["com.example.*"],
-      "excludes":    [],
-      "classDumpDir": "/tmp/covhub-classes/my-service",
-      "classfiles":  ["/opt/artifacts/my-service/1.4.2/classes"],
-      "sourcefiles": ["/opt/src/my-service/src/main/java"],
-      "reportExcludes": ["com/example/**/dto/**", "com/example/*/mapper/**"],
-      "sourceEncoding": "UTF-8"
-    }
-  ]
-}
+```yaml
+jacocoAgent: ./lib/jacocoagent.jar
+jacocoCli: ./lib/jacococli.jar
+dataDir: ./data
+
+serve:
+  port: 8900
+  token: 改成一串随机字符串
+watch:
+  intervalSeconds: 300
+collect:
+  port: 6400
+  bindAddress: 0.0.0.0
+  advertiseAddress: covhub.internal
+
+services:
+  - name: my-service
+    version: "1.4.2"          # 版本号一律加引号，裸写的 1.4 会被读成数字
+    channel: pull
+    address: 127.0.0.1
+    port: 6300
+    bindAddress: 0.0.0.0
+    includes:
+      - com.example.*
+    excludes: []
+    classDumpDir: /tmp/covhub-classes/my-service
+    classfiles:
+      - /opt/artifacts/my-service/1.4.2/classes
+    sourcefiles:
+      - /opt/src/my-service/src/main/java
+    reportExcludes:
+      - com/example/**/dto/**
+      - com/example/*/mapper/**
+    sourceEncoding: UTF-8
+
+  - name: another-service     # 多服务就在这里往下加，各服务之间互不影响
+    version: "2.0.1"
+    address: 10.0.1.22
+    port: 6300
+    includes:
+      - com.example.another.*
+    classDumpDir: /tmp/covhub-classes/another-service
+    classfiles:
+      - /opt/artifacts/another-service/2.0.1/classes
 ```
 
 | 字段 | 说明 |
@@ -387,11 +434,15 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
 | `collect.port` / `bindAddress` | push 通道的收集端口。**只有配了 `collect.port`，`serve` 才会起收集端** |
 | `channel` | `pull`（默认，hub 去连 agent）或 `push`（agent 连回 hub，见 §一·五） |
 | `collect.advertiseAddress` | push 通道用：**被测端连回 hub 的地址**，不是 hub 的监听地址 |
-| `serve.token` | 控制 API 的访问令牌。不配则任何能连上 8900 的人都能调写接口 |
+| `collect.dumpTimeoutSeconds` | 可选，默认 20。向单个 push 实例取数的上限，卡住的实例等这么久就丢弃。各实例并行取数，所以这也是整轮取数的最坏耗时 |
+| `serve.token` | 8900 的访问令牌，控制接口与静态报告目录共用。不配则任何能连上 8900 的人都能调写接口、并下载 `dataDir` 底下的一切 |
 
 `includes`/`excludes` 与 `reportExcludes` 是两个层次：前者决定**是否插桩**（被排除的类连数据都不会产生，事后无法找回），后者只影响**报告统计口径**（随时可调，重出报告即可）。
 
-相对路径一律相对 `targets.json` 所在目录解析，整个目录可以直接搬到别的机器上。
+相对路径一律相对配置文件所在目录解析，整个目录可以直接搬到别的机器上。
+
+`retarget`（发版后改 `version` / `classfiles`）会回写配置文件。YAML 配置只替换目标
+服务的那几行，**注释和排版原样保留**；JSON 配置则整体重写。
 
 ---
 
@@ -399,7 +450,7 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
 
 | 命令 | 用途 |
 |---|---|
-| `init` | 生成配置模板 |
+| `init [--json]` | 生成配置模板，默认 `targets.yaml`，`--json` 生成 `targets.json` |
 | `agent-opts <service>` | 打印启动时应注入的 `-javaagent` 参数串 |
 | `status [service]` | 目标连通性与最新覆盖率 |
 | `dump <service>` | 拉一次快照并出报告（累加，不清零） |
@@ -410,7 +461,8 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
 | `watch [--interval N]` | 守护进程，定时轮询全部目标 |
 | `serve [--port N] [--with-watch]` | HTTP 服务：看板 + 控制 API，`--with-watch` 顺带在同进程里采集 |
 
-只依赖 Python 3 标准库和 `java`，无第三方包。
+只依赖 Python 3 标准库和 `java`。唯一的第三方包是 YAML 配置要用的 `PyYAML` ——
+用 JSON 配置则完全零依赖。
 
 ---
 
@@ -436,7 +488,8 @@ data/
 ## 六、注意事项
 
 - **控制 API 的写接口能清零计数器**（`predeploy` 带 `--reset`）。配上 `serve.token`，
-  并且不要把 8900 暴露到公网。
+  并且不要把 8900 暴露到公网。令牌同时管着静态报告目录 —— 不配令牌就等于把
+  `dataDir`（含 `artifacts/` 里的字节码）整个公开。
 - **tcpserver 端口没有认证。** 任何能连上的人都能拉数据、并通过 `--reset` 清空计数器。生产/共享环境务必用防火墙或安全组限制来源，不要暴露到公网。
 - **性能开销通常在个位数百分比**，可用于测试环境常驻，但不建议长期挂在生产上。
 - **归档不会被覆盖。** 同名版本已有归档时会自动存成 `<版本>-2` —— 归档里的 exec 是不可再生的执行轨迹，宁可多一个目录也不能覆盖掉。

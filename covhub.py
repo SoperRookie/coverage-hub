@@ -20,7 +20,9 @@
 Python 或 java —— 它们通过 serve 暴露的 HTTP API 驱动 hub 干活（见 --help 或
 integration/covhub-client.sh）。
 
-配置文件默认取当前目录的 targets.json，可用 -c 指定。
+配置文件用 YAML 或 JSON 都行，按扩展名分派；缺省在当前目录按
+targets.yaml / targets.yml / targets.json 顺序探测，可用 -c 指定。
+YAML 需要 PyYAML，这是唯一的第三方依赖 —— 用 JSON 则完全零依赖。
 """
 
 import argparse
@@ -32,6 +34,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import socketserver
@@ -45,8 +48,9 @@ import time
 import urllib.parse
 import zipfile
 from datetime import datetime
+from html import escape as html_escape
 
-__version__ = "1.2.2"
+__version__ = "1.3.0"
 
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 
@@ -55,11 +59,67 @@ COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 # 配置
 # --------------------------------------------------------------------------
 
-def load_config(path):
+CONFIG_CANDIDATES = ("targets.yaml", "targets.yml", "targets.json")
+
+
+def config_format(path):
+    """按扩展名判断配置格式，.yaml / .yml 走 YAML，其余按 JSON。"""
+    return "yaml" if os.path.splitext(path)[1].lower() in (".yaml", ".yml") else "json"
+
+
+def resolve_config_path(explicit):
+    """-c 没给时按 targets.yaml → targets.yml → targets.json 顺序探测。
+
+    两种格式长期并存：已有部署的 targets.json 原样能跑，新机器默认用 YAML
+    （能写注释、不用数逗号）。都不存在时返回推荐的那个，让报错指向 YAML。
+    """
+    if explicit:
+        return explicit
+    for name in CONFIG_CANDIDATES:
+        if os.path.isfile(name):
+            return name
+    return CONFIG_CANDIDATES[0]
+
+
+def read_config_file(path):
+    """读配置原文并解析成 dict，不做路径规整（retarget 也用它做匹配）。"""
     if not os.path.isfile(path):
         die("找不到配置文件 %s，先运行 covhub.py init 生成模板" % path)
     with open(path, encoding="utf-8") as f:
-        cfg = json.load(f)
+        text = f.read()
+    if config_format(path) == "yaml":
+        data = parse_yaml(text, path)
+    else:
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            die("配置文件 %s 不是合法 JSON：%s" % (path, exc))
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        die("配置文件 %s 的顶层必须是对象" % path)
+    return data
+
+
+def parse_yaml(text, path):
+    """YAML 解析依赖 PyYAML。
+
+    工具其余部分只用标准库，YAML 是唯一的例外 —— 装不了第三方包的机器
+    （离线内网、老镜像）可以继续用 JSON，两种格式功能完全等价。
+    """
+    try:
+        import yaml
+    except ImportError:
+        die("解析 %s 需要 PyYAML：pip install PyYAML\n"
+            "        装不上的话可以用 JSON 配置：covhub.py init --json" % path)
+    try:
+        return yaml.safe_load(text)
+    except Exception as exc:
+        die("配置文件 %s 解析失败：%s" % (path, exc))
+
+
+def load_config(path):
+    cfg = read_config_file(path)
     base = os.path.dirname(os.path.abspath(path))
     # 相对路径一律相对配置文件所在目录解析，便于整个目录搬迁
     for key in ("jacocoCli", "jacocoAgent", "dataDir"):
@@ -411,8 +471,29 @@ def remote_dump(rfile, wfile, reset=False):
 #      另起一个 watch 进程够不着它。所以 push 通道要求 serve --with-watch。
 # --------------------------------------------------------------------------
 
+# 认领新连接时等第一次 dump 的上限 —— agent 刚连上、类还没加载完也走这条路。
+HANDSHAKE_TIMEOUT = 30
+# 之后每次取数的上限，可用 collect.dumpTimeoutSeconds 调。这是**单次 recv** 的
+# 上限，不是总时长：正常 dump 每个分片都有数据，只有对端真卡住才会等满。
+DEFAULT_DUMP_TIMEOUT = 20
+
+
 def service_channel(svc):
     return (svc.get("channel") or "pull").lower()
+
+
+def _close_quietly(*targets):
+    """关连接时的错误一律不关心 —— 走到这儿说明它已经没用了。"""
+    for target in targets:
+        try:
+            target.close()
+        except Exception:
+            pass
+
+
+def _class_ids_in(execdata):
+    """一次 dump 里出现过的 class id 集合。id 就是 JaCoCo 的 CRC64 指纹。"""
+    return frozenset(cid for cid, _, _ in execdata)
 
 
 def endpoint_label(svc):
@@ -452,54 +533,76 @@ class PushCollector:
         log("push 收集端已监听 %s:%d（等待 output=tcpclient 的 agent 连入）" % (bind, port))
 
     def _accept_loop(self):
+        """accept 循环。除了监听 socket 真的关了，任何错误都不许让它退出。
+
+        原先这里 `except OSError: return` —— fd 临时耗尽、对端在 accept 前就
+        重置连接这类瞬时错误，会让收集端从此**永久不再接客**，而且一声不吭。
+        push 通道无声停摆和守护进程无声停摆是一回事。
+        """
         while True:
             try:
                 sock, peer = self.srv.accept()
-            except OSError:
-                return
-            threading.Thread(target=self._claim, args=(sock, peer), daemon=True).start()
+            except OSError as exc:
+                if self.srv is None or self.srv.fileno() < 0:
+                    return                      # 监听 socket 已关闭，正常收场
+                log("! push 收集端 accept 出错，1 秒后重试 —— %s" % exc)
+                time.sleep(1)
+                continue
+            try:
+                threading.Thread(target=self._claim, args=(sock, peer),
+                                 daemon=True).start()
+            except RuntimeError as exc:
+                # 起不了线程也不能拖垮循环，回绝这一条就是了
+                log("! push：起不了处理线程，回绝 %s:%d —— %s" % (peer[0], peer[1], exc))
+                _close_quietly(sock)
 
     def _claim(self, sock, peer):
-        """认领一条新连接：立刻 dump 一次，从 SessionInfo 里读出它是谁。"""
+        """认领一条新连接：立刻 dump 一次，从 SessionInfo 里读出它是谁。
+
+        整段包在一个 except 里，而且**连 SystemExit 一起接**。这里会调
+        load_config / find_service，它们内部走的是 die()，抛的是 SystemExit ——
+        它不是 Exception 的子类，漏出去就是这个线程静默死亡加连接泄漏，
+        既没有日志也没有回收。
+        """
         who = "%s:%d" % peer
+        cid = None
         try:
-            sock.settimeout(30)
+            sock.settimeout(HANDSHAKE_TIMEOUT)
             rfile, wfile = sock.makefile("rb"), sock.makefile("wb")
             sessions, execdata = remote_dump(rfile, wfile, reset=False)
-        except Exception as exc:
-            log("push：来自 %s 的连接握手失败 —— %s" % (who, exc))
-            try:
-                sock.close()
-            except OSError:
-                pass
-            return
 
-        sessionid = sessions[0][0] if sessions else ""
-        cfg = load_config(self.cfg_path)
-        service = _sessionid_to_service(cfg, sessionid)
-        with self.lock:
-            self.seq += 1
-            cid = self.seq
-            self.conns[cid] = {
-                "id": cid, "peer": who, "sessionid": sessionid, "service": service,
-                "since": datetime.now().isoformat(timespec="seconds"),
-                "last": None, "sock": sock, "rfile": rfile, "wfile": wfile,
-                "sessionStart": sessions[0][1] if sessions else None,
-            }
+            sessionid = sessions[0][0] if sessions else ""
+            cfg = load_config(self.cfg_path)
+            service = _sessionid_to_service(cfg, sessionid)
+            with self.lock:
+                self.seq += 1
+                cid = self.seq
+                self.conns[cid] = {
+                    "id": cid, "peer": who, "sessionid": sessionid, "service": service,
+                    "since": datetime.now().isoformat(timespec="seconds"),
+                    "last": None, "sock": sock, "rfile": rfile, "wfile": wfile,
+                    "sessionStart": sessions[0][1] if sessions else None,
+                    "classIds": _class_ids_in(execdata),
+                }
 
-        if not service:
-            log('push：%s 连上来了，但 sessionid "%s" 匹配不到任何服务 —— '
-                "配置里的服务名和 agent 的 sessionid 要对上" % (who, sessionid))
-            return
+            if not service:
+                log('push：%s 连上来了，但 sessionid "%s" 匹配不到任何服务 —— '
+                    "配置里的服务名和 agent 的 sessionid 要对上" % (who, sessionid))
+                return
 
-        log('push：%s 连入，认领为服务 %s（sessionid "%s"）' % (who, service, sessionid))
-        # 握手那一次拿到的数据本身就是有效数据，直接存下，别浪费
-        try:
+            log('push：%s 连入，认领为服务 %s（sessionid "%s"）' % (who, service, sessionid))
+            # 握手那一次拿到的数据本身就是有效数据，直接存下，别浪费
             svc = find_service(cfg, service)
             with _LOCK:
                 self._store(cfg, svc, cid, sessions, execdata)
-        except Exception as exc:
-            log("push：%s 的首次数据落盘失败 —— %s" % (who, exc))
+        except (Exception, SystemExit) as exc:
+            # SystemExit 的 str() 只有退出码，说明是 die() 刚打到 stderr 的那条
+            why = "配置读取或服务查找失败（详见上一行）" if isinstance(exc, SystemExit)                 else str(exc)
+            log("push：来自 %s 的连接没能接住 —— %s" % (who, why))
+            if cid is None:
+                _close_quietly(sock)
+            else:
+                self.drop(cid, "认领失败")
 
     # ---- 数据 ----
 
@@ -511,7 +614,27 @@ class PushCollector:
         with self.lock:
             if cid in self.conns:
                 self.conns[cid]["last"] = datetime.now().isoformat(timespec="seconds")
+                # 这一版跑的是哪份 class，跟着每次取数刷新（见 mixed_versions）
+                self.conns[cid]["classIds"] = _class_ids_in(execdata)
         return path
+
+    def mixed_versions(self, service):
+        """在线实例里是不是同时跑着两份不同的 class。
+
+        这是 push 通道下 pull 那套「断代检测」的对应物。pull 是单实例，进程一重启
+        计数器就归零，混桶必然出错，所以必须封存；push 是多副本，副本重启后数据
+        照样能 merge —— 只要跑的是**同一份 class**。真正会让报告出错的是滚动发版
+        中途：新旧副本的数据落进同一批 exec，对着任何一份 class 产物都只能对上一半。
+
+        判断只看 class id 集合的包含关系：同一份产物、加载进度不同 → 互为子集；
+        真的换了版本 → 双方都有对方没有的 id。这条不依赖任何人填的版本号。
+        """
+        sets = [c["classIds"] for c in self.instances(service) if c.get("classIds")]
+        for i in range(len(sets)):
+            for j in range(i + 1, len(sets)):
+                if (sets[i] - sets[j]) and (sets[j] - sets[i]):
+                    return True
+        return False
 
     def instances(self, service):
         with self.lock:
@@ -529,16 +652,50 @@ class PushCollector:
                     pass
 
     def dump_service(self, cfg, svc, reset=False):
-        """向该服务当前所有在线实例各要一次数据，返回落盘的文件数。"""
-        written = 0
-        for conn in self.instances(svc["name"]):
+        """向该服务当前所有在线实例各要一次数据，返回落盘的文件数。
+
+        取数并行，落盘串行。两件事都是有意的：
+
+          · **并行** —— 实例就是多副本，串行的话总耗时是各实例之和。一个网络
+            分区的实例（TCP 收不到 FIN）要等满 socket 超时才报错，而调用方是
+            握着 _LOCK 进来的 —— 串行等于让 N 个坏实例把整个 hub 冻住 N 倍的
+            超时。并行之后最坏等待不再随副本数放大。
+          · **落盘串行** —— write_exec_file 写的是同一个 exec 目录，交给调用方
+            那把锁保护，别在工作线程里各写各的。
+        """
+        conns = self.instances(svc["name"])
+        if not conns:
+            return 0
+
+        timeout = (cfg.get("collect") or {}).get("dumpTimeoutSeconds",
+                                                 DEFAULT_DUMP_TIMEOUT)
+        got = []
+
+        def fetch(conn):
             try:
-                sessions, execdata = remote_dump(conn["rfile"], conn["wfile"], reset=reset)
+                conn["sock"].settimeout(timeout)
+                sessions, execdata = remote_dump(conn["rfile"], conn["wfile"],
+                                                 reset=reset)
+                got.append((conn, sessions, execdata))     # list.append 本身是原子的
+            except (Exception, SystemExit) as exc:
+                # 实例没了。它最后一段数据随进程消失 —— 和 pull 一样没有补救手段
+                self.drop(conn["id"], str(exc))
+
+        workers = [threading.Thread(target=fetch, args=(c,), daemon=True)
+                   for c in conns]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+
+        written = 0
+        for conn, sessions, execdata in got:
+            try:
                 self._store(cfg, svc, conn["id"], sessions, execdata)
                 written += 1
             except Exception as exc:
-                # 实例没了。它最后一段数据随进程消失 —— 和 pull 一样没有补救手段
-                self.drop(conn["id"], str(exc))
+                # 取到了却写不下去，是 hub 这边的问题，别把实例当断线丢掉
+                log("push：%s 的数据落盘失败 —— %s" % (conn["peer"], exc))
         return written
 
 
@@ -708,14 +865,28 @@ def load_state(cfg, svc):
         try:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as exc:
+            # 读不出来 = 历史清零 + 会话基线丢失，而采集会照常跑下去、断代检测
+            # 从此哑火。静默吞掉是最坏的处理方式，至少得在日志里留下痕迹。
+            log("! %s 的 state.json 读取失败，按空状态继续：%s" % (svc["name"], exc))
     return {"service": svc["name"], "history": [], "versions": []}
 
 
 def save_state(cfg, svc, state):
-    with open(state_path(cfg, svc), "w", encoding="utf-8") as f:
+    """先写临时文件再 os.replace —— state.json 不能有"写了一半"的中间态。
+
+    它一个文件装着 history、versions、breaks 和 sessionStart，直接原地覆写时
+    只要在中途断电或被 kill，就会留下半个 JSON；而 load_state 拿不到内容只会
+    退回空状态，一声不吭地把历史和断代基线一起丢掉。配置回写早就是这个待遇了
+    （见 yaml_update_service），这里跟上。
+    """
+    path = state_path(cfg, svc)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def update_state(cfg, svc, **fields):
@@ -922,6 +1093,46 @@ def detect_break(cfg, svc, new_exec):
     return current, archive
 
 
+def detect_push_break(cfg, svc):
+    """push 通道的断代检测：在线实例是不是跑着两份不同的 class。
+
+    pull 那套（比对 SessionInfo 的启动时刻）在这里不成立 —— push 是多副本，
+    副本各自重启、扩缩容都是常态，照搬过来会把每次扩容都当成一次断代。
+
+    push 下真正会让报告出错的是**滚动发版中途**：新旧副本的数据落进同一批
+    exec，对着任何一份 class 产物都只能对上一半，而 JaCoCo 不会为此报任何错。
+    所以这里抓的是混版本，不是重启。
+
+    和 pull 的另一个不同是**不自动封存**。两批数据都真实有效，只是分属两个
+    版本，「到此为止」的语义不成立；而多副本下自动封存还会凭空造出一堆归档。
+    这里只负责把话说清楚、记进 breaks 让看板亮起来，结算仍由 predeploy 驱动。
+    """
+    if _COLLECTOR is None:
+        return None
+    mixed = _COLLECTOR.mixed_versions(svc["name"])
+    state = load_state(cfg, svc)
+    if mixed == bool(state.get("pushMixed")):
+        return None                 # 状态没变。一次滚动发版会连着好几轮都成立
+
+    entry = None
+    if mixed:
+        entry = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "reason": "mixed-versions",
+            "instances": len(collector_instances(svc["name"])),
+        }
+        state.setdefault("breaks", []).append(entry)
+        state["breaks"] = state["breaks"][-50:]
+        log("  !! 在线实例跑着两份不同的 class —— 多半是滚动发版正在进行")
+        log("     这一批 exec 跨了两个版本，对着任一份 class 产物都只能对上一半")
+        log("     发版流程里补一次 predeploy，把旧版本先结算掉")
+    else:
+        log("  实例的 class 已经统一，混版本状态解除")
+    state["pushMixed"] = mixed
+    save_state(cfg, svc, state)
+    return entry
+
+
 # --------------------------------------------------------------------------
 # 诊断
 # --------------------------------------------------------------------------
@@ -1023,8 +1234,12 @@ def cmd_diagnose(cfg, args):
         print()
         print("断代记录（最近 %d 条）：" % len(r["breaks"]))
         for b in r["breaks"]:
-            print("            %s  %s → %s  已结算为 %s"
-                  % (b["at"], b["from"], b["to"], b["sealedAs"]))
+            if b.get("sealedAs"):
+                print("            %s  %s → %s  已结算为 %s"
+                      % (b["at"], b.get("from", "?"), b.get("to", "?"), b["sealedAs"]))
+            else:
+                print("            %s  在线实例跑着两份不同的 class（%d 个实例），未结算"
+                      % (b["at"], b.get("instances", 0)))
 
 
 # --------------------------------------------------------------------------
@@ -1108,7 +1323,9 @@ def _snapshot(cfg, svc, reset, kind, version=None):
             # 探活和取数之间实例断开就会走到这儿，属于正常情况，
             # 交给上层记日志跳过，不能是致命错误
             raise RuntimeError("%s 当前没有实例在线，取不到数据" % svc["name"])
-        # push 的会话基线是每条连接各自的，不做全局断代判断（见 detect_break 注释）
+        # push 没有「进程重启 = 计数器归零」这个信号（多副本各自重启是常态），
+        # 会让报告出错的是滚动发版中途的混版本 —— 那才是这里要抓的
+        detect_push_break(cfg, svc)
     else:
         # 先落到暂存位置：得先看清这份数据属于哪个进程，才知道该把它归进哪个周期。
         staging = os.path.join(root, ".incoming.exec")
@@ -1193,6 +1410,192 @@ def cmd_report(cfg, args):
     render_dashboard(cfg)
 
 
+# --------------------------------------------------------------------------
+# YAML 行级改写
+#
+# retarget 每次发版都会回写配置。「解析成 dict 再整体 dump」的写法会把注释和排版
+# 一起抹掉，而能写注释正是配置换成 YAML 的理由 —— 所以这里只定位目标服务的那几
+# 行做替换，其余原文逐字不动。代价是只认缩进块写法，流式 {a: 1} 会直接报错。
+# --------------------------------------------------------------------------
+
+_YAML_PLAIN = re.compile(r"^[A-Za-z0-9_./][A-Za-z0-9_./+@=~-]*$")
+_YAML_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_.\-]*)\s*:(\s|$)")
+_YAML_ITEM = re.compile(r"^(\s*)-(\s|$)")
+
+
+def _yaml_scalar(value):
+    """把标量渲染成 YAML。拿不准就加引号 —— 引号从不会解析错，裸值会。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    text = str(value)
+    if not _YAML_PLAIN.match(text):
+        return '"%s"' % text.replace("\\", "\\\\").replace('"', '\\"')
+    if text.lower() in ("true", "false", "null", "yes", "no", "on", "off", "~"):
+        return '"%s"' % text
+    if text[0].isdigit():
+        # 版本号裸写会被读成数字（1.4 → float，1 → int），一律引起来
+        return '"%s"' % text
+    return text
+
+
+def _yaml_split_comment(text):
+    """切成 (正文, 行尾注释, 注释起始列)。# 在引号里不算注释。"""
+    quote = None
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or text[i - 1] in " \t"):
+            return text[:i], text[i:].strip(), i
+    return text, "", 0
+
+
+def _yaml_append_comment(line, comment, col):
+    """把行尾注释接回去，尽量还原它原来的列，读起来才不会错位。"""
+    if not comment:
+        return line
+    return line + " " * max(2, col - len(line)) + comment
+
+
+def _yaml_value(line):
+    """取 `key: value` 里的 value，剥掉行尾注释与引号。"""
+    body = _yaml_split_comment(line.rstrip("\r\n"))[0]
+    raw = body.partition(":")[2].strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    return raw
+
+
+def _yaml_blank(line):
+    body = line.strip()
+    return not body or body.startswith("#")
+
+
+def _yaml_key_col(lines, start, stop):
+    """这一项里各 key 的起始列。`-` 单独占一行时键从下一行的缩进算起。"""
+    m = re.match(r"^(\s*)-(\s*)", lines[start])
+    col = len(m.group(1)) + 1 + len(m.group(2))
+    if col >= len(lines[start].rstrip("\r\n")):
+        for i in range(start + 1, stop):
+            if not _yaml_blank(lines[i]):
+                return len(lines[i]) - len(lines[i].lstrip())
+    return col
+
+
+def _yaml_item_keys(lines, start, stop, key_col):
+    """列出这一项里的顶层 key，返回 [(key, 起始行, 尾后行)]。"""
+    hits = []
+    for i in range(start, stop):
+        if _yaml_blank(lines[i]):
+            continue
+        text = lines[i].rstrip("\r\n")
+        if i != start and len(text) - len(text.lstrip()) != key_col:
+            continue          # 嵌套在某个 key 底下的行，不是这一项的 key
+        m = _YAML_KEY.match(text[key_col:])
+        if m:
+            hits.append((m.group(1), i))
+    out = []
+    for n, (key, ks) in enumerate(hits):
+        ke = hits[n + 1][1] if n + 1 < len(hits) else stop
+        while ke > ks + 1 and _yaml_blank(lines[ke - 1]):
+            ke -= 1           # 块尾的空行/注释留给下一个 key
+        out.append((key, ks, ke))
+    return out
+
+
+def _yaml_service_item(lines, service):
+    """定位 services 下 name == service 的那一项，返回 (起始行, 尾后行, key 列)。"""
+    top = next((i for i, line in enumerate(lines)
+                if re.match(r"^services\s*:", line)), None)
+    if top is None:
+        raise RuntimeError("配置里找不到顶层的 services:")
+    end = len(lines)
+    for i in range(top + 1, len(lines)):
+        if not _yaml_blank(lines[i]) and not lines[i][:1].isspace():
+            end = i
+            break
+    while end > top + 1 and _yaml_blank(lines[end - 1]):
+        end -= 1
+
+    starts, item_indent = [], None
+    for i in range(top + 1, end):
+        m = _YAML_ITEM.match(lines[i])
+        if not m:
+            continue
+        if item_indent is None:
+            item_indent = len(m.group(1))
+        if len(m.group(1)) == item_indent:
+            starts.append(i)
+    if not starts:
+        raise RuntimeError("services 下没有缩进块写法的列表项，请手工修改配置")
+
+    for n, start in enumerate(starts):
+        stop = starts[n + 1] if n + 1 < len(starts) else end
+        while stop > start + 1 and _yaml_blank(lines[stop - 1]):
+            stop -= 1
+        key_col = _yaml_key_col(lines, start, stop)
+        for key, ks, _ in _yaml_item_keys(lines, start, stop, key_col):
+            if key == "name" and _yaml_value(lines[ks]) == service:
+                return start, stop, key_col
+    raise RuntimeError("配置里没有名为 %r 的服务" % service)
+
+
+def yaml_update_service(path, service, updates):
+    """就地改写 YAML 配置里某个服务的若干字段，只动这几行。"""
+    with open(path, encoding="utf-8", newline="") as f:
+        text = f.read()
+    lines = text.splitlines(keepends=True)
+    nl = "\r\n" if "\r\n" in text else "\n"
+    start, stop, key_col = _yaml_service_item(lines, service)
+    known = {k: (ks, ke) for k, ks, ke in _yaml_item_keys(lines, start, stop, key_col)}
+
+    plan = []
+    for key, value in updates.items():
+        ks, ke = known.get(key, (stop, stop))   # 没配过的字段追加到这一项末尾
+        plan.append((ks, ke, key, value))
+    # 从后往前改，前面几处的行号才不会被前一次替换挪动
+    for ks, ke, key, value in sorted(plan, key=lambda p: (p[0], p[2]), reverse=True):
+        exists = ks < ke
+        prefix = lines[ks][:key_col] if exists and ks == start else " " * key_col
+        _, comment, col = (_yaml_split_comment(lines[ks].rstrip("\r\n"))
+                           if exists else ("", "", 0))
+        list_indent = key_col + 2
+        for i in range(ks + 1, ke):
+            m = _YAML_ITEM.match(lines[i])
+            if m:
+                list_indent = len(m.group(1))   # 沿用原有的列表缩进风格
+                break
+        if isinstance(value, (list, tuple)):
+            block = [_yaml_append_comment("%s%s:" % (prefix, key), comment, col)]
+            block += ["%s- %s" % (" " * list_indent, _yaml_scalar(v)) for v in value]
+        else:
+            block = [_yaml_append_comment(
+                "%s%s: %s" % (prefix, key, _yaml_scalar(value)), comment, col)]
+        lines[ks:ke] = [b + nl for b in block]
+
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write("".join(lines))
+    os.replace(tmp, path)
+
+
+def json_update_service(path, service, updates):
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    hit = next((s for s in raw.get("services", []) if s["name"] == service), None)
+    if hit is None:
+        raise RuntimeError("配置里没有名为 %r 的服务" % service)
+    hit.update(updates)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
 def cmd_retarget(cfg, args):
     """发版后把配置指向新版本的 class 产物。
 
@@ -1203,27 +1606,29 @@ def cmd_retarget(cfg, args):
     固化成绝对路径 —— 整个目录要能原样搬到别的机器上。
     """
     path = args.config
-    with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
-    hit = next((s for s in raw.get("services", []) if s["name"] == args.service), None)
-    if hit is None:
-        die("配置里没有名为 %r 的服务" % args.service)
+    updates = {}
     if args.version:
-        hit["version"] = args.version
+        updates["version"] = args.version
     if args.classfiles:
-        hit["classfiles"] = list(args.classfiles)
+        updates["classfiles"] = list(args.classfiles)
     if args.sourcefiles:
-        hit["sourcefiles"] = list(args.sourcefiles)
+        updates["sourcefiles"] = list(args.sourcefiles)
 
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(raw, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    raw = read_config_file(path)
+    if not any(s.get("name") == args.service for s in raw.get("services", [])):
+        die("配置里没有名为 %r 的服务" % args.service)
+    if updates:
+        if config_format(path) == "yaml":
+            yaml_update_service(path, args.service, updates)
+        else:
+            json_update_service(path, args.service, updates)
+        raw = read_config_file(path)
+    hit = next(s for s in raw["services"] if s.get("name") == args.service)
     log("%s -> version=%s classfiles=%s"
         % (args.service, hit.get("version"), hit.get("classfiles")))
 
 
-# 采集、结算、改配置都会写 data/ 与 targets.json，单进程内一律串行，
+# 采集、结算、改配置都会写 data/ 与配置文件，单进程内一律串行，
 # 避免看板 API 与后台轮询同时对同一个服务动手。
 _LOCK = threading.RLock()
 
@@ -1265,7 +1670,7 @@ def cmd_watch(cfg, args):
 # 远程控制 API
 #
 # 整套方案只需要一个服务端。被测服务所在的机器和发版节点不装 Python、不装 java、
-# 不放 targets.json，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。
+# 不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。
 #
 #   GET  /api/health                            存活探测，不需要令牌
 #   GET  /api/status[?service=X]                连通性与最新覆盖率（JSON）
@@ -1409,6 +1814,20 @@ def _token(cfg):
     return os.environ.get("COVHUB_TOKEN") or (cfg.get("serve") or {}).get("token") or ""
 
 
+# 浏览器里点开报告时带令牌用的 Cookie。报告页里全是相对链接，不可能每条都
+# 挂上 ?token=，所以带对一次就种下它，后续静态请求靠它放行。
+TOKEN_COOKIE = "covhub_token"
+
+
+def _token_ok(given, expected):
+    """令牌比对。用 compare_digest 而不是 == —— 逐字符短路会泄漏正确的前缀长度。
+
+    比的是 bytes：token 里出现非 ASCII 时 compare_digest 的 str 形式会直接抛错。
+    """
+    return secrets.compare_digest(str(given or "").encode("utf-8"),
+                                  str(expected or "").encode("utf-8"))
+
+
 def _as_list(value):
     if not value:
         return []
@@ -1516,7 +1935,13 @@ def cmd_serve(cfg, args):
             route = self._route()
             if route.startswith("/api/") or route == "/agent.jar":
                 return self._api("GET")
-            return super().do_GET()
+            return self._static(super().do_GET)
+
+        def do_HEAD(self):
+            route = self._route()
+            if route.startswith("/api/") or route == "/agent.jar":
+                return self._send(405, {"ok": False, "error": "该接口不支持 HEAD"})
+            return self._static(super().do_HEAD)
 
         def do_POST(self):
             return self._api("POST")
@@ -1543,12 +1968,69 @@ def cmd_serve(cfg, args):
                     params.update({k: v[-1] for k, v in urllib.parse.parse_qs(raw).items()})
             return params
 
+        def _cookie_token(self):
+            raw = self.headers.get("Cookie") or ""
+            for part in raw.split(";"):
+                key, _, value = part.strip().partition("=")
+                if key == TOKEN_COOKIE:
+                    return urllib.parse.unquote(value)
+            return ""
+
         def _authorized(self, current, params):
             expected = _token(current)
             if not expected or self._route() == "/api/health":
                 return True
-            given = self.headers.get("X-Covhub-Token") or params.get("token") or ""
-            return given == expected
+            given = (self.headers.get("X-Covhub-Token") or params.get("token")
+                     or self._cookie_token() or "")
+            return _token_ok(given, expected)
+
+        def _grant(self, expected):
+            """令牌带对了：种上 Cookie，再跳回不带令牌的同一地址。
+
+            令牌留在地址栏会被浏览器历史和 Referer 一起带走，所以只让它在
+            这一次请求里出现。
+            """
+            parts = urllib.parse.urlsplit(self.path)
+            query = urllib.parse.parse_qs(parts.query)
+            query.pop("token", None)
+            target = urllib.parse.urlunsplit(
+                ("", "", parts.path, urllib.parse.urlencode(query, doseq=True), "")) or "/"
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.send_header("Set-Cookie", "%s=%s; Path=/; HttpOnly; SameSite=Strict"
+                             % (TOKEN_COOKIE, urllib.parse.quote(expected)))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _static(self, serve):
+            """dataDir 的静态服务 —— 配了令牌就必须和 /api/ 一起拦。
+
+            这底下不只有报告：artifacts/ 是线上跑的那份字节码（反编译即源码），
+            exec/ 是不可再生的执行轨迹，state.json 有全部历史。只护住 /api/
+            而把整棵树敞开，等于那道门白装。
+            """
+            try:
+                current = load_config(cfg_path)
+            except SystemExit:
+                return self._send(500, {"ok": False, "error": "配置文件读取失败"})
+            expected = _token(current)
+            if not expected:
+                return serve()
+
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            from_query = query.get("token", [""])[-1]
+            if from_query and _token_ok(from_query, expected):
+                return self._grant(expected)
+            given = (self.headers.get("X-Covhub-Token")
+                     or self._cookie_token() or from_query)
+            if not _token_ok(given, expected):
+                return self._send(401, {
+                    "ok": False,
+                    "error": "令牌无效或缺失",
+                    "hint": "浏览器：在地址后加 ?token=<serve.token>，之后靠 Cookie 放行；"
+                            "命令行：带 X-Covhub-Token 头",
+                })
+            return serve()
 
         def _send(self, code, payload, ctype="application/json; charset=utf-8"):
             if isinstance(payload, bytes):
@@ -1699,21 +2181,68 @@ def cmd_serve(cfg, args):
 
     log("covhub %s 已启动： http://127.0.0.1:%d/  （根目录 %s）" % (__version__, port, root))
     log("控制 API： http://127.0.0.1:%d/api/health%s"
-        % (port, "" if _token(cfg) else "    [未设置 serve.token，任何人都能调写接口]"))
+        % (port, "" if _token(cfg) else
+           "    [未设置 serve.token：写接口与 data/ 整个目录都对外敞开]"))
     with Server(("0.0.0.0", port), Handler) as httpd:
         httpd.serve_forever()
+
+
+CONFIG_TEMPLATE_YAML = """\
+# covhub 配置。相对路径一律相对本文件所在目录解析。
+jacocoAgent: ./lib/jacocoagent.jar
+jacocoCli: ./lib/jacococli.jar
+dataDir: ./data
+
+serve:
+  port: 8900
+  token: ""                  # 控制 API 的令牌，不配则任何人都能调写接口
+
+watch:
+  intervalSeconds: 300       # 轮询间隔，同时是断代时数据丢失的上界
+
+collect:                     # push 通道的收集端，只有配了 port，serve 才会起它
+  port: 6400
+  bindAddress: 0.0.0.0
+  advertiseAddress: 改成被测端能访问到的 hub 地址
+  dumpTimeoutSeconds: 20     # 向单个实例取数的上限，卡住的实例等这么久就丢弃
+
+services:
+  - name: example-service
+    version: "1.0.0"
+    channel: pull            # pull：hub 去连 agent；push：agent 连回 hub
+    address: 127.0.0.1       # agent 所在机器，hub 连过去拉数据
+    port: 6300
+    bindAddress: 0.0.0.0     # agent 在被测端监听的地址
+    includes:                # 传给 agent，决定是否插桩，改了要重启服务
+      - com.example.*
+    excludes: []
+    classDumpDir: /tmp/covhub-classes/example-service   # 被测端路径
+    classfiles:              # 出报告用的 class，必须与运行中的服务同一份产物
+      - /path/to/classes
+    sourcefiles:             # 可选，配了才能在报告里下钻到源码行
+      - /path/to/src/main/java
+    reportExcludes:          # 只影响报告口径，随时可改重出报告
+      - com/example/**/dto/**
+    sourceEncoding: UTF-8
+"""
 
 
 def cmd_init(cfg_path, _args):
     if os.path.exists(cfg_path):
         die("%s 已存在，不覆盖" % cfg_path)
+    if config_format(cfg_path) == "yaml":
+        with open(cfg_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(CONFIG_TEMPLATE_YAML)
+        print("已生成配置模板 %s，按需修改后即可使用。" % cfg_path)
+        return
     template = {
         "jacocoAgent": "./lib/jacocoagent.jar",
         "jacocoCli": "./lib/jacococli.jar",
         "dataDir": "./data",
         "serve": {"port": 8900},
         "collect": {"port": 6400, "bindAddress": "0.0.0.0",
-                    "advertiseAddress": "改成被测端能访问到的 hub 地址"},
+                    "advertiseAddress": "改成被测端能访问到的 hub 地址",
+                    "dumpTimeoutSeconds": 20},
         "watch": {"intervalSeconds": 300},
         "services": [{
             "name": "example-service",
@@ -1738,6 +2267,25 @@ def cmd_init(cfg_path, _args):
 # --------------------------------------------------------------------------
 # 看板
 # --------------------------------------------------------------------------
+
+def _esc(value):
+    """转义成可安全插进 HTML 文本或属性的字符串。
+
+    看板上的服务名、版本号、断代记录都不是本地常量 —— version 经
+    /api/retarget 从流水线传进来，落进 state.json，再被渲染进 index.html。
+    不转义就等于把写接口变成了看板的脚本注入入口，而 index.html 是全组在看的。
+    """
+    return html_escape("" if value is None else str(value), quote=True)
+
+
+def _url(value):
+    """编码成 URL 的一个路径段，再按 HTML 属性转义。
+
+    报告链接由服务名 / 版本号拼成，这两者都可能带 / # ? —— 只做 HTML 转义
+    拦不住它们改变链接指向，得先做百分号编码。
+    """
+    return _esc(urllib.parse.quote("" if value is None else str(value), safe=""))
+
 
 def dashboard_rows(cfg):
     """把每个服务整理成看板要用的一行。
@@ -1858,7 +2406,8 @@ def _card(r):
         '<span class="chan chan-%s">%s</span></div>'
         "%s</div>"
         '<div class="endpoint">%s</div>'
-        % (r["name"], r["channel"], r["channel"], _status_pill(r), r["endpoint"]))
+        % (_esc(r["name"]), _esc(r["channel"]), _esc(r["channel"]),
+           _status_pill(r), _esc(r["endpoint"])))
 
     if not latest:
         body = ('<div class="empty-body">尚未采集到数据<span>确认 agent 已注入，'
@@ -1877,9 +2426,15 @@ def _card(r):
                           "采集可能已经停了 —— 确认 watch 还在跑</div>"
                           % human_age(r["age"]))
         for b in reversed(r["breaks"]):
-            alerts.append('<div class="alert alert-warn">检测到未结算的重启，'
-                          "已自动结算为 <b>%s</b>（%s）</div>"
-                          % (b.get("sealedAs", "?"), b.get("at", "").replace("T", " ")))
+            at = _esc(b.get("at", "").replace("T", " "))
+            if b.get("sealedAs"):
+                alerts.append('<div class="alert alert-warn">检测到未结算的重启，'
+                              "已自动结算为 <b>%s</b>（%s）</div>"
+                              % (_esc(b.get("sealedAs", "?")), at))
+            else:
+                alerts.append('<div class="alert alert-warn">在线实例跑着两份不同的 '
+                              "class（%s）—— 滚动发版中途采到的数据对不上同一份 "
+                              "class 产物，发版流程里补一次 predeploy</div>" % at)
 
         body = (
             '<div class="headline">'
@@ -1901,19 +2456,19 @@ def _card(r):
                latest["branch"], latest["classesHit"], latest["classesTotal"],
                "{:,}".format(latest["covered"]), "{:,}".format(latest["total"]),
                spark(r["history"]),
-               latest["at"].replace("T", " "), human_age(r["age"]),
-               latest.get("version") or "—",
+               _esc(latest["at"].replace("T", " ")), human_age(r["age"]),
+               _esc(latest.get("version") or "—"),
                "".join(alerts)))
 
     links = []
     if r["hasReport"]:
         links.append('<a class="btn" href="%s/current/html/index.html">打开报告</a>'
-                     % r["name"])
+                     % _url(r["name"]))
         links.append('<a class="btn btn-quiet" href="%s/current/jacoco.xml">jacoco.xml</a>'
-                     % r["name"])
+                     % _url(r["name"]))
     if r["versions"]:
         vs = "".join('<a class="vtag" href="%s/versions/%s/html/index.html">%s</a>'
-                     % (r["name"], v["version"], v["version"])
+                     % (_url(r["name"]), _url(v["version"]), _esc(v["version"]))
                      for v in reversed(r["versions"]))
         links.append('<div class="vers"><span>已结算</span>%s</div>' % vs)
 
@@ -1946,7 +2501,7 @@ def build_dashboard_html(rows):
 
     cards = "\n".join(_card(r) for r in ordered) or (
         '<div class="blank"><h2>还没有配置任何服务</h2>'
-        "<p>在 targets.json 的 services 里加一条，再跑 "
+        "<p>在配置文件的 services 里加一条，再跑 "
         "<code>covhub.py dump &lt;服务名&gt;</code>。</p></div>")
 
     values = {
@@ -2235,12 +2790,16 @@ footer.foot {
 def main():
     parser = argparse.ArgumentParser(
         prog="covhub", description="通用 JaCoCo 运行期覆盖率采集与看板")
-    parser.add_argument("-c", "--config", default="targets.json", help="配置文件路径")
+    parser.add_argument("-c", "--config",
+                        help="配置文件路径，缺省按 %s 顺序探测"
+                             % " / ".join(CONFIG_CANDIDATES))
     parser.add_argument("-V", "--version", action="version",
                         version="covhub %s" % __version__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init", help="生成配置模板")
+    p = sub.add_parser("init", help="生成配置模板")
+    p.add_argument("--json", action="store_true",
+                   help="生成 targets.json（默认生成 YAML，YAML 需要 PyYAML）")
 
     p = sub.add_parser("agent-opts", help="打印启动时应注入的 -javaagent 参数")
     p.add_argument("service")
@@ -2283,8 +2842,9 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "init":
-        return cmd_init(args.config, args)
+        return cmd_init(args.config or ("targets.json" if args.json else "targets.yaml"), args)
 
+    args.config = resolve_config_path(args.config)
     cfg = load_config(args.config)
     needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": ()}.get(
         args.cmd, ("jacocoCli", "jacocoAgent"))
