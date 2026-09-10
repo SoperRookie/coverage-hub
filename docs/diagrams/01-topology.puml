@@ -23,7 +23,7 @@ node "covhub 服务端（全局唯一）" as hub {
   component "push 收集端  :6400\nPushCollector" as collector
   component "jacococli\njava -jar 子进程" as cli
   database "data/\nexec · 报告 · 版本归档" as data
-  artifact "targets.json" as cfg
+  artifact "targets.yaml" as cfg
   artifact "lib/jacocoagent.jar\nlib/jacococli.jar" as libs
 }
 
@@ -50,7 +50,7 @@ client --> sonar : **③** sonar-scanner\n推 jacoco.xml
 
 note bottom of client
   只依赖 curl。不装 Python、
-  不装 java、不放 targets.json、
+  不装 java、不放配置文件、
   不囤 class 产物。
 end note
 

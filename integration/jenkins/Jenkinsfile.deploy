@@ -20,7 +20,7 @@
  * class 产物没跟着版本换，新采到的数据会和旧 class 对不上，报告全是"未覆盖"。
  *
  * 本流水线走远程模式：所有动作由 COVHUB_URL 指向的那一个 hub 完成，
- * 发版节点只需要 curl —— 不装 Python、不装 java、不放 targets.json，
+ * 发版节点只需要 curl —— 不装 Python、不装 java、不放配置文件，
  * 也不囤 class 产物：新产物传给 hub，旧产物推 Sonar 时再从 hub 取回。
  */
 
@@ -28,8 +28,8 @@ pipeline {
     agent { node { label 'deploy' } }
 
     parameters {
-        string(name: 'SERVICE',     defaultValue: 'my-service', description: '目标服务名，需与 targets.json 中一致')
-        string(name: 'OLD_VERSION', defaultValue: '',           description: '当前在线版本，留空则取 targets.json 里的 version')
+        string(name: 'SERVICE',     defaultValue: 'my-service', description: '目标服务名，需与 hub 配置中一致')
+        string(name: 'OLD_VERSION', defaultValue: '',           description: '当前在线版本，留空则取 hub 配置里的 version')
         string(name: 'NEW_VERSION', defaultValue: '',           description: '要发布的版本')
         string(name: 'BUILD_JOB',   defaultValue: 'my-service-build', description: '提供 class 归档的构建任务名')
         booleanParam(name: 'ALLOW_MISSING', defaultValue: false,

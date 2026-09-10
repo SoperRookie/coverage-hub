@@ -20,7 +20,9 @@
 Python 或 java —— 它们通过 serve 暴露的 HTTP API 驱动 hub 干活（见 --help 或
 integration/covhub-client.sh）。
 
-配置文件默认取当前目录的 targets.json，可用 -c 指定。
+配置文件用 YAML 或 JSON 都行，按扩展名分派；缺省在当前目录按
+targets.yaml / targets.yml / targets.json 顺序探测，可用 -c 指定。
+YAML 需要 PyYAML，这是唯一的第三方依赖 —— 用 JSON 则完全零依赖。
 """
 
 import argparse
@@ -46,7 +48,7 @@ import urllib.parse
 import zipfile
 from datetime import datetime
 
-__version__ = "1.2.2"
+__version__ = "1.3.0"
 
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 
@@ -55,11 +57,67 @@ COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 # 配置
 # --------------------------------------------------------------------------
 
-def load_config(path):
+CONFIG_CANDIDATES = ("targets.yaml", "targets.yml", "targets.json")
+
+
+def config_format(path):
+    """按扩展名判断配置格式，.yaml / .yml 走 YAML，其余按 JSON。"""
+    return "yaml" if os.path.splitext(path)[1].lower() in (".yaml", ".yml") else "json"
+
+
+def resolve_config_path(explicit):
+    """-c 没给时按 targets.yaml → targets.yml → targets.json 顺序探测。
+
+    两种格式长期并存：已有部署的 targets.json 原样能跑，新机器默认用 YAML
+    （能写注释、不用数逗号）。都不存在时返回推荐的那个，让报错指向 YAML。
+    """
+    if explicit:
+        return explicit
+    for name in CONFIG_CANDIDATES:
+        if os.path.isfile(name):
+            return name
+    return CONFIG_CANDIDATES[0]
+
+
+def read_config_file(path):
+    """读配置原文并解析成 dict，不做路径规整（retarget 也用它做匹配）。"""
     if not os.path.isfile(path):
         die("找不到配置文件 %s，先运行 covhub.py init 生成模板" % path)
     with open(path, encoding="utf-8") as f:
-        cfg = json.load(f)
+        text = f.read()
+    if config_format(path) == "yaml":
+        data = parse_yaml(text, path)
+    else:
+        try:
+            data = json.loads(text)
+        except ValueError as exc:
+            die("配置文件 %s 不是合法 JSON：%s" % (path, exc))
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        die("配置文件 %s 的顶层必须是对象" % path)
+    return data
+
+
+def parse_yaml(text, path):
+    """YAML 解析依赖 PyYAML。
+
+    工具其余部分只用标准库，YAML 是唯一的例外 —— 装不了第三方包的机器
+    （离线内网、老镜像）可以继续用 JSON，两种格式功能完全等价。
+    """
+    try:
+        import yaml
+    except ImportError:
+        die("解析 %s 需要 PyYAML：pip install PyYAML\n"
+            "        装不上的话可以用 JSON 配置：covhub.py init --json" % path)
+    try:
+        return yaml.safe_load(text)
+    except Exception as exc:
+        die("配置文件 %s 解析失败：%s" % (path, exc))
+
+
+def load_config(path):
+    cfg = read_config_file(path)
     base = os.path.dirname(os.path.abspath(path))
     # 相对路径一律相对配置文件所在目录解析，便于整个目录搬迁
     for key in ("jacocoCli", "jacocoAgent", "dataDir"):
@@ -1193,6 +1251,192 @@ def cmd_report(cfg, args):
     render_dashboard(cfg)
 
 
+# --------------------------------------------------------------------------
+# YAML 行级改写
+#
+# retarget 每次发版都会回写配置。「解析成 dict 再整体 dump」的写法会把注释和排版
+# 一起抹掉，而能写注释正是配置换成 YAML 的理由 —— 所以这里只定位目标服务的那几
+# 行做替换，其余原文逐字不动。代价是只认缩进块写法，流式 {a: 1} 会直接报错。
+# --------------------------------------------------------------------------
+
+_YAML_PLAIN = re.compile(r"^[A-Za-z0-9_./][A-Za-z0-9_./+@=~-]*$")
+_YAML_KEY = re.compile(r"^([A-Za-z_][A-Za-z0-9_.\-]*)\s*:(\s|$)")
+_YAML_ITEM = re.compile(r"^(\s*)-(\s|$)")
+
+
+def _yaml_scalar(value):
+    """把标量渲染成 YAML。拿不准就加引号 —— 引号从不会解析错，裸值会。"""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    text = str(value)
+    if not _YAML_PLAIN.match(text):
+        return '"%s"' % text.replace("\\", "\\\\").replace('"', '\\"')
+    if text.lower() in ("true", "false", "null", "yes", "no", "on", "off", "~"):
+        return '"%s"' % text
+    if text[0].isdigit():
+        # 版本号裸写会被读成数字（1.4 → float，1 → int），一律引起来
+        return '"%s"' % text
+    return text
+
+
+def _yaml_split_comment(text):
+    """切成 (正文, 行尾注释, 注释起始列)。# 在引号里不算注释。"""
+    quote = None
+    for i, ch in enumerate(text):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or text[i - 1] in " \t"):
+            return text[:i], text[i:].strip(), i
+    return text, "", 0
+
+
+def _yaml_append_comment(line, comment, col):
+    """把行尾注释接回去，尽量还原它原来的列，读起来才不会错位。"""
+    if not comment:
+        return line
+    return line + " " * max(2, col - len(line)) + comment
+
+
+def _yaml_value(line):
+    """取 `key: value` 里的 value，剥掉行尾注释与引号。"""
+    body = _yaml_split_comment(line.rstrip("\r\n"))[0]
+    raw = body.partition(":")[2].strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[1:-1]
+    return raw
+
+
+def _yaml_blank(line):
+    body = line.strip()
+    return not body or body.startswith("#")
+
+
+def _yaml_key_col(lines, start, stop):
+    """这一项里各 key 的起始列。`-` 单独占一行时键从下一行的缩进算起。"""
+    m = re.match(r"^(\s*)-(\s*)", lines[start])
+    col = len(m.group(1)) + 1 + len(m.group(2))
+    if col >= len(lines[start].rstrip("\r\n")):
+        for i in range(start + 1, stop):
+            if not _yaml_blank(lines[i]):
+                return len(lines[i]) - len(lines[i].lstrip())
+    return col
+
+
+def _yaml_item_keys(lines, start, stop, key_col):
+    """列出这一项里的顶层 key，返回 [(key, 起始行, 尾后行)]。"""
+    hits = []
+    for i in range(start, stop):
+        if _yaml_blank(lines[i]):
+            continue
+        text = lines[i].rstrip("\r\n")
+        if i != start and len(text) - len(text.lstrip()) != key_col:
+            continue          # 嵌套在某个 key 底下的行，不是这一项的 key
+        m = _YAML_KEY.match(text[key_col:])
+        if m:
+            hits.append((m.group(1), i))
+    out = []
+    for n, (key, ks) in enumerate(hits):
+        ke = hits[n + 1][1] if n + 1 < len(hits) else stop
+        while ke > ks + 1 and _yaml_blank(lines[ke - 1]):
+            ke -= 1           # 块尾的空行/注释留给下一个 key
+        out.append((key, ks, ke))
+    return out
+
+
+def _yaml_service_item(lines, service):
+    """定位 services 下 name == service 的那一项，返回 (起始行, 尾后行, key 列)。"""
+    top = next((i for i, line in enumerate(lines)
+                if re.match(r"^services\s*:", line)), None)
+    if top is None:
+        raise RuntimeError("配置里找不到顶层的 services:")
+    end = len(lines)
+    for i in range(top + 1, len(lines)):
+        if not _yaml_blank(lines[i]) and not lines[i][:1].isspace():
+            end = i
+            break
+    while end > top + 1 and _yaml_blank(lines[end - 1]):
+        end -= 1
+
+    starts, item_indent = [], None
+    for i in range(top + 1, end):
+        m = _YAML_ITEM.match(lines[i])
+        if not m:
+            continue
+        if item_indent is None:
+            item_indent = len(m.group(1))
+        if len(m.group(1)) == item_indent:
+            starts.append(i)
+    if not starts:
+        raise RuntimeError("services 下没有缩进块写法的列表项，请手工修改配置")
+
+    for n, start in enumerate(starts):
+        stop = starts[n + 1] if n + 1 < len(starts) else end
+        while stop > start + 1 and _yaml_blank(lines[stop - 1]):
+            stop -= 1
+        key_col = _yaml_key_col(lines, start, stop)
+        for key, ks, _ in _yaml_item_keys(lines, start, stop, key_col):
+            if key == "name" and _yaml_value(lines[ks]) == service:
+                return start, stop, key_col
+    raise RuntimeError("配置里没有名为 %r 的服务" % service)
+
+
+def yaml_update_service(path, service, updates):
+    """就地改写 YAML 配置里某个服务的若干字段，只动这几行。"""
+    with open(path, encoding="utf-8", newline="") as f:
+        text = f.read()
+    lines = text.splitlines(keepends=True)
+    nl = "\r\n" if "\r\n" in text else "\n"
+    start, stop, key_col = _yaml_service_item(lines, service)
+    known = {k: (ks, ke) for k, ks, ke in _yaml_item_keys(lines, start, stop, key_col)}
+
+    plan = []
+    for key, value in updates.items():
+        ks, ke = known.get(key, (stop, stop))   # 没配过的字段追加到这一项末尾
+        plan.append((ks, ke, key, value))
+    # 从后往前改，前面几处的行号才不会被前一次替换挪动
+    for ks, ke, key, value in sorted(plan, key=lambda p: (p[0], p[2]), reverse=True):
+        exists = ks < ke
+        prefix = lines[ks][:key_col] if exists and ks == start else " " * key_col
+        _, comment, col = (_yaml_split_comment(lines[ks].rstrip("\r\n"))
+                           if exists else ("", "", 0))
+        list_indent = key_col + 2
+        for i in range(ks + 1, ke):
+            m = _YAML_ITEM.match(lines[i])
+            if m:
+                list_indent = len(m.group(1))   # 沿用原有的列表缩进风格
+                break
+        if isinstance(value, (list, tuple)):
+            block = [_yaml_append_comment("%s%s:" % (prefix, key), comment, col)]
+            block += ["%s- %s" % (" " * list_indent, _yaml_scalar(v)) for v in value]
+        else:
+            block = [_yaml_append_comment(
+                "%s%s: %s" % (prefix, key, _yaml_scalar(value)), comment, col)]
+        lines[ks:ke] = [b + nl for b in block]
+
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write("".join(lines))
+    os.replace(tmp, path)
+
+
+def json_update_service(path, service, updates):
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
+    hit = next((s for s in raw.get("services", []) if s["name"] == service), None)
+    if hit is None:
+        raise RuntimeError("配置里没有名为 %r 的服务" % service)
+    hit.update(updates)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(raw, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+
 def cmd_retarget(cfg, args):
     """发版后把配置指向新版本的 class 产物。
 
@@ -1203,27 +1447,29 @@ def cmd_retarget(cfg, args):
     固化成绝对路径 —— 整个目录要能原样搬到别的机器上。
     """
     path = args.config
-    with open(path, encoding="utf-8") as f:
-        raw = json.load(f)
-    hit = next((s for s in raw.get("services", []) if s["name"] == args.service), None)
-    if hit is None:
-        die("配置里没有名为 %r 的服务" % args.service)
+    updates = {}
     if args.version:
-        hit["version"] = args.version
+        updates["version"] = args.version
     if args.classfiles:
-        hit["classfiles"] = list(args.classfiles)
+        updates["classfiles"] = list(args.classfiles)
     if args.sourcefiles:
-        hit["sourcefiles"] = list(args.sourcefiles)
+        updates["sourcefiles"] = list(args.sourcefiles)
 
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(raw, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    raw = read_config_file(path)
+    if not any(s.get("name") == args.service for s in raw.get("services", [])):
+        die("配置里没有名为 %r 的服务" % args.service)
+    if updates:
+        if config_format(path) == "yaml":
+            yaml_update_service(path, args.service, updates)
+        else:
+            json_update_service(path, args.service, updates)
+        raw = read_config_file(path)
+    hit = next(s for s in raw["services"] if s.get("name") == args.service)
     log("%s -> version=%s classfiles=%s"
         % (args.service, hit.get("version"), hit.get("classfiles")))
 
 
-# 采集、结算、改配置都会写 data/ 与 targets.json，单进程内一律串行，
+# 采集、结算、改配置都会写 data/ 与配置文件，单进程内一律串行，
 # 避免看板 API 与后台轮询同时对同一个服务动手。
 _LOCK = threading.RLock()
 
@@ -1265,7 +1511,7 @@ def cmd_watch(cfg, args):
 # 远程控制 API
 #
 # 整套方案只需要一个服务端。被测服务所在的机器和发版节点不装 Python、不装 java、
-# 不放 targets.json，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。
+# 不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。
 #
 #   GET  /api/health                            存活探测，不需要令牌
 #   GET  /api/status[?service=X]                连通性与最新覆盖率（JSON）
@@ -1704,9 +1950,53 @@ def cmd_serve(cfg, args):
         httpd.serve_forever()
 
 
+CONFIG_TEMPLATE_YAML = """\
+# covhub 配置。相对路径一律相对本文件所在目录解析。
+jacocoAgent: ./lib/jacocoagent.jar
+jacocoCli: ./lib/jacococli.jar
+dataDir: ./data
+
+serve:
+  port: 8900
+  token: ""                  # 控制 API 的令牌，不配则任何人都能调写接口
+
+watch:
+  intervalSeconds: 300       # 轮询间隔，同时是断代时数据丢失的上界
+
+collect:                     # push 通道的收集端，只有配了 port，serve 才会起它
+  port: 6400
+  bindAddress: 0.0.0.0
+  advertiseAddress: 改成被测端能访问到的 hub 地址
+
+services:
+  - name: example-service
+    version: "1.0.0"
+    channel: pull            # pull：hub 去连 agent；push：agent 连回 hub
+    address: 127.0.0.1       # agent 所在机器，hub 连过去拉数据
+    port: 6300
+    bindAddress: 0.0.0.0     # agent 在被测端监听的地址
+    includes:                # 传给 agent，决定是否插桩，改了要重启服务
+      - com.example.*
+    excludes: []
+    classDumpDir: /tmp/covhub-classes/example-service   # 被测端路径
+    classfiles:              # 出报告用的 class，必须与运行中的服务同一份产物
+      - /path/to/classes
+    sourcefiles:             # 可选，配了才能在报告里下钻到源码行
+      - /path/to/src/main/java
+    reportExcludes:          # 只影响报告口径，随时可改重出报告
+      - com/example/**/dto/**
+    sourceEncoding: UTF-8
+"""
+
+
 def cmd_init(cfg_path, _args):
     if os.path.exists(cfg_path):
         die("%s 已存在，不覆盖" % cfg_path)
+    if config_format(cfg_path) == "yaml":
+        with open(cfg_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(CONFIG_TEMPLATE_YAML)
+        print("已生成配置模板 %s，按需修改后即可使用。" % cfg_path)
+        return
     template = {
         "jacocoAgent": "./lib/jacocoagent.jar",
         "jacocoCli": "./lib/jacococli.jar",
@@ -1946,7 +2236,7 @@ def build_dashboard_html(rows):
 
     cards = "\n".join(_card(r) for r in ordered) or (
         '<div class="blank"><h2>还没有配置任何服务</h2>'
-        "<p>在 targets.json 的 services 里加一条，再跑 "
+        "<p>在配置文件的 services 里加一条，再跑 "
         "<code>covhub.py dump &lt;服务名&gt;</code>。</p></div>")
 
     values = {
@@ -2235,12 +2525,16 @@ footer.foot {
 def main():
     parser = argparse.ArgumentParser(
         prog="covhub", description="通用 JaCoCo 运行期覆盖率采集与看板")
-    parser.add_argument("-c", "--config", default="targets.json", help="配置文件路径")
+    parser.add_argument("-c", "--config",
+                        help="配置文件路径，缺省按 %s 顺序探测"
+                             % " / ".join(CONFIG_CANDIDATES))
     parser.add_argument("-V", "--version", action="version",
                         version="covhub %s" % __version__)
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("init", help="生成配置模板")
+    p = sub.add_parser("init", help="生成配置模板")
+    p.add_argument("--json", action="store_true",
+                   help="生成 targets.json（默认生成 YAML，YAML 需要 PyYAML）")
 
     p = sub.add_parser("agent-opts", help="打印启动时应注入的 -javaagent 参数")
     p.add_argument("service")
@@ -2283,8 +2577,9 @@ def main():
     args = parser.parse_args()
 
     if args.cmd == "init":
-        return cmd_init(args.config, args)
+        return cmd_init(args.config or ("targets.json" if args.json else "targets.yaml"), args)
 
+    args.config = resolve_config_path(args.config)
     cfg = load_config(args.config)
     needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": ()}.get(
         args.cmd, ("jacocoCli", "jacocoAgent"))

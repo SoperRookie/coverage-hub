@@ -26,7 +26,7 @@ alias covhub='/opt/bin/covhub-client.sh'      # integration/covhub-client.sh，�
 | **pull**（默认） | hub 能连到被测端 | `output=tcpserver` | 被测端开 6300，且要能被 hub 访问 |
 | **push** | 不能开入站端口 / 容器只出不进 / 多副本自动扩缩 | `output=tcpclient` | 被测端不开端口，连 hub 的 6400 |
 
-通道在 hub 的 `targets.json` 里配（`"channel": "push"`），被测端的注入方式两者完全一样。
+通道在 hub 的配置里配（`channel: push`），被测端的注入方式两者完全一样。
 下面以 pull 为例；改 push 只需去掉端口映射那几行，参数串由 `agent-opts` 自动切换。
 
 ## Docker（不改镜像）
@@ -44,7 +44,7 @@ docker run -d --name my-service \
   -p 6300:6300 \
   myrepo/my-service:1.4.2
 
-# 起来之后把 agent 落盘的 class 传给 hub（路径取自 targets.json 的 classDumpDir）
+# 起来之后把 agent 落盘的 class 传给 hub（路径取自配置里的 classDumpDir）
 docker cp my-service:/tmp/covhub-classes/my-service ./cls
 tar czf cls.tgz -C ./cls . && covhub upload-classes my-service 1.4.2 cls.tgz --retarget
 rm -rf ./cls cls.tgz
@@ -52,7 +52,7 @@ rm -rf ./cls cls.tgz
 
 三个容易错的点：
 
-1. agent jar 要**挂进容器**，且 hub 的 `targets.json` 里 `jacocoAgent` 要写**容器内
+1. agent jar 要**挂进容器**，且 hub 配置里 `jacocoAgent` 要写**容器内
    路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
 2. `classDumpDir` 同理，写的是**容器内路径**，取的时候用 `docker cp`
 3. pull 通道下 `bindAddress` 必须 `0.0.0.0` 且 **6300 要映射出来**，否则 hub 连不上；
@@ -109,7 +109,7 @@ spec:
 上面这份用的是 **push 通道**（`output=tcpclient`），这在 K8s 下通常更合适：
 
 - Pod 不用暴露 6300，也不用 Service 固定地址
-- **多副本天然汇聚** —— 每个副本自己连回 hub，扩缩容不用改 `targets.json`；
+- **多副本天然汇聚** —— 每个副本自己连回 hub，扩缩容不用改配置；
   用 pull 的话得给每个副本配一条
 
 class 产物取一次即可（多副本是同一份产物，随便挑一个 Pod）：
@@ -138,7 +138,7 @@ dump + 归档。正确做法是在触发滚动更新**之前**，先跑
 # 值用 covhub agent-opts my-service 生成
 Environment="JAVA_TOOL_OPTIONS=-javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,classdumpdir=/tmp/covhub-classes/my-service"
 Environment="COVHUB_URL=http://covhub.internal:8900"
-# 停服前先结算。这里只是一条 curl —— 本机不需要 Python、java 和 targets.json。
+# 停服前先结算。这里只是一条 curl —— 本机不需要 Python、java 和配置文件。
 # 超时保护避免 hub 无响应时卡住重启。
 ExecStop=/usr/bin/timeout 60 /opt/bin/covhub-client.sh predeploy my-service
 ```

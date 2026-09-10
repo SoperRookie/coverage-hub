@@ -29,7 +29,7 @@
 
 | 依赖 | 说明 |
 |---|---|
-| `curl` | 就这一个。不需要 Python、不需要 java、不需要 `targets.json` |
+| `curl` | 就这一个。不需要 Python、不需要 java、不需要配置文件 |
 | 环境变量 `COVHUB_URL` | hub 地址，如 `http://covhub.internal:8900`。已写在 `Jenkinsfile.deploy` 的 `environment` 块里，改成你们的 |
 | 凭据（可选） | hub 配了 `serve.token` 时，建一个 Secret text 凭据存令牌，把 ID 填进 `COVHUB_TOKEN_ID` |
 | Jenkins 插件 | Pipeline Utility Steps（`covhub.diagnose` 用它的 `readJSON`）、Copy Artifacts、SonarQube Scanner；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
@@ -41,7 +41,7 @@
 
 > **本地模式（兜底）**：Jenkins agent 恰好就跑在 hub 那台机器上时，可以给各步骤传
 > `home: '/opt/coverage-hub'` 而不是 `hub:`，库会退回到直接调 `covhub.py`。
-> 此时才需要节点上有 Python 3、java 和 `targets.json`。没设 `COVHUB_URL` 也没传
+> 此时才需要节点上有 Python 3、java 和 hub 的配置文件。没设 `COVHUB_URL` 也没传
 > `hub:` 时自动走这条路。
 
 ## 三、构建期流水线要点
@@ -92,11 +92,11 @@
 ### 容器方式的一个易错点
 
 `docker` 和 `compose` 会把宿主机的 `AGENT_LIB_DIR` 挂到容器内（默认 `/opt/jacoco`）。
-此时 **`targets.json` 里的 `jacocoAgent` 必须写成容器内路径**（如
+此时 **hub 配置里的 `jacocoAgent` 必须写成容器内路径**（如
 `/opt/jacoco/jacocoagent.jar`），因为 agent 是在容器里被 JVM 加载的；而 `jacocoCli`
 仍然是执行采集那台机器上的路径。两者不在同一个文件系统里。
 
-另外 `AGENT_PORT` 必须映射出来，否则 covhub 连不到 agent —— 且 `targets.json` 里
+另外 `AGENT_PORT` 必须映射出来，否则 covhub 连不到 agent —— 且配置里
 该服务的 `bindAddress` 要是 `0.0.0.0`，绑回环地址时容器外无法访问。
 
 ### K8s 的两点额外要求

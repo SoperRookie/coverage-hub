@@ -9,7 +9,7 @@
 
 | 机器 | 需要什么 |
 |---|---|
-| covhub 那一台（唯一的服务端） | Python 3、java、`covhub.py`、`lib/*.jar`、`targets.json` |
+| covhub 那一台（唯一的服务端） | Python 3、java、`covhub.py`、`lib/*.jar`、`targets.yaml`（YAML 配置要 `pip install PyYAML`；也可以用 `targets.json`，零依赖） |
 | 被测服务所在机器 | `jacocoagent.jar`（`covhub fetch-agent` 下载），能被 hub 连上 6300 |
 | 发版节点 / 流水线 | `curl`（用 `integration/covhub-client.sh` 包一层） |
 | **被测项目本身** | **什么都不用改** —— 不改代码、不改 pom、不改构建流水线 |
@@ -37,19 +37,13 @@ mkdir -p lib
 cp <jacoco 发行包>/lib/jacocoagent.jar lib/
 cp <jacoco 发行包>/lib/jacococli.jar   lib/
 
-python3 covhub.py init          # 生成 targets.json 模板
+python3 covhub.py init          # 生成 targets.yaml 模板（--json 生成 JSON 版）
 ```
 
-打开 `targets.json`，把 `serve.token` 改成一串随机字符串：
+生成一串随机字符串，填进 `targets.yaml` 的 `serve.token`：
 
 ```bash
-python3 - <<'PY'
-import json, secrets, pathlib
-p = pathlib.Path("targets.json"); c = json.loads(p.read_text(encoding="utf-8"))
-c.setdefault("serve", {})["token"] = secrets.token_urlsafe(24)
-p.write_text(json.dumps(c, ensure_ascii=False, indent=2), encoding="utf-8")
-print("serve.token =", c["serve"]["token"])
-PY
+python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 ```
 
 这个令牌是控制 API 的唯一门禁 —— 不配就是**任何能连上 8900 的人都能拉数据、清零计数器**。记下来，发版节点要用。
@@ -182,7 +176,7 @@ sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregat
 
 出报告要有 class，而且必须是**产生这批 exec 的那一份** —— JaCoCo 按类的 CRC64 指纹匹配，对不上报告就全红，而且**不会报错**。
 
-v1.1.0 的做法是让 agent 自己把它加载到的 class 落盘，这样匹配是定义上必然成立的，不需要被测项目做任何事。在 `targets.json` 里给该服务加一项（**被测端路径**）：
+v1.1.0 的做法是让 agent 自己把它加载到的 class 落盘，这样匹配是定义上必然成立的，不需要被测项目做任何事。在配置里给该服务加一项（**被测端路径**）：
 
 ```json
 "classDumpDir": "/tmp/covhub-classes/order-service"
@@ -223,24 +217,29 @@ rm -rf cls cls.tgz /tmp/covhub-classes/order-service
 covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
 ```
 
-### Step 4 · 在 targets.json 里加一条
+### Step 4 · 在配置的 services 里加一条
 
-```json
-{
-  "name":        "order-service",
-  "version":     "1.4.2",
-  "address":     "10.0.1.21",
-  "port":        6300,
-  "bindAddress": "0.0.0.0",
-  "includes":    ["com.example.order.*"],
-  "excludes":    [],
-  "classDumpDir": "/tmp/covhub-classes/order-service",
-  "classfiles":  ["./data/order-service/artifacts/1.4.2"],
-  "sourcefiles": ["/opt/src/order-service/src/main/java"],
-  "reportExcludes": ["com/example/order/**/dto/**", "com/example/order/*/mapper/**"],
-  "sourceEncoding": "UTF-8"
-}
+```yaml
+  - name: order-service
+    version: "1.4.2"          # 版本号一律加引号，裸写的 1.4 会被读成数字
+    address: 10.0.1.21
+    port: 6300
+    bindAddress: 0.0.0.0
+    includes:
+      - com.example.order.*
+    excludes: []
+    classDumpDir: /tmp/covhub-classes/order-service
+    classfiles:
+      - ./data/order-service/artifacts/1.4.2
+    sourcefiles:
+      - /opt/src/order-service/src/main/java
+    reportExcludes:
+      - com/example/order/**/dto/**
+      - com/example/order/*/mapper/**
+    sourceEncoding: UTF-8
 ```
+
+> 用 `targets.json` 的话，同样一条写成 JSON 对象放进 `services` 数组，字段名完全一样。
 
 几个容易配错的地方：
 
@@ -277,7 +276,7 @@ covhub-client.sh agent-opts  order-service
 # -javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*,sessionid=1.4.2
 ```
 
-参数串里的 jar 路径取自 hub 的 `targets.json` 里的 `jacocoAgent`。被测机器上放在别处的话，把那一项配成**被测端的路径**（容器场景就是容器内路径）。
+参数串里的 jar 路径取自 hub 配置里的 `jacocoAgent`。被测机器上放在别处的话，把那一项配成**被测端的路径**（容器场景就是容器内路径）。
 
 按部署方式选一种注入。**共同点只有一条：设成目标 JVM 的 `JAVA_TOOL_OPTIONS`。**
 
@@ -308,7 +307,7 @@ docker run -d --name order-service \
 
 三个必须注意的点：
 
-1. agent jar 要**挂进容器**（宿主机那份用 `covhub-client.sh fetch-agent` 下载），且 hub 的 `targets.json` 里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
+1. agent jar 要**挂进容器**（宿主机那份用 `covhub-client.sh fetch-agent` 下载），且 hub 配置里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
 2. `bindAddress` 必须 `0.0.0.0`，绑回环地址容器外连不进去
 3. **6300 端口要映射出来**，否则 covhub 连不上
 
@@ -376,7 +375,7 @@ kubectl -n prod rollout status deployment/order-service
 push 让被测端主动连回来：
 
 - 被测端不允许开入站端口，或容器网络只出不进
-- 服务有多副本，且会自动扩缩（用 pull 得给每个副本在 `targets.json` 里配一条，
+- 服务有多副本，且会自动扩缩（用 pull 得给每个副本在配置里配一条，
   一扩缩就得改配置）
 - 跨网段、跨防火墙，只有单向可达
 
@@ -492,7 +491,7 @@ covhub-client.sh diagnose order-service
 | 现象 | 原因 |
 |---|---|
 | **任何覆盖率数字不对劲** | **先跑 `covhub-client.sh diagnose <service>`** —— 指纹匹配率、会话数、断代记录三样能定位下面绝大多数情况 |
-| push：日志说「匹配不到任何服务」 | agent 的 `sessionid` 和 `targets.json` 里的服务名对不上。用 `agent-opts` 生成参数串就不会错 |
+| push：日志说「匹配不到任何服务」 | agent 的 `sessionid` 和配置里的服务名对不上。用 `agent-opts` 生成参数串就不会错 |
 | push：实例连上了但没数据 | hub 没带 `--with-watch`，收集端起了但没人去取数 |
 | push：`status` 显示 `?` | 你在**另一个进程**里跑的 CLI，看不到收集端手上的连接 —— 那是「不知道」不是「离线」，看 API 或看板 |
 | 客户端报 `HTTP 401` | `COVHUB_TOKEN` 没设或和 hub 的 `serve.token` 对不上 |

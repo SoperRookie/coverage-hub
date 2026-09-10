@@ -1,0 +1,41 @@
+# 配置模板。复制为 targets.yaml 后按实际环境修改；targets.yaml 已被 .gitignore 排除。
+# 需要 PyYAML（pip install PyYAML）。装不上第三方包的机器可以改用等价的
+# targets.example.json —— 两种格式功能完全一样，按扩展名自动分派。
+#
+# 相对路径一律相对本文件所在目录解析，整个目录可以直接搬到别的机器上。
+
+jacocoAgent: ./lib/jacocoagent.jar      # 被测端能看到的 agent 路径（容器场景填容器内路径）
+jacocoCli: ./lib/jacococli.jar
+dataDir: ./data
+
+serve:
+  port: 8900
+  token: ""                             # 控制 API 的令牌，不配则任何人都能调写接口
+
+collect:                                # push 通道的收集端，只有配了 port，serve 才会起它
+  port: 6400
+  bindAddress: 0.0.0.0
+  advertiseAddress: covhub.internal     # 被测端连回 hub 的地址，不是 hub 的监听地址
+
+watch:
+  intervalSeconds: 300                  # 轮询间隔，同时是断代时数据丢失的上界
+
+services:
+  - name: order-service
+    channel: pull                       # pull：hub 去连 agent；push：agent 连回 hub
+    version: "1.4.2"
+    address: 10.0.1.21                  # agent 所在机器，hub 连过去拉数据
+    port: 6300
+    bindAddress: 0.0.0.0                # agent 在被测端监听的地址
+    includes:                           # 传给 agent，决定是否插桩，改了要重启服务
+      - com.example.order.*
+    excludes: []
+    classDumpDir: /tmp/covhub-classes/order-service   # 被测端路径
+    classfiles:                         # 出报告用的 class，必须与运行中的服务同一份产物
+      - /opt/artifacts/order-service/1.4.2
+    sourcefiles:                        # 可选，配了才能在报告里下钻到源码行
+      - /opt/src/order-service/src/main/java
+    reportExcludes:                     # 只影响报告口径，随时可改重出报告
+      - com/example/order/**/dto/**
+      - com/example/order/*/mapper/**
+    sourceEncoding: UTF-8

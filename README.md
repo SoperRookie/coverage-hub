@@ -1,11 +1,11 @@
-# coverage-hub v1.2.2
+# coverage-hub v1.3.0
 
 通用 JaCoCo 覆盖率方案：**构建期**自动出聚合报告推 SonarQube，**运行期**随服务启动自动采集、发版前自动结算、并提供实时在线看板。
 
 与被测服务无关 —— 任何 Java 服务只要能加 JVM 参数就能接入，不需要改被测项目的代码或 pom。
 
 **整套方案只部署一个服务端。** 被测服务所在的机器、发版节点都不装 Python、不装
-java、不放 `targets.json` —— 它们只需要 `curl`，以及被测 JVM 里挂的那个
+java、不放配置文件 —— 它们只需要 `curl`，以及被测 JVM 里挂的那个
 `jacocoagent.jar`（还能直接从 hub 下载）。详见 [§ 二·六 单点部署](#二六单点部署与远程-api)。
 
 **也不需要被测项目的构建流水线配合。** v1.1.0 起，出报告用的 class 由 agent 自己
@@ -28,7 +28,7 @@ export JAVA_TOOL_OPTIONS="$(python covhub.py agent-opts my-service)"
 # 然后照常启动服务
 ```
 
-`agent-opts` 会根据 `targets.json` 里该服务的配置生成完整参数串，例如：
+`agent-opts` 会根据配置里该服务的这几项生成完整参数串，例如：
 
 ```
 -javaagent:/opt/coverage-hub/lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,sessionid=1.4.2
@@ -336,42 +336,65 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
 
 ## 三、配置
 
-`targets.json`（可从 `targets.example.json` 复制，或用 `covhub.py init` 生成）。它含各环境地址与路径，每台机器不同，已被 `.gitignore` 排除 —— 版本库里维护的是 `targets.example.json`。
+配置文件可以是 **YAML 或 JSON**，按扩展名自动分派；`-c` 不给时按
+`targets.yaml` → `targets.yml` → `targets.json` 的顺序探测。多服务场景推荐 YAML ——
+能写注释、不用数逗号引号。可从 `targets.example.yaml` 复制，或用 `covhub.py init`
+生成（加 `--json` 生成 JSON 模板）。
+
+> YAML 需要 `pip install PyYAML`，这是本工具唯一的第三方依赖。装不上第三方包的
+> 机器（离线内网、老镜像）继续用 JSON 即可，两种格式功能完全等价。
+
+它含各环境地址与路径，每台机器不同，已被 `.gitignore` 排除 —— 版本库里维护的是
+`targets.example.yaml` 和等价的 `targets.example.json`。
 
 同样被排除的还有 `lib/*.jar`（由 JaCoCo 发行包提供，按需放入）和 `data/`（采集产物）。
 
 > `data/<service>/versions/` 下的 exec 是**不可再生**的真实执行轨迹。需要长期留存的话请归档到对象存储或制品库，别指望 git。
 
-```json
-{
-  "jacocoAgent": "./lib/jacocoagent.jar",
-  "jacocoCli":   "./lib/jacococli.jar",
-  "dataDir":     "./data",
-  "serve":  { "port": 8900, "token": "改成一串随机字符串" },
-  "watch":  { "intervalSeconds": 300 },
-  "collect": {
-    "port": 6400,
-    "bindAddress": "0.0.0.0",
-    "advertiseAddress": "covhub.internal"
-  },
-  "services": [
-    {
-      "name":        "my-service",
-      "version":     "1.4.2",
-      "channel":     "pull",
-      "address":     "127.0.0.1",
-      "port":        6300,
-      "bindAddress": "0.0.0.0",
-      "includes":    ["com.example.*"],
-      "excludes":    [],
-      "classDumpDir": "/tmp/covhub-classes/my-service",
-      "classfiles":  ["/opt/artifacts/my-service/1.4.2/classes"],
-      "sourcefiles": ["/opt/src/my-service/src/main/java"],
-      "reportExcludes": ["com/example/**/dto/**", "com/example/*/mapper/**"],
-      "sourceEncoding": "UTF-8"
-    }
-  ]
-}
+```yaml
+jacocoAgent: ./lib/jacocoagent.jar
+jacocoCli: ./lib/jacococli.jar
+dataDir: ./data
+
+serve:
+  port: 8900
+  token: 改成一串随机字符串
+watch:
+  intervalSeconds: 300
+collect:
+  port: 6400
+  bindAddress: 0.0.0.0
+  advertiseAddress: covhub.internal
+
+services:
+  - name: my-service
+    version: "1.4.2"          # 版本号一律加引号，裸写的 1.4 会被读成数字
+    channel: pull
+    address: 127.0.0.1
+    port: 6300
+    bindAddress: 0.0.0.0
+    includes:
+      - com.example.*
+    excludes: []
+    classDumpDir: /tmp/covhub-classes/my-service
+    classfiles:
+      - /opt/artifacts/my-service/1.4.2/classes
+    sourcefiles:
+      - /opt/src/my-service/src/main/java
+    reportExcludes:
+      - com/example/**/dto/**
+      - com/example/*/mapper/**
+    sourceEncoding: UTF-8
+
+  - name: another-service     # 多服务就在这里往下加，各服务之间互不影响
+    version: "2.0.1"
+    address: 10.0.1.22
+    port: 6300
+    includes:
+      - com.example.another.*
+    classDumpDir: /tmp/covhub-classes/another-service
+    classfiles:
+      - /opt/artifacts/another-service/2.0.1/classes
 ```
 
 | 字段 | 说明 |
@@ -391,7 +414,10 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
 
 `includes`/`excludes` 与 `reportExcludes` 是两个层次：前者决定**是否插桩**（被排除的类连数据都不会产生，事后无法找回），后者只影响**报告统计口径**（随时可调，重出报告即可）。
 
-相对路径一律相对 `targets.json` 所在目录解析，整个目录可以直接搬到别的机器上。
+相对路径一律相对配置文件所在目录解析，整个目录可以直接搬到别的机器上。
+
+`retarget`（发版后改 `version` / `classfiles`）会回写配置文件。YAML 配置只替换目标
+服务的那几行，**注释和排版原样保留**；JSON 配置则整体重写。
 
 ---
 
@@ -399,7 +425,7 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
 
 | 命令 | 用途 |
 |---|---|
-| `init` | 生成配置模板 |
+| `init [--json]` | 生成配置模板，默认 `targets.yaml`，`--json` 生成 `targets.json` |
 | `agent-opts <service>` | 打印启动时应注入的 `-javaagent` 参数串 |
 | `status [service]` | 目标连通性与最新覆盖率 |
 | `dump <service>` | 拉一次快照并出报告（累加，不清零） |
@@ -410,7 +436,8 @@ push 通道的收集端口（`collect.port`）同样没有认证 —— 任何�
 | `watch [--interval N]` | 守护进程，定时轮询全部目标 |
 | `serve [--port N] [--with-watch]` | HTTP 服务：看板 + 控制 API，`--with-watch` 顺带在同进程里采集 |
 
-只依赖 Python 3 标准库和 `java`，无第三方包。
+只依赖 Python 3 标准库和 `java`。唯一的第三方包是 YAML 配置要用的 `PyYAML` ——
+用 JSON 配置则完全零依赖。
 
 ---
 

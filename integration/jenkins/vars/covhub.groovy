@@ -15,12 +15,13 @@
  *             也可以不传，改设环境变量 COVHUB_TOKEN
  *
  *      整套方案只需要一个服务端。发版节点不装 Python、不装 java、不放
- *      targets.json —— dump / 结算 / 出报告全在 hub 上完成。
+ *      配置文件 —— dump / 结算 / 出报告全在 hub 上完成。
  *
  *   ② 本地模式（兜底）—— 节点上装了 covhub 本体时才可用，即 Jenkins agent 就
- *      跑在 hub 那台机器上。此时节点需要 Python 3、java、covhub.py、targets.json。
+ *      跑在 hub 那台机器上。此时节点需要 Python 3、java、covhub.py 与配置文件。
  *      home    covhub 安装目录，默认 /opt/coverage-hub
- *      config  targets.json 路径，默认 <home>/targets.json
+ *      config  配置文件路径，不传则由 covhub 在 <home> 下自行探测
+ *              （targets.yaml → targets.yml → targets.json）
  *      python  python 可执行文件，默认 python3
  *
  * 没传 hub 也没设 COVHUB_URL 时自动落到本地模式。
@@ -39,9 +40,10 @@ private String hubUrl(Map args) {
 /** 本地模式的命令前缀 */
 private String cli(Map args) {
     String home = args.home ?: '/opt/coverage-hub'
-    String config = args.config ?: "${home}/targets.json"
     String python = args.python ?: 'python3'
-    return "${python} ${home}/covhub.py -c ${config}"
+    // 不传 config 就不加 -c，交给 covhub 在工作目录里按 yaml → yml → json 探测
+    String opt = args.config ? " -c ${args.config}" : ''
+    return "cd ${home} && ${python} ${home}/covhub.py${opt}"
 }
 
 /**
