@@ -280,6 +280,7 @@ HTTP 接口，由 hub 代劳：
 | 接口 | 方法 | 用途 |
 |---|---|---|
 | `/api/health` | GET | 存活探测，不需要令牌 |
+| `/api/openapi.json` | GET | 这些接口的 OpenAPI 3.0 描述，不需要令牌 |
 | `/api/status[?service=X]` | GET | 连通性与最新覆盖率（JSON） |
 | `/api/agent-opts?service=X` | GET | 该服务应注入的 `-javaagent` 参数串（加 `&format=text` 出纯文本） |
 | `/api/agent.jar` | GET | 下载 `jacocoagent.jar` |
@@ -293,6 +294,42 @@ HTTP 接口，由 hub 代劳：
 
 写操作在 hub 内部串行执行，返回体里带着这次执行的日志；**HTTP 非 2xx 表示失败**，
 调用方应当据此让部署流程停下来。
+
+### 查看接口文档
+
+`GET /api/openapi.json` 是上面这张表的机器可读版（OpenAPI 3.0.3）。它和
+`/api/health` 一样**不需要令牌**，并且带 `Access-Control-Allow-Origin: *` ——
+Swagger UI 基本总跑在别的地址上，没有这个头浏览器会把拉取请求直接拦掉。
+
+最省事的一条，本机起个 Swagger UI 指过去：
+
+```bash
+docker run --rm -p 8080:8080 \
+  -e SWAGGER_JSON_URL=http://covhub.internal:8900/api/openapi.json \
+  swaggerapi/swagger-ui
+
+# 然后打开 http://localhost:8080
+```
+
+> hub 跑在宿主机上时，容器里的 `localhost` 不是宿主机 —— 把地址换成
+> `http://host.docker.internal:8900/api/openapi.json`。
+
+其他方式：
+
+| 工具 | 怎么做 |
+|---|---|
+| 已有的 Swagger UI | 顶部 Explore 框填 `http://<hub>:8900/api/openapi.json` |
+| Apifox / Postman | 按 URL 导入同一个地址（桌面端不受浏览器跨域限制） |
+| API 网关 | 直接拉这个 URL |
+| 不想联网 | 仓库里的 `docs/openapi.json` 就是同一份，导入本地文件即可 |
+
+两个边界值得先知道：
+
+- **没有内置的 Swagger UI 页面。** 那要 1~2MB 静态资源，要么引 CDN（hub 常在内网，
+  打不开，也和看板不引 CDN 的约定相左），要么多一个部署步骤。
+- **"Try it out" 只在 UI 与 hub 同源时可用。** 带令牌的接口一律不发 CORS 头 ——
+  鉴权认 Cookie，给它们开跨域等于让任意页面替已登录的浏览器去调写接口。
+  跨源**看**文档没问题，真要调接口用 `curl` 或 `covhub-client.sh`。
 
 发版节点上用 `integration/covhub-client.sh` 包一层，只依赖 curl：
 
@@ -371,7 +408,8 @@ push 通道的收集端口（`collect.port`）没有认证 —— 任何能连�
 它含各环境地址与路径，每台机器不同，已被 `.gitignore` 排除 —— 版本库里维护的是
 `targets.example.yaml` 和等价的 `targets.example.json`。
 
-同样被排除的还有 `lib/*.jar`（由 JaCoCo 发行包提供，按需放入）和 `data/`（采集产物）。
+同样被排除的还有 `data/`（采集产物）。`lib/` 则相反：covhub 用得上的那两个 jar
+在版本库里，克隆下来就能跑，`.gitignore` 只挡住 `lib/` 下的其余东西。
 
 > `data/<service>/versions/` 下的 exec 是**不可再生**的真实执行轨迹。需要长期留存的话请归档到对象存储或制品库，别指望 git。
 
