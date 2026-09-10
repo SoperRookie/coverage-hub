@@ -34,6 +34,7 @@ import io
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import socketserver
@@ -47,6 +48,7 @@ import time
 import urllib.parse
 import zipfile
 from datetime import datetime
+from html import escape as html_escape
 
 __version__ = "1.3.0"
 
@@ -469,8 +471,29 @@ def remote_dump(rfile, wfile, reset=False):
 #      另起一个 watch 进程够不着它。所以 push 通道要求 serve --with-watch。
 # --------------------------------------------------------------------------
 
+# 认领新连接时等第一次 dump 的上限 —— agent 刚连上、类还没加载完也走这条路。
+HANDSHAKE_TIMEOUT = 30
+# 之后每次取数的上限，可用 collect.dumpTimeoutSeconds 调。这是**单次 recv** 的
+# 上限，不是总时长：正常 dump 每个分片都有数据，只有对端真卡住才会等满。
+DEFAULT_DUMP_TIMEOUT = 20
+
+
 def service_channel(svc):
     return (svc.get("channel") or "pull").lower()
+
+
+def _close_quietly(*targets):
+    """关连接时的错误一律不关心 —— 走到这儿说明它已经没用了。"""
+    for target in targets:
+        try:
+            target.close()
+        except Exception:
+            pass
+
+
+def _class_ids_in(execdata):
+    """一次 dump 里出现过的 class id 集合。id 就是 JaCoCo 的 CRC64 指纹。"""
+    return frozenset(cid for cid, _, _ in execdata)
 
 
 def endpoint_label(svc):
@@ -510,54 +533,76 @@ class PushCollector:
         log("push 收集端已监听 %s:%d（等待 output=tcpclient 的 agent 连入）" % (bind, port))
 
     def _accept_loop(self):
+        """accept 循环。除了监听 socket 真的关了，任何错误都不许让它退出。
+
+        原先这里 `except OSError: return` —— fd 临时耗尽、对端在 accept 前就
+        重置连接这类瞬时错误，会让收集端从此**永久不再接客**，而且一声不吭。
+        push 通道无声停摆和守护进程无声停摆是一回事。
+        """
         while True:
             try:
                 sock, peer = self.srv.accept()
-            except OSError:
-                return
-            threading.Thread(target=self._claim, args=(sock, peer), daemon=True).start()
+            except OSError as exc:
+                if self.srv is None or self.srv.fileno() < 0:
+                    return                      # 监听 socket 已关闭，正常收场
+                log("! push 收集端 accept 出错，1 秒后重试 —— %s" % exc)
+                time.sleep(1)
+                continue
+            try:
+                threading.Thread(target=self._claim, args=(sock, peer),
+                                 daemon=True).start()
+            except RuntimeError as exc:
+                # 起不了线程也不能拖垮循环，回绝这一条就是了
+                log("! push：起不了处理线程，回绝 %s:%d —— %s" % (peer[0], peer[1], exc))
+                _close_quietly(sock)
 
     def _claim(self, sock, peer):
-        """认领一条新连接：立刻 dump 一次，从 SessionInfo 里读出它是谁。"""
+        """认领一条新连接：立刻 dump 一次，从 SessionInfo 里读出它是谁。
+
+        整段包在一个 except 里，而且**连 SystemExit 一起接**。这里会调
+        load_config / find_service，它们内部走的是 die()，抛的是 SystemExit ——
+        它不是 Exception 的子类，漏出去就是这个线程静默死亡加连接泄漏，
+        既没有日志也没有回收。
+        """
         who = "%s:%d" % peer
+        cid = None
         try:
-            sock.settimeout(30)
+            sock.settimeout(HANDSHAKE_TIMEOUT)
             rfile, wfile = sock.makefile("rb"), sock.makefile("wb")
             sessions, execdata = remote_dump(rfile, wfile, reset=False)
-        except Exception as exc:
-            log("push：来自 %s 的连接握手失败 —— %s" % (who, exc))
-            try:
-                sock.close()
-            except OSError:
-                pass
-            return
 
-        sessionid = sessions[0][0] if sessions else ""
-        cfg = load_config(self.cfg_path)
-        service = _sessionid_to_service(cfg, sessionid)
-        with self.lock:
-            self.seq += 1
-            cid = self.seq
-            self.conns[cid] = {
-                "id": cid, "peer": who, "sessionid": sessionid, "service": service,
-                "since": datetime.now().isoformat(timespec="seconds"),
-                "last": None, "sock": sock, "rfile": rfile, "wfile": wfile,
-                "sessionStart": sessions[0][1] if sessions else None,
-            }
+            sessionid = sessions[0][0] if sessions else ""
+            cfg = load_config(self.cfg_path)
+            service = _sessionid_to_service(cfg, sessionid)
+            with self.lock:
+                self.seq += 1
+                cid = self.seq
+                self.conns[cid] = {
+                    "id": cid, "peer": who, "sessionid": sessionid, "service": service,
+                    "since": datetime.now().isoformat(timespec="seconds"),
+                    "last": None, "sock": sock, "rfile": rfile, "wfile": wfile,
+                    "sessionStart": sessions[0][1] if sessions else None,
+                    "classIds": _class_ids_in(execdata),
+                }
 
-        if not service:
-            log('push：%s 连上来了，但 sessionid "%s" 匹配不到任何服务 —— '
-                "配置里的服务名和 agent 的 sessionid 要对上" % (who, sessionid))
-            return
+            if not service:
+                log('push：%s 连上来了，但 sessionid "%s" 匹配不到任何服务 —— '
+                    "配置里的服务名和 agent 的 sessionid 要对上" % (who, sessionid))
+                return
 
-        log('push：%s 连入，认领为服务 %s（sessionid "%s"）' % (who, service, sessionid))
-        # 握手那一次拿到的数据本身就是有效数据，直接存下，别浪费
-        try:
+            log('push：%s 连入，认领为服务 %s（sessionid "%s"）' % (who, service, sessionid))
+            # 握手那一次拿到的数据本身就是有效数据，直接存下，别浪费
             svc = find_service(cfg, service)
             with _LOCK:
                 self._store(cfg, svc, cid, sessions, execdata)
-        except Exception as exc:
-            log("push：%s 的首次数据落盘失败 —— %s" % (who, exc))
+        except (Exception, SystemExit) as exc:
+            # SystemExit 的 str() 只有退出码，说明是 die() 刚打到 stderr 的那条
+            why = "配置读取或服务查找失败（详见上一行）" if isinstance(exc, SystemExit)                 else str(exc)
+            log("push：来自 %s 的连接没能接住 —— %s" % (who, why))
+            if cid is None:
+                _close_quietly(sock)
+            else:
+                self.drop(cid, "认领失败")
 
     # ---- 数据 ----
 
@@ -569,7 +614,27 @@ class PushCollector:
         with self.lock:
             if cid in self.conns:
                 self.conns[cid]["last"] = datetime.now().isoformat(timespec="seconds")
+                # 这一版跑的是哪份 class，跟着每次取数刷新（见 mixed_versions）
+                self.conns[cid]["classIds"] = _class_ids_in(execdata)
         return path
+
+    def mixed_versions(self, service):
+        """在线实例里是不是同时跑着两份不同的 class。
+
+        这是 push 通道下 pull 那套「断代检测」的对应物。pull 是单实例，进程一重启
+        计数器就归零，混桶必然出错，所以必须封存；push 是多副本，副本重启后数据
+        照样能 merge —— 只要跑的是**同一份 class**。真正会让报告出错的是滚动发版
+        中途：新旧副本的数据落进同一批 exec，对着任何一份 class 产物都只能对上一半。
+
+        判断只看 class id 集合的包含关系：同一份产物、加载进度不同 → 互为子集；
+        真的换了版本 → 双方都有对方没有的 id。这条不依赖任何人填的版本号。
+        """
+        sets = [c["classIds"] for c in self.instances(service) if c.get("classIds")]
+        for i in range(len(sets)):
+            for j in range(i + 1, len(sets)):
+                if (sets[i] - sets[j]) and (sets[j] - sets[i]):
+                    return True
+        return False
 
     def instances(self, service):
         with self.lock:
@@ -587,16 +652,50 @@ class PushCollector:
                     pass
 
     def dump_service(self, cfg, svc, reset=False):
-        """向该服务当前所有在线实例各要一次数据，返回落盘的文件数。"""
-        written = 0
-        for conn in self.instances(svc["name"]):
+        """向该服务当前所有在线实例各要一次数据，返回落盘的文件数。
+
+        取数并行，落盘串行。两件事都是有意的：
+
+          · **并行** —— 实例就是多副本，串行的话总耗时是各实例之和。一个网络
+            分区的实例（TCP 收不到 FIN）要等满 socket 超时才报错，而调用方是
+            握着 _LOCK 进来的 —— 串行等于让 N 个坏实例把整个 hub 冻住 N 倍的
+            超时。并行之后最坏等待不再随副本数放大。
+          · **落盘串行** —— write_exec_file 写的是同一个 exec 目录，交给调用方
+            那把锁保护，别在工作线程里各写各的。
+        """
+        conns = self.instances(svc["name"])
+        if not conns:
+            return 0
+
+        timeout = (cfg.get("collect") or {}).get("dumpTimeoutSeconds",
+                                                 DEFAULT_DUMP_TIMEOUT)
+        got = []
+
+        def fetch(conn):
             try:
-                sessions, execdata = remote_dump(conn["rfile"], conn["wfile"], reset=reset)
+                conn["sock"].settimeout(timeout)
+                sessions, execdata = remote_dump(conn["rfile"], conn["wfile"],
+                                                 reset=reset)
+                got.append((conn, sessions, execdata))     # list.append 本身是原子的
+            except (Exception, SystemExit) as exc:
+                # 实例没了。它最后一段数据随进程消失 —— 和 pull 一样没有补救手段
+                self.drop(conn["id"], str(exc))
+
+        workers = [threading.Thread(target=fetch, args=(c,), daemon=True)
+                   for c in conns]
+        for w in workers:
+            w.start()
+        for w in workers:
+            w.join()
+
+        written = 0
+        for conn, sessions, execdata in got:
+            try:
                 self._store(cfg, svc, conn["id"], sessions, execdata)
                 written += 1
             except Exception as exc:
-                # 实例没了。它最后一段数据随进程消失 —— 和 pull 一样没有补救手段
-                self.drop(conn["id"], str(exc))
+                # 取到了却写不下去，是 hub 这边的问题，别把实例当断线丢掉
+                log("push：%s 的数据落盘失败 —— %s" % (conn["peer"], exc))
         return written
 
 
@@ -766,14 +865,28 @@ def load_state(cfg, svc):
         try:
             with open(path, encoding="utf-8") as f:
                 return json.load(f)
-        except (ValueError, OSError):
-            pass
+        except (ValueError, OSError) as exc:
+            # 读不出来 = 历史清零 + 会话基线丢失，而采集会照常跑下去、断代检测
+            # 从此哑火。静默吞掉是最坏的处理方式，至少得在日志里留下痕迹。
+            log("! %s 的 state.json 读取失败，按空状态继续：%s" % (svc["name"], exc))
     return {"service": svc["name"], "history": [], "versions": []}
 
 
 def save_state(cfg, svc, state):
-    with open(state_path(cfg, svc), "w", encoding="utf-8") as f:
+    """先写临时文件再 os.replace —— state.json 不能有"写了一半"的中间态。
+
+    它一个文件装着 history、versions、breaks 和 sessionStart，直接原地覆写时
+    只要在中途断电或被 kill，就会留下半个 JSON；而 load_state 拿不到内容只会
+    退回空状态，一声不吭地把历史和断代基线一起丢掉。配置回写早就是这个待遇了
+    （见 yaml_update_service），这里跟上。
+    """
+    path = state_path(cfg, svc)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
 
 def update_state(cfg, svc, **fields):
@@ -980,6 +1093,46 @@ def detect_break(cfg, svc, new_exec):
     return current, archive
 
 
+def detect_push_break(cfg, svc):
+    """push 通道的断代检测：在线实例是不是跑着两份不同的 class。
+
+    pull 那套（比对 SessionInfo 的启动时刻）在这里不成立 —— push 是多副本，
+    副本各自重启、扩缩容都是常态，照搬过来会把每次扩容都当成一次断代。
+
+    push 下真正会让报告出错的是**滚动发版中途**：新旧副本的数据落进同一批
+    exec，对着任何一份 class 产物都只能对上一半，而 JaCoCo 不会为此报任何错。
+    所以这里抓的是混版本，不是重启。
+
+    和 pull 的另一个不同是**不自动封存**。两批数据都真实有效，只是分属两个
+    版本，「到此为止」的语义不成立；而多副本下自动封存还会凭空造出一堆归档。
+    这里只负责把话说清楚、记进 breaks 让看板亮起来，结算仍由 predeploy 驱动。
+    """
+    if _COLLECTOR is None:
+        return None
+    mixed = _COLLECTOR.mixed_versions(svc["name"])
+    state = load_state(cfg, svc)
+    if mixed == bool(state.get("pushMixed")):
+        return None                 # 状态没变。一次滚动发版会连着好几轮都成立
+
+    entry = None
+    if mixed:
+        entry = {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "reason": "mixed-versions",
+            "instances": len(collector_instances(svc["name"])),
+        }
+        state.setdefault("breaks", []).append(entry)
+        state["breaks"] = state["breaks"][-50:]
+        log("  !! 在线实例跑着两份不同的 class —— 多半是滚动发版正在进行")
+        log("     这一批 exec 跨了两个版本，对着任一份 class 产物都只能对上一半")
+        log("     发版流程里补一次 predeploy，把旧版本先结算掉")
+    else:
+        log("  实例的 class 已经统一，混版本状态解除")
+    state["pushMixed"] = mixed
+    save_state(cfg, svc, state)
+    return entry
+
+
 # --------------------------------------------------------------------------
 # 诊断
 # --------------------------------------------------------------------------
@@ -1081,8 +1234,12 @@ def cmd_diagnose(cfg, args):
         print()
         print("断代记录（最近 %d 条）：" % len(r["breaks"]))
         for b in r["breaks"]:
-            print("            %s  %s → %s  已结算为 %s"
-                  % (b["at"], b["from"], b["to"], b["sealedAs"]))
+            if b.get("sealedAs"):
+                print("            %s  %s → %s  已结算为 %s"
+                      % (b["at"], b.get("from", "?"), b.get("to", "?"), b["sealedAs"]))
+            else:
+                print("            %s  在线实例跑着两份不同的 class（%d 个实例），未结算"
+                      % (b["at"], b.get("instances", 0)))
 
 
 # --------------------------------------------------------------------------
@@ -1166,7 +1323,9 @@ def _snapshot(cfg, svc, reset, kind, version=None):
             # 探活和取数之间实例断开就会走到这儿，属于正常情况，
             # 交给上层记日志跳过，不能是致命错误
             raise RuntimeError("%s 当前没有实例在线，取不到数据" % svc["name"])
-        # push 的会话基线是每条连接各自的，不做全局断代判断（见 detect_break 注释）
+        # push 没有「进程重启 = 计数器归零」这个信号（多副本各自重启是常态），
+        # 会让报告出错的是滚动发版中途的混版本 —— 那才是这里要抓的
+        detect_push_break(cfg, svc)
     else:
         # 先落到暂存位置：得先看清这份数据属于哪个进程，才知道该把它归进哪个周期。
         staging = os.path.join(root, ".incoming.exec")
@@ -1655,6 +1814,20 @@ def _token(cfg):
     return os.environ.get("COVHUB_TOKEN") or (cfg.get("serve") or {}).get("token") or ""
 
 
+# 浏览器里点开报告时带令牌用的 Cookie。报告页里全是相对链接，不可能每条都
+# 挂上 ?token=，所以带对一次就种下它，后续静态请求靠它放行。
+TOKEN_COOKIE = "covhub_token"
+
+
+def _token_ok(given, expected):
+    """令牌比对。用 compare_digest 而不是 == —— 逐字符短路会泄漏正确的前缀长度。
+
+    比的是 bytes：token 里出现非 ASCII 时 compare_digest 的 str 形式会直接抛错。
+    """
+    return secrets.compare_digest(str(given or "").encode("utf-8"),
+                                  str(expected or "").encode("utf-8"))
+
+
 def _as_list(value):
     if not value:
         return []
@@ -1762,7 +1935,13 @@ def cmd_serve(cfg, args):
             route = self._route()
             if route.startswith("/api/") or route == "/agent.jar":
                 return self._api("GET")
-            return super().do_GET()
+            return self._static(super().do_GET)
+
+        def do_HEAD(self):
+            route = self._route()
+            if route.startswith("/api/") or route == "/agent.jar":
+                return self._send(405, {"ok": False, "error": "该接口不支持 HEAD"})
+            return self._static(super().do_HEAD)
 
         def do_POST(self):
             return self._api("POST")
@@ -1789,12 +1968,69 @@ def cmd_serve(cfg, args):
                     params.update({k: v[-1] for k, v in urllib.parse.parse_qs(raw).items()})
             return params
 
+        def _cookie_token(self):
+            raw = self.headers.get("Cookie") or ""
+            for part in raw.split(";"):
+                key, _, value = part.strip().partition("=")
+                if key == TOKEN_COOKIE:
+                    return urllib.parse.unquote(value)
+            return ""
+
         def _authorized(self, current, params):
             expected = _token(current)
             if not expected or self._route() == "/api/health":
                 return True
-            given = self.headers.get("X-Covhub-Token") or params.get("token") or ""
-            return given == expected
+            given = (self.headers.get("X-Covhub-Token") or params.get("token")
+                     or self._cookie_token() or "")
+            return _token_ok(given, expected)
+
+        def _grant(self, expected):
+            """令牌带对了：种上 Cookie，再跳回不带令牌的同一地址。
+
+            令牌留在地址栏会被浏览器历史和 Referer 一起带走，所以只让它在
+            这一次请求里出现。
+            """
+            parts = urllib.parse.urlsplit(self.path)
+            query = urllib.parse.parse_qs(parts.query)
+            query.pop("token", None)
+            target = urllib.parse.urlunsplit(
+                ("", "", parts.path, urllib.parse.urlencode(query, doseq=True), "")) or "/"
+            self.send_response(302)
+            self.send_header("Location", target)
+            self.send_header("Set-Cookie", "%s=%s; Path=/; HttpOnly; SameSite=Strict"
+                             % (TOKEN_COOKIE, urllib.parse.quote(expected)))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def _static(self, serve):
+            """dataDir 的静态服务 —— 配了令牌就必须和 /api/ 一起拦。
+
+            这底下不只有报告：artifacts/ 是线上跑的那份字节码（反编译即源码），
+            exec/ 是不可再生的执行轨迹，state.json 有全部历史。只护住 /api/
+            而把整棵树敞开，等于那道门白装。
+            """
+            try:
+                current = load_config(cfg_path)
+            except SystemExit:
+                return self._send(500, {"ok": False, "error": "配置文件读取失败"})
+            expected = _token(current)
+            if not expected:
+                return serve()
+
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            from_query = query.get("token", [""])[-1]
+            if from_query and _token_ok(from_query, expected):
+                return self._grant(expected)
+            given = (self.headers.get("X-Covhub-Token")
+                     or self._cookie_token() or from_query)
+            if not _token_ok(given, expected):
+                return self._send(401, {
+                    "ok": False,
+                    "error": "令牌无效或缺失",
+                    "hint": "浏览器：在地址后加 ?token=<serve.token>，之后靠 Cookie 放行；"
+                            "命令行：带 X-Covhub-Token 头",
+                })
+            return serve()
 
         def _send(self, code, payload, ctype="application/json; charset=utf-8"):
             if isinstance(payload, bytes):
@@ -1945,7 +2181,8 @@ def cmd_serve(cfg, args):
 
     log("covhub %s 已启动： http://127.0.0.1:%d/  （根目录 %s）" % (__version__, port, root))
     log("控制 API： http://127.0.0.1:%d/api/health%s"
-        % (port, "" if _token(cfg) else "    [未设置 serve.token，任何人都能调写接口]"))
+        % (port, "" if _token(cfg) else
+           "    [未设置 serve.token：写接口与 data/ 整个目录都对外敞开]"))
     with Server(("0.0.0.0", port), Handler) as httpd:
         httpd.serve_forever()
 
@@ -1967,6 +2204,7 @@ collect:                     # push 通道的收集端，只有配了 port，ser
   port: 6400
   bindAddress: 0.0.0.0
   advertiseAddress: 改成被测端能访问到的 hub 地址
+  dumpTimeoutSeconds: 20     # 向单个实例取数的上限，卡住的实例等这么久就丢弃
 
 services:
   - name: example-service
@@ -2003,7 +2241,8 @@ def cmd_init(cfg_path, _args):
         "dataDir": "./data",
         "serve": {"port": 8900},
         "collect": {"port": 6400, "bindAddress": "0.0.0.0",
-                    "advertiseAddress": "改成被测端能访问到的 hub 地址"},
+                    "advertiseAddress": "改成被测端能访问到的 hub 地址",
+                    "dumpTimeoutSeconds": 20},
         "watch": {"intervalSeconds": 300},
         "services": [{
             "name": "example-service",
@@ -2028,6 +2267,25 @@ def cmd_init(cfg_path, _args):
 # --------------------------------------------------------------------------
 # 看板
 # --------------------------------------------------------------------------
+
+def _esc(value):
+    """转义成可安全插进 HTML 文本或属性的字符串。
+
+    看板上的服务名、版本号、断代记录都不是本地常量 —— version 经
+    /api/retarget 从流水线传进来，落进 state.json，再被渲染进 index.html。
+    不转义就等于把写接口变成了看板的脚本注入入口，而 index.html 是全组在看的。
+    """
+    return html_escape("" if value is None else str(value), quote=True)
+
+
+def _url(value):
+    """编码成 URL 的一个路径段，再按 HTML 属性转义。
+
+    报告链接由服务名 / 版本号拼成，这两者都可能带 / # ? —— 只做 HTML 转义
+    拦不住它们改变链接指向，得先做百分号编码。
+    """
+    return _esc(urllib.parse.quote("" if value is None else str(value), safe=""))
+
 
 def dashboard_rows(cfg):
     """把每个服务整理成看板要用的一行。
@@ -2148,7 +2406,8 @@ def _card(r):
         '<span class="chan chan-%s">%s</span></div>'
         "%s</div>"
         '<div class="endpoint">%s</div>'
-        % (r["name"], r["channel"], r["channel"], _status_pill(r), r["endpoint"]))
+        % (_esc(r["name"]), _esc(r["channel"]), _esc(r["channel"]),
+           _status_pill(r), _esc(r["endpoint"])))
 
     if not latest:
         body = ('<div class="empty-body">尚未采集到数据<span>确认 agent 已注入，'
@@ -2167,9 +2426,15 @@ def _card(r):
                           "采集可能已经停了 —— 确认 watch 还在跑</div>"
                           % human_age(r["age"]))
         for b in reversed(r["breaks"]):
-            alerts.append('<div class="alert alert-warn">检测到未结算的重启，'
-                          "已自动结算为 <b>%s</b>（%s）</div>"
-                          % (b.get("sealedAs", "?"), b.get("at", "").replace("T", " ")))
+            at = _esc(b.get("at", "").replace("T", " "))
+            if b.get("sealedAs"):
+                alerts.append('<div class="alert alert-warn">检测到未结算的重启，'
+                              "已自动结算为 <b>%s</b>（%s）</div>"
+                              % (_esc(b.get("sealedAs", "?")), at))
+            else:
+                alerts.append('<div class="alert alert-warn">在线实例跑着两份不同的 '
+                              "class（%s）—— 滚动发版中途采到的数据对不上同一份 "
+                              "class 产物，发版流程里补一次 predeploy</div>" % at)
 
         body = (
             '<div class="headline">'
@@ -2191,19 +2456,19 @@ def _card(r):
                latest["branch"], latest["classesHit"], latest["classesTotal"],
                "{:,}".format(latest["covered"]), "{:,}".format(latest["total"]),
                spark(r["history"]),
-               latest["at"].replace("T", " "), human_age(r["age"]),
-               latest.get("version") or "—",
+               _esc(latest["at"].replace("T", " ")), human_age(r["age"]),
+               _esc(latest.get("version") or "—"),
                "".join(alerts)))
 
     links = []
     if r["hasReport"]:
         links.append('<a class="btn" href="%s/current/html/index.html">打开报告</a>'
-                     % r["name"])
+                     % _url(r["name"]))
         links.append('<a class="btn btn-quiet" href="%s/current/jacoco.xml">jacoco.xml</a>'
-                     % r["name"])
+                     % _url(r["name"]))
     if r["versions"]:
         vs = "".join('<a class="vtag" href="%s/versions/%s/html/index.html">%s</a>'
-                     % (r["name"], v["version"], v["version"])
+                     % (_url(r["name"]), _url(v["version"]), _esc(v["version"]))
                      for v in reversed(r["versions"]))
         links.append('<div class="vers"><span>已结算</span>%s</div>' % vs)
 

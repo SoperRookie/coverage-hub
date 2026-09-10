@@ -16,6 +16,7 @@ collect:                                # push 通道的收集端，只有配了
   port: 6400
   bindAddress: 0.0.0.0
   advertiseAddress: covhub.internal     # 被测端连回 hub 的地址，不是 hub 的监听地址
+  dumpTimeoutSeconds: 20                # 向单个实例取数的上限，卡住的实例等这么久就丢弃
 
 watch:
   intervalSeconds: 300                  # 轮询间隔，同时是断代时数据丢失的上界

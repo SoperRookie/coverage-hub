@@ -10,7 +10,8 @@
   "collect": {
     "port": 6400,
     "bindAddress": "0.0.0.0",
-    "advertiseAddress": "covhub.internal"
+    "advertiseAddress": "covhub.internal",
+    "dumpTimeoutSeconds": 20
   },
   "watch": {
     "intervalSeconds": 300

@@ -46,7 +46,12 @@ python3 covhub.py init          # 生成 targets.yaml 模板（--json 生成 JSO
 python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 ```
 
-这个令牌是控制 API 的唯一门禁 —— 不配就是**任何能连上 8900 的人都能拉数据、清零计数器**。记下来，发版节点要用。
+这个令牌是 8900 的唯一门禁，控制 API 和静态报告目录都归它管 —— 不配就是**任何能连上
+8900 的人都能拉数据、清零计数器，并下载 `data/` 底下的一切**（含 `artifacts/` 里线上
+跑的那份字节码）。记下来，发版节点和浏览器都要用。
+
+配了令牌之后**浏览器第一次打开看板要带上它**：`http://<hub>:8900/?token=<令牌>`。
+hub 会种一个 Cookie 再跳回干净地址，之后点报告、翻历史版本都不必再带。
 
 验证：
 
@@ -421,8 +426,9 @@ covhub-client.sh agent-opts order-service
   启动日志里会告警。
 - **`sessionid` 必须是服务名**（`agent-opts` 会自动设好）。收集端靠它认领连接 ——
   手工拼参数串时改了它，hub 会报「匹配不到任何服务」。
-- **断代自动检测对 push 不生效**（每个副本有各自的会话）。push 的版本切段靠
-  `predeploy`，或 class 指纹变化。
+- **push 的断代检测抓的是混版本，不是重启**（副本各自重启、扩缩容都是常态）。
+  滚动发版中途新旧副本同时在线时，hub 会告警并在看板上标出来，但**不自动封存**。
+  版本切段仍然靠 `predeploy`。
 
 ### Step 6 · 验证接入
 
@@ -483,6 +489,7 @@ covhub-client.sh diagnose order-service
 - [ ] agent 端口没有和同机其他服务撞车
 - [ ] agent 端口**没有暴露到公网**（无认证，谁都能拉数据和清零）
 - [ ] hub 配了 `serve.token`，且 8900 端口也没有暴露到公网
+- [ ] 不带令牌访问 `http://<hub>:8900/svc/state.json` 返回 401（没返回就是令牌没生效）
 
 ---
 
@@ -495,6 +502,8 @@ covhub-client.sh diagnose order-service
 | push：实例连上了但没数据 | hub 没带 `--with-watch`，收集端起了但没人去取数 |
 | push：`status` 显示 `?` | 你在**另一个进程**里跑的 CLI，看不到收集端手上的连接 —— 那是「不知道」不是「离线」，看 API 或看板 |
 | 客户端报 `HTTP 401` | `COVHUB_TOKEN` 没设或和 hub 的 `serve.token` 对不上 |
+| 浏览器打开看板是一段 401 JSON | 配了 `serve.token` 但地址没带令牌。用 `http://<hub>:8900/?token=<令牌>` 打开一次，之后靠 Cookie |
+| 看板本来能开，某天开始要令牌 | hub 加了 `serve.token`（或设了 `COVHUB_TOKEN` 环境变量）。令牌现在同时管着静态目录 |
 | 客户端报"连不上 hub" | `COVHUB_URL` 写错；hub 没起；8900 被防火墙挡了 |
 | `status` 里 `"online": false` / 连通列是 `--` | 服务没起；`output` 不是 `tcpserver`；`bindAddress` 绑了回环但要跨机访问；容器端口没映射；防火墙 |
 | dump 成功但覆盖率恒为 0 | `includes` 写错（用了 `/` 而不是 `.`，或包名拼错） |
@@ -504,6 +513,8 @@ covhub-client.sh diagnose order-service
 | 源码页乱码 | `sourceEncoding` 没设成 `UTF-8` |
 | 覆盖率数字只涨不跌，跨了好几个版本 | 发版时没跑 `predeploy`。v1.1.0 起 hub 会自动检测进程重启并结算，但重启前最后一个轮询周期的数据仍会丢 —— 能在停服前调 `predeploy` 就还是要调 |
 | 看板上莫名多出一个版本归档 | 这是自动断代：hub 发现被测进程重启过，替你结算了上一周期。`diagnose` 的「断代记录」里能看到前后的会话启动时刻 |
+| push：看板报「在线实例跑着两份不同的 class」 | 滚动发版正在进行，新旧副本同时在线。这批 exec 跨了两个版本，对着任一份 class 产物都只能对上一半 —— 发版流程里补一次 `predeploy`，把旧版本先结算掉 |
+| push：某个副本的数据突然不见了 | 取数超时（默认 20 秒）后该实例会被丢弃，日志里是「已断开（timed out）」。副本会重连，但那一段覆盖率随实例消失，和 pull 一样没有补救手段 |
 | 服务启动明显变慢 | `includes` 范围太大，把框架类也插桩了。收窄到自己的业务包 |
 
 ---
