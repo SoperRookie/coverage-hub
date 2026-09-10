@@ -2041,13 +2041,16 @@ def cmd_serve(cfg, args):
                 })
             return serve()
 
-        def _send(self, code, payload, ctype="application/json; charset=utf-8"):
+        def _send(self, code, payload, ctype="application/json; charset=utf-8",
+                  headers=None):
             if isinstance(payload, bytes):
                 data = payload
             else:
                 data = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
             self.send_response(code)
             self.send_header("Content-Type", ctype)
+            for key, value in (headers or {}).items():
+                self.send_header(key, value)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -2169,6 +2172,16 @@ def cmd_serve(cfg, args):
             if code == 200 and params.get("format") == "text" and "agentOpts" in body:
                 return self._send(200, (body["agentOpts"] + "\n").encode("utf-8"),
                                   "text/plain; charset=utf-8")
+
+            if route == "/api/openapi.json":
+                # Swagger UI / 网关几乎总在别的地址上，没有这个头浏览器会把拉取
+                # 请求拦掉，文档就等于接不进去。这一条本来就免令牌、不含部署信息，
+                # 放开跨源读取没有额外代价。
+                #
+                # **只给这一条。** 带令牌的接口不能开 —— 鉴权认 Cookie，给它们加
+                # CORS 等于让任意页面替已登录的浏览器调写接口。
+                return self._send(code, body,
+                                  headers={"Access-Control-Allow-Origin": "*"})
             self._send(code, body)
 
     class Server(socketserver.ThreadingTCPServer):
