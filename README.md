@@ -280,6 +280,7 @@ HTTP 接口，由 hub 代劳：
 | 接口 | 方法 | 用途 |
 |---|---|---|
 | `/api/health` | GET | 存活探测，不需要令牌 |
+| `/api/openapi.json` | GET | 这些接口的 OpenAPI 3.0 描述，不需要令牌 |
 | `/api/status[?service=X]` | GET | 连通性与最新覆盖率（JSON） |
 | `/api/agent-opts?service=X` | GET | 该服务应注入的 `-javaagent` 参数串（加 `&format=text` 出纯文本） |
 | `/api/agent.jar` | GET | 下载 `jacocoagent.jar` |
@@ -293,6 +294,28 @@ HTTP 接口，由 hub 代劳：
 
 写操作在 hub 内部串行执行，返回体里带着这次执行的日志；**HTTP 非 2xx 表示失败**，
 调用方应当据此让部署流程停下来。
+
+### 接入 Swagger
+
+`GET /api/openapi.json` 是上面这张表的机器可读版（OpenAPI 3.0.3）。和 `/api/health`
+一样**不需要令牌** —— 它是静态结构，连服务名都不带，这样网关和 Swagger UI 才拉得到。
+
+```bash
+# Swagger UI：Explore 框里填这个地址
+http://covhub.internal:8900/api/openapi.json
+
+# Apifox / Postman / 网关：直接按 URL 导入，也可以指向仓库里的静态副本
+curl -s http://covhub.internal:8900/api/openapi.json -o openapi.json
+```
+
+hub 可能部署在内网，所以**没有内置 Swagger UI 页面** —— 那需要 1~2MB 静态资源，
+要么引 CDN（内网打不开），要么多一个部署步骤。接到你已有的 Swagger UI 或 API
+网关上即可。
+
+`servers` 写的是相对路径 `/`，所以从 hub 自己加载这份文档时，Swagger UI 的
+"Try it out" 会直接打到这台 hub 上。写接口需要在 Authorize 里填 `serve.token`。
+
+仓库里的 `docs/openapi.json` 是同一份文档的静态副本，可评审可 diff。
 
 发版节点上用 `integration/covhub-client.sh` 包一层，只依赖 curl：
 
