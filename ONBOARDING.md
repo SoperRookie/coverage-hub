@@ -9,7 +9,7 @@
 
 | 机器 | 需要什么 |
 |---|---|
-| covhub 那一台（唯一的服务端） | Python 3、java、`covhub.py`、`lib/*.jar`、`targets.yaml`（YAML 配置要 `pip install PyYAML`；也可以用 `targets.json`，零依赖） |
+| covhub 那一台（唯一的服务端） | Python 3、java、`covhub.py`、`lib/` 下的两个 jar（版本库自带）、`targets.yaml`（YAML 配置要 `pip install PyYAML`；也可以用 `targets.json`，零依赖） |
 | 被测服务所在机器 | `jacocoagent.jar`（`covhub fetch-agent` 下载），能被 hub 连上 6300 |
 | 发版节点 / 流水线 | `curl`（用 `integration/covhub-client.sh` 包一层） |
 | **被测项目本身** | **什么都不用改** —— 不改代码、不改 pom、不改构建流水线 |
@@ -32,10 +32,7 @@ sudo chown "$USER" /opt/coverage-hub
 cd /opt/coverage-hub
 
 # 放入 covhub.py 与 integration/
-# 放入 JaCoCo 发行包里的两个 jar
-mkdir -p lib
-cp <jacoco 发行包>/lib/jacocoagent.jar lib/
-cp <jacoco 发行包>/lib/jacococli.jar   lib/
+# lib/ 下的两个 jar 已经在版本库里，克隆下来就有，不用另外准备
 
 python3 covhub.py init          # 生成 targets.yaml 模板（--json 生成 JSON 版）
 ```

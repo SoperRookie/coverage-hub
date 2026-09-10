@@ -9,8 +9,12 @@
 # 需要长期留存的话请另行归档到对象存储或制品库，别指望 git。
 data/
 
-# JaCoCo jar 由发行包提供，按需放入，不进版本库
-lib/*.jar
+# covhub 只用得上这两个 jar，它们**进版本库** —— 克隆下来就能跑，不必让每个人
+# 自己去 JaCoCo 发行包里捞。lib/ 下的其余东西一律挡掉（瘦 jar、别的模块产物
+# 放进来只会让人以为它们有用）。
+lib/*
+!lib/jacocoagent.jar
+!lib/jacococli.jar
 
 # 本地配置：含各环境地址与路径，通常每台机器不同
 targets.yaml

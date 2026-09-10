@@ -394,7 +394,8 @@ push 通道的收集端口（`collect.port`）没有认证 —— 任何能连�
 它含各环境地址与路径，每台机器不同，已被 `.gitignore` 排除 —— 版本库里维护的是
 `targets.example.yaml` 和等价的 `targets.example.json`。
 
-同样被排除的还有 `lib/*.jar`（由 JaCoCo 发行包提供，按需放入）和 `data/`（采集产物）。
+同样被排除的还有 `data/`（采集产物）。`lib/` 则相反：covhub 用得上的那两个 jar
+在版本库里，克隆下来就能跑，`.gitignore` 只挡住 `lib/` 下的其余东西。
 
 > `data/<service>/versions/` 下的 exec 是**不可再生**的真实执行轨迹。需要长期留存的话请归档到对象存储或制品库，别指望 git。
 
