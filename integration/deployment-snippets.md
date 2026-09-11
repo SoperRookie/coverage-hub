@@ -90,7 +90,11 @@ spec:
   initContainers:
     - name: fetch-agent
       image: curlimages/curl:latest
-      command: ["sh","-c","curl -sSf -o /shared/jacocoagent.jar http://covhub.internal:8900/api/agent.jar"]
+      # /api/agent.jar 和其他接口一样受 serve.token 门禁，不带令牌会 401
+      command: ["sh","-c","curl -sSf -H 'X-Covhub-Token: $(COVHUB_TOKEN)' -o /shared/jacocoagent.jar http://covhub.internal:8900/api/agent.jar"]
+      env:
+        - name: COVHUB_TOKEN
+          valueFrom: { secretKeyRef: { name: covhub, key: token } }
       volumeMounts:
         - { name: jacoco, mountPath: /shared }
   containers:
