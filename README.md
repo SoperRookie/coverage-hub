@@ -386,6 +386,12 @@ python covhub.py service show order-service
 
 ---
 
+### 演示数据
+
+想先看看板长什么样，`python tools/seed_demo.py` 会往当前 hub 里灌两个项目（商城购物、充值支付）各 10 个微服务、
+每个服务 3–5 个版本的完整数据（快照、归档、diff、单测报告，磁盘上带 jacoco.xml / 报告 / 源码片段），
+`--reset` 先清掉上次灌的。被测服务并不真的存在，看板上是离线 / 未知。
+
 ## 七、从 1.x 升级
 
 1. 装依赖：`pip install .`（内网机器提前准备 wheel）。
