@@ -5,7 +5,7 @@ import { STATUS, type StatusKind } from "../ui/colors";
 
 const props = defineProps<{ row: StatusFields }>();
 
-// 语义色只给运维状态。多个状态同时成立时全部显示，顺序按严重程度。
+// 语义色只给运维状态，圆点 + 文字，从不只靠颜色。多个状态同时成立时全部显示，按严重程度排。
 const kinds = computed<StatusKind[]>(() => {
   const out: StatusKind[] = [];
   if (props.row.unknown) out.push("unknown");
@@ -19,8 +19,8 @@ const kinds = computed<StatusKind[]>(() => {
 
 <template>
   <span>
-    <el-tag v-for="k in kinds" :key="k" :type="STATUS[k].type" size="small" effect="light" style="margin-right: 4px">
-      {{ STATUS[k].label }}<template v-if="k === 'online' && row.channel === 'push' && row.instances !== null">（{{ row.instances }} 实例）</template>
-    </el-tag>
+    <span v-for="k in kinds" :key="k" class="status">
+      <i :style="{ background: STATUS[k].color }"></i>{{ STATUS[k].label }}<template v-if="k === 'online' && row.channel === 'push' && row.instances !== null">（{{ row.instances }} 实例）</template>
+    </span>
   </span>
 </template>

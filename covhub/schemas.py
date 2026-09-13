@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 # 服务名是目录名、URL 段、push 通道的 sessionid 前缀，字符集要保守
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# 项目名只是显示与 URL 参数（会编码），允许中文：\w 在 Python 里含 CJK；仍不能以 . 或 - 开头
+PROJECT_RE = re.compile(r"^[\w][\w.-]*$")
 # 这些名字在 hub 的 URL 根下另有含义（前端产物、控制 API），服务不能叫这些
 RESERVED_NAMES = {"api", "assets", "index.html", "favicon.ico", "agent.jar"}
 
@@ -60,8 +62,8 @@ class ServiceSpec(BaseModel):
     @field_validator("project")
     @classmethod
     def _project(cls, v):
-        if v is not None and not NAME_RE.match(v):
-            raise ValueError("项目名只能用字母、数字、. _ -，且不能以 . 或 - 开头")
+        if v is not None and not PROJECT_RE.match(v):
+            raise ValueError("项目名只能用字母（含中文）、数字、. _ -，且不能以 . 或 - 开头")
         return v
 
     @field_validator("version", mode="before")
@@ -138,8 +140,8 @@ class ProjectSpec(BaseModel):
     @field_validator("name")
     @classmethod
     def _name(cls, v):
-        if not NAME_RE.match(v):
-            raise ValueError("项目名只能用字母、数字、. _ -，且不能以 . 或 - 开头")
+        if not PROJECT_RE.match(v):
+            raise ValueError("项目名只能用字母（含中文）、数字、. _ -，且不能以 . 或 - 开头")
         return v
 
 

@@ -7,8 +7,10 @@ import "element-plus/es/components/message-box/style/css";
 import { api, type Overview, type Project, type ServiceRow } from "../api";
 import ProjectDialog from "../components/ProjectDialog.vue";
 import ServiceTable from "../components/ServiceTable.vue";
+import PageHeader from "../components/PageHeader.vue";
+import Kpi from "../components/Kpi.vue";
 import type { Nav } from "../App.vue";
-import { METRIC_COLORS } from "../ui/colors";
+import { SERIES } from "../ui/colors";
 
 // 一个项目的面板：它下面的服务，以及往里加 / 移出服务。name 为 __unassigned 时是未分组池。
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
@@ -116,51 +118,61 @@ async function removeProject() {
 </script>
 
 <template>
-  <div class="topbar">
-    <router-link class="plain" to="/">← 项目</router-link>
-    <h1>{{ isPool ? "未分组" : (project?.title || name) }}</h1>
-    <span class="sub">
-      <template v-if="isPool">已登记但还没归入任何项目的服务</template>
-      <template v-else><span class="mono">{{ name }}</span><template v-if="project?.description"> · {{ project.description }}</template>
-        <template v-if="counts"> · {{ counts.services }} 个服务，在线 {{ counts.online }}，离线 {{ counts.offline }}<template v-if="counts.stale">，采集停了 {{ counts.stale }}</template></template>
+  <PageHeader :title="isPool ? '未分组服务' : (project?.title || name)"
+              :crumbs="[{ label: '项目总览', to: '/' }, { label: isPool ? '未分组' : (project?.title || name) }]">
+    <template #meta>
+      <template v-if="isPool"><span>已登记但还没归入任何项目的服务</span></template>
+      <template v-else>
+        <span class="mono">{{ name }}</span>
+        <span v-if="project?.description">{{ project.description }}</span>
       </template>
-    </span>
-    <span class="spacer"></span>
-    <template v-if="!isPool">
-      <el-button size="small" type="primary" plain @click="addOpen = true">添加服务</el-button>
-      <el-button size="small" @click="editOpen = true">编辑</el-button>
-      <el-button size="small" type="danger" plain @click="removeProject">删除项目</el-button>
     </template>
-    <el-button size="small" @click="load">刷新</el-button>
+    <template #actions>
+      <template v-if="!isPool">
+        <el-button size="small" type="primary" plain @click="addOpen = true">添加服务</el-button>
+        <el-button size="small" @click="editOpen = true">编辑</el-button>
+        <el-button size="small" type="danger" plain @click="removeProject">删除项目</el-button>
+      </template>
+      <el-button size="small" @click="load">刷新</el-button>
+    </template>
+  </PageHeader>
+
+  <div v-if="counts" class="kpis" style="margin-bottom: 18px">
+    <Kpi label="服务" :value="String(counts.services)" :sub="`在线 ${counts.online} · 离线 ${counts.offline}${counts.unknown ? ' · 未知 ' + counts.unknown : ''}`" />
+    <Kpi label="采集停了" :value="String(counts.stale)" sub="超过 3 个轮询周期没有新数据" :dim="!counts.stale" />
+    <Kpi label="需关注" :value="String(counts.attention)" sub="采集停了 / 有断代 / 混版本" :dim="!counts.attention" />
   </div>
 
-  <div class="card" style="padding: 8px 12px">
-    <span class="legend"><i :style="{ background: METRIC_COLORS.runtimeTotal }"></i>运行时 · 总</span>
-    <span class="legend"><i :style="{ background: METRIC_COLORS.runtimeInc }"></i>运行时 · 新增代码</span>
-    <span class="legend"><i :style="{ background: METRIC_COLORS.unitTotal }"></i>单测 · 总</span>
-    <span class="legend"><i :style="{ background: METRIC_COLORS.unitInc }"></i>单测 · 新增代码</span>
-    <span class="legend muted">覆盖率数字不按阈值着色；颜色只表示运维状态</span>
-  </div>
-
-  <div v-if="loading && !data" class="muted">加载中…</div>
-  <div v-else class="card">
-    <div v-if="!rows.length" class="muted">
-      <template v-if="isPool">所有服务都已归入项目。</template>
-      <template v-else>这个项目下还没有服务。点右上角「添加服务」从未分组里挑，或登记时用 <code>covhub service add … --project {{ name }}</code>。</template>
+  <div class="card">
+    <div class="card-head">
+      <h2>服务</h2>
+      <span class="hint">
+        <span class="legend"><i :style="{ background: SERIES.total }"></i>总覆盖</span>
+        <span class="legend"><i :style="{ background: SERIES.inc }"></i>本版本新增代码</span>
+      </span>
+      <span class="spacer"></span>
+      <span class="hint">覆盖率数字不按阈值着色；颜色只表示运维状态</span>
     </div>
-    <template v-else-if="isPool">
-      <ServiceTable :rows="rows" mode="unassigned" />
-      <div style="margin-top: 10px">
-        <span class="muted" style="margin-right: 8px">把服务归入项目：</span>
-        <span v-for="r in rows" :key="r.name" style="display: inline-flex; align-items: center; gap: 6px; margin: 0 14px 6px 0">
-          <span class="mono">{{ r.name }}</span>
-          <el-select size="small" placeholder="选项目" style="width: 160px" @change="(v: string) => assignTo(r, v)">
-            <el-option v-for="p in allProjects" :key="p.name" :value="p.name" :label="p.title || p.name" />
-          </el-select>
-        </span>
+    <div class="card-body flush">
+      <div v-if="loading && !data" class="empty">加载中…</div>
+      <div v-else-if="!rows.length" class="empty">
+        <template v-if="isPool"><b>所有服务都已归入项目</b></template>
+        <template v-else><b>这个项目下还没有服务</b>点右上角「添加服务」从未分组里挑，或登记时用 <code>covhub service add … --project {{ name }}</code>。</template>
       </div>
-    </template>
-    <ServiceTable v-else :rows="rows" mode="project" @remove="remove" />
+      <template v-else-if="isPool">
+        <ServiceTable :rows="rows" mode="unassigned" />
+        <div style="padding: 12px 16px; border-top: 1px solid var(--line)">
+          <span class="muted" style="margin-right: 8px">把服务归入项目：</span>
+          <span v-for="r in rows" :key="r.name" style="display: inline-flex; align-items: center; gap: 6px; margin: 0 14px 6px 0">
+            <span class="mono">{{ r.name }}</span>
+            <el-select size="small" placeholder="选项目" style="width: 160px" @change="(v: string) => assignTo(r, v)">
+              <el-option v-for="p in allProjects" :key="p.name" :value="p.name" :label="p.title || p.name" />
+            </el-select>
+          </span>
+        </div>
+      </template>
+      <ServiceTable v-else :rows="rows" mode="project" @remove="remove" />
+    </div>
   </div>
 
   <el-dialog v-model="addOpen" title="本项目包含的服务" width="520px">
@@ -172,13 +184,11 @@ async function removeProject() {
         <span class="mono">{{ r.name }}</span>
       </el-checkbox>
       <span class="muted" style="font-size: 12px">{{ r.channel }} · {{ r.endpoint }}</span>
-      <span class="spacer" style="flex: 1"></span>
-      <el-tag v-if="r.project && r.project !== name" size="small" type="info" effect="plain">在 {{ r.project }} 里，先从那边移出</el-tag>
-      <el-tag v-else-if="!r.project" size="small" type="info" effect="plain">未分组</el-tag>
+      <span class="spacer"></span>
+      <span v-if="r.project && r.project !== name" class="muted" style="font-size: 12px">在 {{ r.project }} 里，先从那边移出</span>
+      <span v-else-if="!r.project" class="muted" style="font-size: 12px">未分组</span>
     </div>
-    <template #footer>
-      <el-button @click="addOpen = false">关闭</el-button>
-    </template>
+    <template #footer><el-button @click="addOpen = false">关闭</el-button></template>
   </el-dialog>
 
   <ProjectDialog v-model="editOpen" :editing="project" :on-error="onError" @saved="load" />

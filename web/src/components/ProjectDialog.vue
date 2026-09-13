@@ -10,7 +10,8 @@ const emit = defineEmits<{ (e: "update:modelValue", v: boolean): void; (e: "save
 
 const form = reactive({ name: "", title: "", description: "" });
 const saving = ref(false);
-const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+// 与后端 schemas.PROJECT_RE 一致：允许中文，不能以 . 或 - 开头
+const NAME_RE = /^[\p{L}\p{N}_][\p{L}\p{N}_.\-]*$/u;
 
 watch(() => props.modelValue, (open) => {
   if (!open) return;
@@ -21,7 +22,7 @@ watch(() => props.modelValue, (open) => {
 
 async function save() {
   if (!props.editing && !NAME_RE.test(form.name)) {
-    ElMessage.warning("项目名只能用字母、数字、. _ -，且不能以 . 或 - 开头");
+    ElMessage.warning("项目名只能用字母（含中文）、数字、. _ -，且不能以 . 或 - 开头");
     return;
   }
   saving.value = true;
@@ -47,11 +48,11 @@ async function save() {
   <el-dialog :model-value="modelValue" :title="editing ? `编辑项目 ${editing.name}` : '新建项目'" width="480px"
              @update:model-value="emit('update:modelValue', $event)">
     <el-form label-width="72px" @submit.prevent="save">
-      <el-form-item label="标识" required>
-        <el-input v-model="form.name" :disabled="!!editing" placeholder="如 order-domain（字母、数字、. _ -）" />
+      <el-form-item label="项目名" required>
+        <el-input v-model="form.name" :disabled="!!editing" placeholder="如 订单域 / order-domain，建后不可改" />
       </el-form-item>
-      <el-form-item label="名称">
-        <el-input v-model="form.title" placeholder="看板上显示的名字，可选" />
+      <el-form-item label="显示名">
+        <el-input v-model="form.title" placeholder="可选，不填就显示项目名" />
       </el-form-item>
       <el-form-item label="说明">
         <el-input v-model="form.description" type="textarea" :rows="2" placeholder="可选" />
