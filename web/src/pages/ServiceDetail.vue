@@ -8,7 +8,7 @@ import { api, type Brief, type CommandResult, type Detail } from "../api";
 import type { Nav } from "../App.vue";
 import CovCell from "../components/CovCell.vue";
 import IncrementalTable from "../components/IncrementalTable.vue";
-import Kpi from "../components/Kpi.vue";
+import Donut from "../components/Donut.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusTag from "../components/StatusTag.vue";
 import TrendChart from "../components/TrendChart.vue";
@@ -46,8 +46,10 @@ async function load() {
 onMounted(load);
 watch(() => [props.name, version.value], load);
 
+// el-select 把空串当「没选」显示占位符，所以「当前周期」用一个哨兵值
+const CURRENT = "__current";
 function switchVersion(v: string) {
-  router.push({ query: v ? { v } : {} });
+  router.push({ query: v && v !== CURRENT ? { v } : {} });
 }
 
 // ---- 手动触发：跑完用例点一下就把这一刻的覆盖率拉下来，不用等下一轮轮询 ----
@@ -129,8 +131,8 @@ const crumbs = computed(() => [
       </template>
     </template>
     <template #actions>
-      <el-select v-if="d" :model-value="version ?? ''" size="small" style="width: 250px" placeholder="版本" @change="switchVersion">
-        <el-option value="" label="当前周期" />
+      <el-select v-if="d" :model-value="version ?? CURRENT" size="small" style="width: 250px" @change="switchVersion">
+        <el-option :value="CURRENT" label="当前周期" />
         <el-option v-for="a in d.runtime.archives" :key="a.dir" :value="a.dir" :label="archiveLabel(a)" />
       </el-select>
       <a v-if="d?.runtime.reportUrl" :href="d.runtime.reportUrl" target="_blank"><el-button size="small">JaCoCo 报告</el-button></a>
@@ -166,7 +168,7 @@ const crumbs = computed(() => [
     </div>
 
     <div class="kpis" style="margin-bottom: 18px">
-      <Kpi v-for="m in metrics" :key="m.label" :label="m.label" :value="m.value" :sub="m.sub" :color="m.color" :ratio="m.ratio" :dim="m.dim" />
+      <Donut v-for="m in metrics" :key="m.label" :label="m.label" :value="m.value" :sub="m.sub" :color="m.color" :ratio="m.ratio" :dim="m.dim" />
     </div>
 
     <el-tabs v-model="tab" class="tabs">
