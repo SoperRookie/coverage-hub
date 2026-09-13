@@ -169,6 +169,11 @@ def service_update(cfg, name, fields):
         raise CovhubError("没有给任何要修改的字段")
     # 改完必须仍是一条合法配置（比如把 pull 服务的 address 清掉）
     merged = dict(repo.get_service(name))
+    # 一个服务同一时间只属于一个项目：已在别的项目里就先移出（project=null）再归入，
+    # 不允许直接从 A 挪到 B —— 看板上「勾选就归入」的动作不该悄悄把它从别的项目拿走
+    if patch.get("project") and merged.get("project") and merged["project"] != patch["project"]:
+        raise CovhubError("服务 %s 已在项目 %s 里，先从那里移出再归入 %s"
+                          % (name, merged["project"], patch["project"]))
     merged.pop("id", None)
     merged.update(patch)
     _validate(ServiceSpec, merged)

@@ -164,15 +164,16 @@ async function removeProject() {
   </div>
 
   <el-dialog v-model="addOpen" title="本项目包含的服务" width="520px">
-    <p class="muted" style="margin-top: 0">勾上就归入本项目，取消就移出，立即生效。要登记新服务用 <code>covhub service add</code>。</p>
+    <p class="muted" style="margin-top: 0">勾上就归入本项目，取消就移出，立即生效。已在别的项目里的服务要先从那边移出才能勾选。要登记新服务用 <code>covhub service add</code>。</p>
     <div v-if="!allServices.length" class="muted">还没有登记任何服务。</div>
     <div v-for="r in allServices" :key="r.name" style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px">
-      <el-checkbox :model-value="r.project === name" :disabled="busy.has(r.name)" @change="(v: boolean | string | number) => toggle(r, !!v)">
+      <el-checkbox :model-value="r.project === name" :disabled="busy.has(r.name) || (!!r.project && r.project !== name)"
+                   @change="(v: boolean | string | number) => toggle(r, !!v)">
         <span class="mono">{{ r.name }}</span>
       </el-checkbox>
       <span class="muted" style="font-size: 12px">{{ r.channel }} · {{ r.endpoint }}</span>
       <span class="spacer" style="flex: 1"></span>
-      <el-tag v-if="r.project && r.project !== name" size="small" type="info" effect="plain">当前在 {{ r.project }}</el-tag>
+      <el-tag v-if="r.project && r.project !== name" size="small" type="info" effect="plain">在 {{ r.project }} 里，先从那边移出</el-tag>
       <el-tag v-else-if="!r.project" size="small" type="info" effect="plain">未分组</el-tag>
     </div>
     <template #footer>

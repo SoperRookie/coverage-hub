@@ -36,7 +36,8 @@ def hub(tmp_path, monkeypatch, db_url_for_app):
 
 
 H = {"X-Covhub-Token": "secret"}
-PULL = {"name": "svc", "address": "127.0.0.1", "port": 6301, "includes": ["a.*"]}
+# 端口挑一个本机不会有人监听的：6301 / 6399 是演示 JVM 在用的
+PULL = {"name": "svc", "address": "127.0.0.1", "port": 65530, "includes": ["a.*"]}
 
 
 def test_health_is_open_and_pretty(hub):

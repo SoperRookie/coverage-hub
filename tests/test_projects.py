@@ -70,3 +70,16 @@ def test_migration_0002_keeps_child_rows(tmp_path):
         assert conn.execute(text("select count(*) from snapshots")).scalar() == 1
     assert repo.latest("order")["version"] == "1"
     engine.dispose()
+
+
+def test_service_must_leave_project_before_joining_another(db):
+    cfg = {"baseDir": "/hub"}
+    ops.project_add(cfg, {"name": "a"})
+    ops.project_add(cfg, {"name": "b"})
+    repo.add_service(ServiceSpec(**PULL, project="a").to_fields())
+    with pytest.raises(CovhubError):
+        ops.service_update(cfg, "order", {"project": "b"})     # 直接 A → B 不行
+    ops.service_update(cfg, "order", {"project": None})        # 先移出
+    ops.service_update(cfg, "order", {"project": "b"})         # 再归入
+    assert repo.get_service("order")["project"] == "b"
+    ops.service_update(cfg, "order", {"project": "b"})         # 归入自己所在的项目是幂等的
