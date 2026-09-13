@@ -268,6 +268,46 @@ def versions(name, limit=10, sealed_by="predeploy"):
         return out
 
 
+def archive_by_dir(name, archive_dir):
+    """某个归档目录对应的结算快照（含归档元数据），给「看历史版本」用。"""
+    with session_scope() as s:
+        sid = _get(s, name).id
+        row = s.execute(select(Archive, Snapshot).join(Snapshot, Archive.snapshot_id == Snapshot.id)
+                        .where(Archive.service_id == sid, Archive.archive_dir == archive_dir)).first()
+        if not row:
+            return None
+        archive, snap = row
+        d = _snapshot_dict(snap)
+        d.update({"version": archive.version, "dir": os.path.basename(archive.archive_dir),
+                  "sealedBy": archive.sealed_by, "sealedAt": _iso(archive.sealed_at),
+                  "execCount": archive.exec_count, "healthVerdict": archive.health_verdict})
+        if archive.match_rate is not None:
+            d["matchRate"] = archive.match_rate
+        return d
+
+
+def versions_since(name, since=None, sealed_by="predeploy"):
+    """时间范围内的已结算版本（正序），报表用。since 是 datetime 或 None（不限）。"""
+    with session_scope() as s:
+        sid = _get(s, name).id
+        q = (select(Archive, Snapshot).join(Snapshot, Archive.snapshot_id == Snapshot.id)
+             .where(Archive.service_id == sid))
+        if sealed_by:
+            q = q.where(Archive.sealed_by == sealed_by)
+        if since is not None:
+            q = q.where(Archive.sealed_at >= since)
+        out = []
+        # 按结算时刻排，不按入库顺序：导入的旧归档 id 可能比新的大
+        for archive, snap in s.execute(q.order_by(Archive.sealed_at, Archive.id)).all():
+            d = _snapshot_dict(snap)
+            d.update({"version": archive.version, "dir": os.path.basename(archive.archive_dir),
+                      "sealedBy": archive.sealed_by, "sealedAt": _iso(archive.sealed_at)})
+            if archive.match_rate is not None:
+                d["matchRate"] = archive.match_rate
+            out.append(d)
+        return out
+
+
 def breaks(name, limit=50):
     with session_scope() as s:
         sid = _get(s, name).id
@@ -471,6 +511,15 @@ def latest_unit_report(name):
         row = s.scalar(select(UnitReport).where(UnitReport.service_id == sid)
                        .order_by(UnitReport.id.desc()).limit(1))
         return _unit_dict(row) if row else None
+
+
+def unit_reports_since(name, since=None):
+    with session_scope() as s:
+        sid = _get(s, name).id
+        q = select(UnitReport).where(UnitReport.service_id == sid)
+        if since is not None:
+            q = q.where(UnitReport.at >= since)
+        return [_unit_dict(r) for r in s.scalars(q.order_by(UnitReport.at, UnitReport.id)).all()]
 
 
 def unit_history(name, limit=40):

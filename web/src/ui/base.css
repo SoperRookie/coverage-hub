@@ -108,6 +108,16 @@ code { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 12px
 .notice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; background: #fff7ed; border: 1px solid #fed7aa; color: #7c2d12; }
 .notice.info { background: var(--surface-2); border-color: var(--line); color: var(--ink-2); }
 
+/* ---- 打印（报表另存 PDF）：去掉侧栏与操作按钮，表格不截断 ---- */
+@media print {
+  .sidebar, .no-print, .el-table .no-print { display: none !important; }
+  .content { width: 100%; }
+  .page { max-width: none; padding: 0; }
+  .card, .kpi { box-shadow: none; break-inside: avoid; }
+  body { background: #fff; }
+  a { color: inherit; }
+}
+
 /* ---- Element Plus 表格微调：更紧凑、表头更轻 ---- */
 .el-table { --el-table-header-bg-color: var(--surface-2); --el-table-border-color: var(--line); --el-table-row-hover-bg-color: #f6f9fe; font-size: 13px; }
 .el-table th.el-table__cell { font-weight: 600; color: var(--ink-2); font-size: 12px; }

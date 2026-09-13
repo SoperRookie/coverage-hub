@@ -98,8 +98,46 @@ def _incremental(cfg, svc, version, jacoco_files, out_dir):
         return None
     result = inc.compute(lines, jacoco_files)
     result["version"] = version
+    # 只在 sourcefiles 指向的就是这一版时才存片段：给旧版本重算时源码目录已经是新版的了，
+    # 存下去的会是错位的代码 —— 宁可没有，也不能把错的当成事实留在归档里
+    if svc.get("version") == version:
+        attach_snippets(cfg, svc, result)
     inc.write_json(target, result)
     return result
+
+
+SNIPPET_CONTEXT = 3
+
+
+def attach_snippets(cfg, svc, result):
+    """把每个文件新增行前后几行的源码文本一起存进结果里。
+
+    归档之后源码目录会跟着新版本走，历史版本的「新增代码看源码」不能依赖当时的
+    sourcefiles 还在 —— 算增量的那一刻把片段留下来最省事，体积也只有新增行附近几行。
+    """
+    roots = list(svc.get("sourcefiles") or [])
+    base = cfg.get("baseDir")
+    for path, entry in result.get("files", {}).items():
+        added = entry.get("added") or []
+        if not added:
+            continue
+        candidates = [os.path.join(r, entry.get("reportFile") or path) for r in roots]
+        if base:
+            candidates.append(os.path.join(base, path))
+        text = None
+        for cand in candidates:
+            if os.path.isfile(cand):
+                with open(cand, encoding=svc.get("sourceEncoding", "UTF-8"), errors="replace") as f:
+                    text = f.read().splitlines()
+                break
+        if text is None:
+            continue
+        wanted = set()
+        for nr in added:
+            for k in range(nr - SNIPPET_CONTEXT, nr + SNIPPET_CONTEXT + 1):
+                if 1 <= k <= len(text):
+                    wanted.add(k)
+        entry["snippets"] = {str(nr): text[nr - 1] for nr in sorted(wanted)}
 
 
 def incremental_for_report(cfg, svc, version, report_dir):

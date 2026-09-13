@@ -6,7 +6,8 @@ import { pct } from "../ui/colors";
 // 新增代码按文件的覆盖明细。分母是 diff 新增行里 JaCoCo 有探针的行；unmatched 是
 // diff 里有、报告里没有的源码文件 —— 中性提示，不是红色：多半是被 excludes 排掉了，
 // 但也可能是配置错了，得让人看见。
-defineProps<{ view: IncView | null; empty: string; service: string; kind: "runtime" | "unit"; onError: (err: unknown) => boolean }>();
+// version 是归档目录名：看历史版本时传下去，源码从那个归档里存的片段取。
+defineProps<{ view: IncView | null; empty: string; service: string; kind: "runtime" | "unit"; version?: string | null; onError: (err: unknown) => boolean }>();
 
 function missedText(nums: number[]): string {
   if (!nums.length) return "";
@@ -41,7 +42,7 @@ function missedText(nums: number[]): string {
       <el-table-column type="expand" width="40">
         <template #default="{ row }">
           <div style="padding: 0 8px 0 40px">
-            <SourceView :service="service" :kind="kind" :file="row.path" :on-error="onError" />
+            <SourceView :service="service" :kind="kind" :file="row.path" :version="version" :on-error="onError" />
           </div>
         </template>
       </el-table-column>

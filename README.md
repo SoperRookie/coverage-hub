@@ -61,8 +61,18 @@ python covhub.py serve --with-watch    # 看板 + 控制 API + 定时采集 + pu
 看板是独立的 Vue 前端（产物在 `covhub/webui/`，随包分发，hub 机器不装 node）：层级是**项目 → 服务**：首页只列项目
 （卡片上有服务数、在线/离线、每个服务的运行时总/新增覆盖率），新建 / 编辑 / 删除项目也在这里；
 进项目是它的服务面板（在线状态、版本、运行时总/新增、单测总/新增、触达类数，能从「未分组」里添加服务、
-把服务移出）；再进服务是详情页：四个大数字、趋势图、新增代码按文件的覆盖明细（含未覆盖行号）、已结算版本、单测历史，
+把服务移出）；再进服务是详情页：四个大数字、趋势图、新增代码按文件的覆盖明细（点开看源码与逐行执行状态）、已结算版本、单测历史，
 并能下钻到 JaCoCo 原生报告看到具体哪一行被执行过。
+
+详情页右上角三个东西是给测试同学用的：
+
+- **版本下拉**：切到任一已结算（或重启封存）的历史版本，运行时的数字、新增代码明细、源码视图、报告链接都变成那一版结算时的
+  （URL 是 `#/services/<svc>?v=<归档目录>`，能收藏能转发）。历史版本的源码来自结算时存进归档的片段，不依赖源码目录还在。
+- **立即采集**：跑完一轮用例点一下，马上把这一刻的覆盖率拉下来出报告，不用等下一轮轮询；hub 的执行日志原样弹出来。
+- **更多 → 结算归档**：等价于 `predeploy`，弹窗里填版本号；**发版前、停服前**做。「重出报告」是改了 `reportExcludes` 之后用的。
+
+项目面板右上角有**报表**：一页看完项目下所有服务的现状（横条图 + 表）、某段时间内（7 / 30 / 90 天或全部）结算过的版本和
+收到的单测报告，可导出 CSV（Excel 直接开）或打印成 PDF。报表不给项目平均覆盖率 —— 各服务代码量差异很大，平均数没有意义。
 
 **覆盖率数字不按阈值着色**（运行期 13% 不等于「差」，按阈值标红只会训练人无视颜色），语义色只给
 运维状态：离线、采集停了、有断代、混版本。
@@ -225,8 +235,10 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 | `/api/projects`、`/api/projects/{name}` | GET / POST / PATCH / DELETE | 项目（服务分组）的增删改查 |
 | `/api/import` | POST | 把旧 targets.yaml 的 services 与 data/*/state.json 导进库 |
 | `/api/overview` | GET | 看板首页数据 |
-| `/api/services/{name}/detail` | GET | 服务详情页数据 |
+| `/api/services/{name}/detail[?version=D]` | GET | 服务详情页数据；带 `version`（归档目录名）时看那个历史版本 |
+| `/api/services/{name}/source?file=F[&kind=unit][&version=D]` | GET | 某个文件新增代码的源码与逐行覆盖状态 |
 | `/api/services/{name}/versions` | GET | 最近结算的版本与 diff 的 head（流水线定基线用） |
+| `/api/projects/{name}/report[?days=30]` | GET | 项目报表：各服务现状 + 时间范围内的结算版本与单测报告（`days=0` 不限） |
 
 写操作在 hub 内部串行执行，返回体里带着这次执行的日志；**HTTP 非 2xx 表示失败**，
 调用方应当据此让部署流程停下来。上传类接口的正文是原始文件，用 `curl --data-binary`（`-d` 会吃掉换行）。
@@ -395,7 +407,7 @@ data/
   <service>/
     current/                    当前版本周期的最新报告（html/、jacoco.xml、jacoco.csv、incremental.json）
     exec/<时间戳>.exec           本周期历次快照
-    versions/<版本>/             周期结算归档（报告 + exec + merged.exec + manifest.json + incremental.json）
+    versions/<版本>/             周期结算归档（报告 + exec + merged.exec + manifest.json + incremental.json，后者含新增行附近的源码片段）
     artifacts/<版本>/            经 upload-classes 传上来的 class 产物
     classes/                    按 reportExcludes 过滤后的 class 副本
     unit/<版本>/                 单测 jacoco.xml + incremental.json

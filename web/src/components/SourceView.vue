@@ -4,13 +4,13 @@ import { api, type SourceView } from "../api";
 
 // 一个文件的新增代码：新增行按覆盖状态标色，前后带上下文。
 // 这里的红绿是「这一行执行过没有」的事实（JaCoCo 自己的报告也这么标），不是按阈值给覆盖率上色。
-const props = defineProps<{ service: string; kind: "runtime" | "unit"; file: string; onError: (err: unknown) => boolean }>();
+const props = defineProps<{ service: string; kind: "runtime" | "unit"; file: string; version?: string | null; onError: (err: unknown) => boolean }>();
 const view = ref<SourceView | null>(null);
 const error = ref("");
 
 onMounted(async () => {
   try {
-    view.value = await api.source(props.service, props.kind, props.file);
+    view.value = await api.source(props.service, props.kind, props.file, props.version);
   } catch (err) {
     if (!props.onError(err)) error.value = err instanceof Error ? err.message : String(err);
   }
@@ -31,7 +31,7 @@ onMounted(async () => {
       <a v-if="view.reportUrl" class="plain" :href="view.reportUrl" target="_blank">在 JaCoCo 报告里看整个文件</a>
     </div>
     <div v-if="!view.sourceFound" class="muted" style="margin: 6px 0">
-      hub 上找不到这个文件的源码（服务没配 <code>sourcefiles</code>，或源码版本不对），只列行号：
+      hub 上找不到这个文件的源码（服务没配 <code>sourcefiles</code>，或这份归档早于 hub 开始保存源码片段），只列行号：
     </div>
     <table class="code">
       <tbody>

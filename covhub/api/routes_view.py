@@ -22,10 +22,20 @@ def overview(cfg: dict = Depends(get_cfg)):
 
 
 @router.get("/api/services/{name}/detail", summary="服务详情页的全部数据", responses=ERR)
-def service_detail(name: str, cfg: dict = Depends(get_cfg)):
+def service_detail(name: str,
+                   version: str | None = Query(None, description="看某个已结算版本（归档目录名，如 1.4.2 或 1.4.2-2）；不给则看当前周期"),
+                   cfg: dict = Depends(get_cfg)):
     """运行时：latest / history / 已结算版本 / 断代 / 在线实例 / 新增代码按文件明细；
-    单测：latest / history / 新增代码按文件明细；以及报告链接。"""
-    return PrettyJSONResponse({"ok": True, **views.service_detail(cfg, name)})
+    单测：latest / history / 新增代码按文件明细；以及报告链接。带 version 时运行时那一栏切到那个归档。"""
+    return PrettyJSONResponse({"ok": True, **views.service_detail(cfg, name, version)})
+
+
+@router.get("/api/projects/{name}/report", summary="项目报表：各服务的数字与时间范围内的已结算版本", responses=ERR)
+def project_report(name: str,
+                   days: int = Query(30, ge=0, le=3650, description="只看最近多少天的结算版本与单测报告；0 表示不限"),
+                   cfg: dict = Depends(get_cfg)):
+    """逐服务、逐版本的原始数字，不算项目平均覆盖率。name 为 __unassigned 时是未分组的服务。"""
+    return PrettyJSONResponse({"ok": True, **views.project_report(cfg, name, days)})
 
 
 @router.get("/api/services/{name}/versions", summary="最近结算的版本（流水线定基线用）", responses=ERR)
@@ -39,9 +49,10 @@ def incremental_source(name: str,
                        file: str = Query(..., description="新增代码明细里的文件路径"),
                        kind: str = Query("runtime", description="runtime 或 unit"),
                        context: int = Query(3, ge=0, le=20, description="新增行前后带几行上下文"),
+                       version: str | None = Query(None, description="看某个已结算版本的（归档目录名）"),
                        cfg: dict = Depends(get_cfg)):
-    """新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码从服务的 sourcefiles 里找，
-    找不到时只有行号与状态。"""
+    """新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用算增量时存下的片段
+    （历史版本靠它），其次从服务的 sourcefiles 里找，都没有时只有行号与状态。"""
     if kind not in ("runtime", "unit"):
         kind = "runtime"
-    return PrettyJSONResponse({"ok": True, **views.incremental_source(cfg, name, kind, file, context)})
+    return PrettyJSONResponse({"ok": True, **views.incremental_source(cfg, name, kind, file, context, version)})

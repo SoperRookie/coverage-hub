@@ -3,9 +3,11 @@
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  body: any;
+  constructor(status: number, message: string, body?: unknown) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -25,9 +27,28 @@ async function request<T>(path: string, init?: { method?: string; body?: unknown
     /* 非 JSON 响应，下面按状态码处理 */
   }
   if (!resp.ok) {
-    throw new ApiError(resp.status, (body && body.error) || `HTTP ${resp.status}`);
+    throw new ApiError(resp.status, (body && (body.error || body.log)) || `HTTP ${resp.status}`, body);
   }
   return body as T;
+}
+
+/** 采集类命令的返回：非 2xx 时 hub 也会把这次执行的日志放在 log 里，409 是「业务上失败」不是坏请求。 */
+export interface CommandResult {
+  ok: boolean;
+  service: string;
+  log: string;
+  latest?: Brief | null;
+}
+
+async function command(path: string): Promise<CommandResult> {
+  try {
+    return await request<CommandResult>(path, { method: "POST" });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409 && err.body && typeof err.body.log === "string") {
+      return err.body as CommandResult;
+    }
+    throw err;
+  }
 }
 
 export interface Incremental {
@@ -147,12 +168,30 @@ export interface BreakRow {
 
 export type StatusFields = Omit<ServiceRow, "runtime" | "unit">;
 
+export interface ArchiveRef {
+  version: string;
+  dir: string;
+  sealedAt: string;
+  sealedBy: string;
+  at: string;
+}
+
+/** detail?version= 时带回来的那个归档：结算快照 + 归档元数据 */
+export interface ViewingVersion extends ArchiveRef {
+  execCount: number | null;
+  healthVerdict: string | null;
+  matchRate?: number | null;
+  kind: string;
+}
+
 export interface Detail extends StatusFields {
+  viewingVersion: ViewingVersion | null;
   config: Record<string, unknown>;
   runtime: {
     latest: Brief | null;
     history: Brief[];
     versions: VersionRow[];
+    archives: ArchiveRef[];
     breaks: BreakRow[];
     instances: { peer: string; since: string; last: string | null }[];
     incremental: IncView | null;
@@ -175,14 +214,56 @@ export interface Project {
   services: string[];
 }
 
+export interface ReportVersion extends Brief {
+  dir: string;
+  sealedAt: string;
+  matchRate: number | null;
+  reportUrl: string;
+  xmlUrl: string;
+}
+
+export interface ReportService {
+  name: string;
+  channel: "pull" | "push";
+  version: string | null;
+  online: boolean | null;
+  unknown: boolean;
+  stale: boolean;
+  breaks: number;
+  ageSeconds: number | null;
+  runtime: Brief | null;
+  unit: Brief | null;
+  versions: ReportVersion[];
+  unitReports: Brief[];
+}
+
+export interface ProjectReport {
+  project: string;
+  title: string;
+  days: number;
+  since: string | null;
+  generatedAt: string;
+  services: ReportService[];
+  counts: Counts;
+}
+
 const enc = encodeURIComponent;
 
 export const api = {
   overview: () => request<Overview>("api/overview"),
-  detail: (name: string) => request<Detail>(`api/services/${enc(name)}/detail`),
+  detail: (name: string, version?: string | null) =>
+    request<Detail>(`api/services/${enc(name)}/detail${version ? `?version=${enc(version)}` : ""}`),
   health: () => request<{ ok: boolean; version: string }>("api/health"),
-  source: (name: string, kind: "runtime" | "unit", file: string) =>
-    request<SourceView>(`api/services/${enc(name)}/source?kind=${kind}&file=${enc(file)}`),
+  source: (name: string, kind: "runtime" | "unit", file: string, version?: string | null) =>
+    request<SourceView>(`api/services/${enc(name)}/source?kind=${kind}&file=${enc(file)}${version ? `&version=${enc(version)}` : ""}`),
+  /** 手动触发：拉一次快照并出报告（累加，不清零） */
+  dump: (name: string) => command(`api/dump?service=${enc(name)}`),
+  /** 手动触发：结算当前周期并归档（dump --reset + 归档 + 终版报告） */
+  predeploy: (name: string, version?: string) =>
+    command(`api/predeploy?service=${enc(name)}${version ? `&version=${enc(version)}` : ""}`),
+  /** 手动触发：用已有 exec 重出报告 */
+  report: (name: string) => command(`api/report?service=${enc(name)}`),
+  projectReport: (name: string, days: number) => request<ProjectReport>(`api/projects/${enc(name)}/report?days=${days}`),
   projects: () => request<{ projects: Project[] }>("api/projects"),
   createProject: (body: { name: string; title?: string | null; description?: string | null }) =>
     request<{ project: Project }>("api/projects", { method: "POST", body }),

@@ -128,6 +128,7 @@ async function removeProject() {
       </template>
     </template>
     <template #actions>
+      <router-link :to="isPool ? '/unassigned/report' : `/projects/${encodeURIComponent(name)}/report`"><el-button size="small">报表</el-button></router-link>
       <template v-if="!isPool">
         <el-button size="small" type="primary" plain @click="addOpen = true">添加服务</el-button>
         <el-button size="small" @click="editOpen = true">编辑</el-button>

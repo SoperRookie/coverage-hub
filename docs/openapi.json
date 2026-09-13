@@ -2702,7 +2702,7 @@
           "看板"
         ],
         "summary": "服务详情页的全部数据",
-        "description": "运行时：latest / history / 已结算版本 / 断代 / 在线实例 / 新增代码按文件明细；\n单测：latest / history / 新增代码按文件明细；以及报告链接。",
+        "description": "运行时：latest / history / 已结算版本 / 断代 / 在线实例 / 新增代码按文件明细；\n单测：latest / history / 新增代码按文件明细；以及报告链接。带 version 时运行时那一栏切到那个归档。",
         "operationId": "service_detail_api_services__name__detail_get",
         "security": [
           {
@@ -2724,6 +2724,110 @@
               "type": "string",
               "title": "Name"
             }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "看某个已结算版本（归档目录名，如 1.4.2 或 1.4.2-2）；不给则看当前周期",
+              "title": "Version"
+            },
+            "description": "看某个已结算版本（归档目录名，如 1.4.2 或 1.4.2-2）；不给则看当前周期"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{name}/report": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "项目报表：各服务的数字与时间范围内的已结算版本",
+        "description": "逐服务、逐版本的原始数字，不算项目平均覆盖率。name 为 __unassigned 时是未分组的服务。",
+        "operationId": "project_report_api_projects__name__report_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 3650,
+              "minimum": 0,
+              "description": "只看最近多少天的结算版本与单测报告；0 表示不限",
+              "default": 30,
+              "title": "Days"
+            },
+            "description": "只看最近多少天的结算版本与单测报告；0 表示不限"
           }
         ],
         "responses": {
@@ -2796,6 +2900,133 @@
               "type": "string",
               "title": "Name"
             }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{name}/source": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "某个文件的新增代码源码视图",
+        "description": "新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用算增量时存下的片段\n（历史版本靠它），其次从服务的 sourcefiles 里找，都没有时只有行号与状态。",
+        "operationId": "incremental_source_api_services__name__source_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "file",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "新增代码明细里的文件路径",
+              "title": "File"
+            },
+            "description": "新增代码明细里的文件路径"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "runtime 或 unit",
+              "default": "runtime",
+              "title": "Kind"
+            },
+            "description": "runtime 或 unit"
+          },
+          {
+            "name": "context",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 20,
+              "minimum": 0,
+              "description": "新增行前后带几行上下文",
+              "default": 3,
+              "title": "Context"
+            },
+            "description": "新增行前后带几行上下文"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "看某个已结算版本的（归档目录名）",
+              "title": "Version"
+            },
+            "description": "看某个已结算版本的（归档目录名）"
           }
         ],
         "responses": {

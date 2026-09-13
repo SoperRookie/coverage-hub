@@ -181,6 +181,24 @@ def test_build_inputs_diff_then_unit_xml(hub):
     assert r.status_code == 200 and r.json()["unit"]["pct"] == 100.0
 
 
+def test_incremental_json_keeps_source_snippets(hub, tmp_path):
+    """算增量时把新增行附近的源码存进 incremental.json —— 历史版本看源码全靠它。"""
+    src = tmp_path / "src" / "probe"
+    src.mkdir(parents=True)
+    (src / "Main.java").write_text("package probe;\n\nclass Main {\n\n    static void tick() { }\n}\n", encoding="utf-8")
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0", sourcefiles=[str(tmp_path / "src")]))
+    hub.post("/api/diff?service=svc&version=2.0&base=v1", headers=H, content=DIFF.encode())
+    hub.post("/api/unit-coverage?service=svc&version=2.0", headers=H, content=XML.encode())
+    stored = json.loads((tmp_path / "data" / "svc" / "unit" / "2.0" / "incremental.json").read_text(encoding="utf-8"))
+    entry = stored["files"]["src/main/java/probe/Main.java"]
+    assert entry["snippets"] == {"2": "", "3": "class Main {", "4": "", "5": "    static void tick() { }", "6": "}"}
+    # 源码目录没了也照样能看：片段优先于 sourcefiles
+    (src / "Main.java").unlink()
+    s = hub.get("/api/services/svc/source?file=src/main/java/probe/Main.java&kind=unit", headers=H).json()
+    assert s["sourceFound"] is True and [l["nr"] for l in s["lines"]] == [2, 3, 4, 5, 6]
+    assert s["lines"][3]["status"] == "covered"
+
+
 def test_overview_and_detail_shapes(hub):
     hub.post("/api/projects", headers=H, json={"name": "shop"})
     hub.post("/api/services", headers=H, json=dict(PULL, version="2.0", project="shop"))
@@ -209,3 +227,98 @@ def test_overview_and_detail_shapes(hub):
     assert hub.get("/api/services/nosuch/detail", headers=H).status_code == 404
     r = hub.get("/api/services/svc/versions", headers=H)
     assert r.status_code == 200 and r.json()["latest"] is None
+
+
+def test_detail_and_source_can_view_archived_version(hub, tmp_path):
+    """历史版本：detail?version= 切到归档的数字与明细，source 用归档里存下的源码片段。"""
+    from covhub.db import repo
+    hub.post("/api/projects", headers=H, json={"name": "shop"})
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0", project="shop"))
+    hub.post("/api/diff?service=svc&version=2.0&base=v1", headers=H, content=DIFF.encode())
+    hub.post("/api/unit-coverage?service=svc&version=2.0", headers=H, content=XML.encode())
+
+    # 模拟一次 predeploy 结算：快照 + 归档目录（带 jacoco.xml 与 incremental.json，后者带源码片段）
+    data = tmp_path / "data" / "svc"
+    arch = data / "versions" / "2.0"
+    (arch / "html").mkdir(parents=True)
+    (arch / "html" / "index.html").write_text("<html/>", encoding="utf-8")
+    (arch / "jacoco.xml").write_text(XML, encoding="utf-8")
+    snap = repo.add_snapshot("svc", {"at": "2026-09-13T10:00:00", "kind": "predeploy", "version": "2.0",
+                                     "instruction": 66.7, "branch": 0.0, "covered": 2, "total": 3,
+                                     "classesHit": 1, "classesTotal": 1,
+                                     "incCovered": 1, "incTotal": 1, "incPct": 100.0})
+    repo.finish_archive("svc", snapshot_id=snap["id"], version="2.0", archive_dir="versions/2.0",
+                        sealed_by="predeploy", sealed_at=snap["at"], match_rate=100.0)
+    # 2.1 早期归档的 incremental.json 只有 missed：源码视图得能用归档里的 jacoco.xml + diff 现算出 added / hit
+    (arch / "incremental.json").write_text(json.dumps({
+        "version": "2.0", "covered": 1, "total": 1, "pct": 100.0, "unmatched": [], "ambiguous": [], "skipped": [],
+        "files": {"src/main/java/probe/Main.java": {"covered": 1, "total": 1, "missed": [], "reportFile": "probe/Main.java", "group": None}}}),
+        encoding="utf-8")
+    r = hub.get("/api/services/svc/source?file=src/main/java/probe/Main.java&version=2.0", headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["sourceFound"] is False and [(l["nr"], l["status"]) for l in r.json()["lines"]] == [(5, "covered")]
+
+    (arch / "incremental.json").write_text(json.dumps({
+        "version": "2.0", "covered": 1, "total": 1, "pct": 100.0, "unmatched": [], "ambiguous": [], "skipped": [],
+        "files": {"src/main/java/probe/Main.java": {
+            "covered": 1, "total": 1, "missed": [], "hit": [5], "added": [5], "reportFile": "probe/Main.java",
+            "group": None, "snippets": {"3": "class Main {", "4": "", "5": "    static void tick() { }", "6": "}"}}}}),
+        encoding="utf-8")
+
+    # 当前周期：latest 还是最后那次快照，但新增明细没有（current/ 下没 incremental.json）
+    d = hub.get("/api/services/svc/detail", headers=H).json()
+    assert d["viewingVersion"] is None and d["runtime"]["incremental"] is None
+    assert d["runtime"]["xmlUrl"] == "/svc/current/jacoco.xml"
+
+    r = hub.get("/api/services/svc/detail?version=2.0", headers=H)
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["viewingVersion"]["dir"] == "2.0" and d["viewingVersion"]["sealedBy"] == "predeploy"
+    assert d["runtime"]["latest"]["instruction"] == 66.7 and d["runtime"]["latest"]["incremental"]["pct"] == 100.0
+    assert d["runtime"]["incremental"]["files"][0]["path"] == "src/main/java/probe/Main.java"
+    assert d["runtime"]["reportUrl"] == "/svc/versions/2.0/html/index.html"
+    assert d["runtime"]["xmlUrl"] == "/svc/versions/2.0/jacoco.xml"
+    assert d["unit"]["latest"]["version"] == "2.0"                    # 单测栏跟着归档的版本号走
+    assert hub.get("/api/services/svc/detail?version=9.9", headers=H).status_code == 409
+
+    # 源码来自归档里存下的片段，不依赖 sourcefiles；上下文只到片段有的行
+    r = hub.get("/api/services/svc/source?file=src/main/java/probe/Main.java&version=2.0", headers=H)
+    assert r.status_code == 200, r.text
+    s = r.json()
+    assert s["sourceFound"] is True and s["sourcePath"] == "incremental.json"
+    assert [(l["nr"], l["status"]) for l in s["lines"]] == [(3, "context"), (4, "context"), (5, "covered"), (6, "context")]
+    assert s["lines"][2]["text"] == "    static void tick() { }"
+    assert s["reportUrl"].startswith("/svc/versions/2.0/html/")
+
+
+def test_project_report(hub, tmp_path):
+    from covhub.db import repo
+    hub.post("/api/projects", headers=H, json={"name": "shop", "title": "商城"})
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0", project="shop"))
+    hub.post("/api/unit-coverage?service=svc&version=2.0", headers=H, content=XML.encode())
+    snap = repo.add_snapshot("svc", {"at": "2026-09-13T10:00:00", "kind": "predeploy", "version": "1.9",
+                                     "instruction": 50.0, "branch": 0.0, "covered": 1, "total": 2,
+                                     "classesHit": 1, "classesTotal": 1})
+    repo.finish_archive("svc", snapshot_id=snap["id"], version="1.9", archive_dir="versions/1.9",
+                        sealed_by="predeploy", sealed_at=snap["at"])
+
+    r = hub.get("/api/projects/shop/report?days=0", headers=H)
+    assert r.status_code == 200, r.text
+    rep = r.json()
+    assert rep["title"] == "商城" and rep["since"] is None and rep["counts"]["services"] == 1
+    svc = rep["services"][0]
+    assert svc["name"] == "svc" and svc["versions"][0]["version"] == "1.9"
+    assert svc["versions"][0]["reportUrl"] == "/svc/versions/1.9/html/index.html"
+    assert svc["unitReports"][0]["line"] == 50.0
+    assert "averageInstruction" not in rep                           # 不算项目平均
+
+    # 时间范围过滤：3650 天之内包含 2026-09-13 之后的东西才行；一个很旧的归档会被滤掉
+    old = repo.add_snapshot("svc", {"at": "2000-01-01T00:00:00", "kind": "predeploy", "version": "0.1",
+                                    "instruction": 10.0, "branch": 0.0, "covered": 1, "total": 10,
+                                    "classesHit": 1, "classesTotal": 1})
+    repo.finish_archive("svc", snapshot_id=old["id"], version="0.1", archive_dir="versions/0.1",
+                        sealed_by="predeploy", sealed_at=old["at"])
+    assert [v["version"] for v in hub.get("/api/projects/shop/report?days=0", headers=H).json()["services"][0]["versions"]] == ["0.1", "1.9"]
+    assert [v["version"] for v in hub.get("/api/projects/shop/report?days=3650", headers=H).json()["services"][0]["versions"]] == ["1.9"]
+    assert hub.get("/api/projects/nosuch/report", headers=H).status_code == 404
+    assert hub.get("/api/projects/__unassigned/report", headers=H).json()["services"] == []

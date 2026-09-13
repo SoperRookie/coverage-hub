@@ -14,7 +14,7 @@ from .collector import collector_instances, get_collector
 from .config import find_service
 from .db import repo
 from .errors import CovhubError
-from .layout import svc_dir
+from .layout import safe_segment, svc_dir
 
 
 def _age_seconds(iso):
@@ -125,20 +125,37 @@ def _counts(rows):
     }
 
 
-def service_detail(cfg, name):
+def service_detail(cfg, name, version=None):
+    """version 给的是归档目录名（如 1.4.2 或 1.4.2-2）时，运行时那一栏切到那个已结算版本：
+    数字来自结算快照，新增代码明细来自归档目录里的 incremental.json，报告链接指向归档。"""
     svc = find_service(cfg, name)
     interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
     row = service_row(cfg, svc, max(interval * 3, 900))
     versions = repo.versions(name, 20)
     latest = repo.latest(name)
 
-    runtime_inc = build.read_incremental(cfg, svc, "current")
-    unit = repo.latest_unit_report(name)
+    base = "/%s" % name
+    viewing = None
+    if version:
+        archived = repo.archive_by_dir(name, "versions/%s" % safe_segment(version))
+        if archived is None:
+            raise CovhubError("没有归档 %s" % version)
+        viewing = archived
+        latest = archived
+        runtime_inc = build.read_incremental(cfg, svc, "versions/%s" % archived["dir"])
+        report_dir = "%s/versions/%s" % (base, archived["dir"])
+        has_report = os.path.isfile(os.path.join(svc_dir(cfg, svc), "versions", archived["dir"], "html", "index.html"))
+        unit = repo.unit_report(name, archived["version"])
+    else:
+        runtime_inc = build.read_incremental(cfg, svc, "current")
+        report_dir = "%s/current" % base
+        has_report = row["hasReport"]
+        unit = repo.latest_unit_report(name)
     unit_inc = build.read_incremental(cfg, svc, "unit/%s" % unit["version"]) if unit else None
 
-    base = "/%s" % name
     return {
         **row,
+        "viewingVersion": viewing,
         "config": {k: svc.get(k) for k in ("includes", "excludes", "classfiles", "sourcefiles",
                                           "reportExcludes", "classDumpDir")},
         "runtime": {
@@ -150,10 +167,14 @@ def service_detail(cfg, name):
                                       "xmlUrl": "%s/versions/%s/jacoco.xml" % (base, v["dir"])}
                          for v in versions],
             "breaks": repo.breaks(name, 10),
+            # 历史版本选择器用：连重启封存的也列出来（它们不算「已结算版本」，但数据在）
+            "archives": [{"version": a["version"], "dir": a["dir"], "sealedAt": a["sealedAt"],
+                          "sealedBy": a["sealedBy"], "at": a["at"]}
+                         for a in reversed(repo.versions(name, 100, sealed_by=None))],
             "instances": collector_instances(name) if row["channel"] == "push" else [],
             "incremental": _files_view(runtime_inc),
-            "reportUrl": "%s/current/html/index.html" % base if row["hasReport"] else None,
-            "xmlUrl": "%s/current/jacoco.xml" % base,
+            "reportUrl": "%s/html/index.html" % report_dir if has_report else None,
+            "xmlUrl": "%s/jacoco.xml" % report_dir,
         },
         "unit": {
             "latest": _brief(unit),
@@ -197,36 +218,68 @@ def _report_page(report_file):
     return "%s/%s.html" % (pkg.replace("/", ".") if pkg else "default", name)
 
 
-def incremental_source(cfg, name, kind, path, context=3):
+def _recompute_entry(cfg, svc, where, version, path):
+    from . import incremental as inc
+    xml = os.path.join(svc_dir(cfg, svc), where, "jacoco.xml")
+    lines = build.load_diff_lines(cfg, svc, version) if version else None
+    if lines is None or not os.path.isfile(xml):
+        return None
+    try:
+        fresh = inc.compute(lines, inc.parse_jacoco(xml)["files"])
+    except Exception:
+        return None
+    return fresh.get("files", {}).get(path)
+
+
+def incremental_source(cfg, name, kind, path, context=3, version=None):
     """某个文件的新增代码源码视图：新增行标覆盖状态，前后带 context 行上下文。
 
-    源码从服务的 sourcefiles 里找（报告里的 包路径/文件名 拼到每个源码根下），找不到就
-    只返回行号与状态 —— 前端照样能列出未覆盖的行，只是没有代码文本。
+    源码优先用算增量时存进 incremental.json 的片段（历史版本靠它，不依赖当时的源码目录
+    还在）；没有片段再从服务的 sourcefiles 里找；都没有就只返回行号与状态。
     """
     svc = find_service(cfg, name)
     where = "current"
     if kind == "unit":
-        unit = repo.latest_unit_report(name)
+        if version:
+            archived = repo.archive_by_dir(name, "versions/%s" % safe_segment(version))
+            unit = repo.unit_report(name, archived["version"]) if archived else None
+        else:
+            unit = repo.latest_unit_report(name)
         if not unit:
             raise CovhubError("还没有单测报告")
         where = "unit/%s" % unit["version"]
+    elif version:
+        where = "versions/%s" % safe_segment(version)
     result = build.read_incremental(cfg, svc, where)
     if not result or path not in result.get("files", {}):
         raise CovhubError("没有 %s 的新增代码明细" % path)
     entry = result["files"][path]
+    if "added" not in entry:
+        # 2.1 早期写的 incremental.json 只有 missed 没有 added / hit：用同目录的 jacoco.xml
+        # 和还在磁盘上的 diff 现算一遍（只读，不回写 —— 回写走 recompute）
+        entry = _recompute_entry(cfg, svc, where, result.get("version"), path) or entry
     report_file = entry.get("reportFile") or path
     added = set(entry.get("added") or [])
     hits, missed = set(entry.get("hit") or []), set(entry.get("missed") or [])
 
     text_lines, source_path = None, None
-    candidates = [os.path.join(root, report_file) for root in svc.get("sourcefiles", [])]
-    candidates.append(os.path.join(cfg.get("baseDir", ""), path))
-    for cand in candidates:
-        if os.path.isfile(cand):
-            with open(cand, encoding=svc.get("sourceEncoding", "UTF-8"), errors="replace") as f:
-                text_lines = f.read().splitlines()
-            source_path = cand
-            break
+    snippets = entry.get("snippets")
+    if snippets:
+        # 片段是稀疏的 {行号: 文本}；铺成按行号索引的列表，缺的行留 None
+        max_nr = max(int(k) for k in snippets)
+        text_lines = [None] * max_nr
+        for k, v in snippets.items():
+            text_lines[int(k) - 1] = v
+        source_path = "incremental.json"
+    else:
+        candidates = [os.path.join(root, report_file) for root in svc.get("sourcefiles", [])]
+        candidates.append(os.path.join(cfg.get("baseDir", ""), path))
+        for cand in candidates:
+            if os.path.isfile(cand):
+                with open(cand, encoding=svc.get("sourceEncoding", "UTF-8"), errors="replace") as f:
+                    text_lines = f.read().splitlines()
+                source_path = cand
+                break
 
     def status(nr):
         if nr not in added:
@@ -246,6 +299,8 @@ def incremental_source(cfg, name, kind, path, context=3):
                     wanted.add(k)
         prev = 0
         for nr in sorted(wanted):
+            if text_lines[nr - 1] is None:
+                continue                    # 片段里没有这一行（超出当时的上下文范围）
             if prev and nr != prev + 1:
                 lines.append({"nr": None, "text": "…", "status": "gap"})
             lines.append({"nr": nr, "text": text_lines[nr - 1], "status": status(nr)})
@@ -255,11 +310,64 @@ def incremental_source(cfg, name, kind, path, context=3):
             lines.append({"nr": nr, "text": None, "status": status(nr)})
 
     base = "/%s" % name
-    report_dir = "%s/current/html" % base if kind == "runtime" else None
+    if kind != "runtime":
+        report_dir = None
+    elif version:
+        report_dir = "%s/versions/%s/html" % (base, safe_segment(version))
+    else:
+        report_dir = "%s/current/html" % base
     return {
         "service": name, "kind": kind, "path": path, "reportFile": report_file,
         "sourceFound": text_lines is not None, "sourcePath": source_path,
         "covered": entry["covered"], "total": entry["total"], "added": len(added),
         "lines": lines,
         "reportUrl": ("%s/%s" % (report_dir, _report_page(report_file))) if report_dir else None,
+    }
+
+
+def project_report(cfg, project, days=30):
+    """项目维度的报表：每个服务的最新数字 + 时间范围内的已结算版本与单测报告。
+
+    days=0 表示不限时间。不算项目平均覆盖率 —— 各服务的百分比平均起来只会误导，
+    报表给的是逐服务、逐版本的原始数字，汇总由看的人按自己的口径做。
+    """
+    from datetime import timedelta
+    if project == "__unassigned":
+        names = [s["name"] for s in cfg.get("services", []) if not s.get("project")]
+        title = "未分组"
+    else:
+        proj = repo.get_project(project)
+        names = proj["services"]
+        title = proj.get("title") or project
+    since = datetime.now() - timedelta(days=days) if days and days > 0 else None
+    interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
+    stale_after = max(interval * 3, 900)
+    by_name = {s["name"]: s for s in cfg.get("services", [])}
+
+    services = []
+    for name in names:
+        svc = by_name.get(name)
+        if not svc:
+            continue
+        row = service_row(cfg, svc, stale_after)
+        versions = repo.versions_since(name, since)
+        units = repo.unit_reports_since(name, since)
+        services.append({
+            "name": name, "channel": row["channel"], "version": row["version"],
+            "online": row["online"], "unknown": row["unknown"], "stale": row["stale"],
+            "breaks": row["breaks"], "ageSeconds": row["ageSeconds"],
+            "runtime": row["runtime"], "unit": row["unit"],
+            "versions": [_brief(v) | {"dir": v["dir"], "sealedAt": v["sealedAt"],
+                                      "matchRate": v.get("matchRate"),
+                                      "reportUrl": "/%s/versions/%s/html/index.html" % (name, v["dir"]),
+                                      "xmlUrl": "/%s/versions/%s/jacoco.xml" % (name, v["dir"])}
+                         for v in versions],
+            "unitReports": [_brief(u) for u in units],
+        })
+    return {
+        "project": project, "title": title, "days": days,
+        "since": since.isoformat(timespec="seconds") if since else None,
+        "generatedAt": datetime.now().isoformat(timespec="seconds"),
+        "services": services,
+        "counts": _counts([service_row(cfg, by_name[n], stale_after) for n in names if n in by_name]),
     }

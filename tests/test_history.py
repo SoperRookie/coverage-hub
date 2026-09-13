@@ -61,6 +61,16 @@ def test_archive_sets_match_rate_and_clears_session(db):
     assert b == {"at": "2026-09-13T12:00:00", "from": "A", "to": "B", "sealedAs": "1.0-2"}
     assert repo.breaks("probe", 1) == [b]
 
+    # 按归档目录取历史版本：重启封存的那份也能按目录找到；找不到返回 None 而不是抛
+    a = repo.archive_by_dir("probe", "versions/1.0-2")
+    assert a["dir"] == "1.0-2" and a["sealedBy"] == "restart-detected" and a["kind"] == "seal"
+    assert repo.archive_by_dir("probe", "versions/nope") is None
+    # 报表按时间范围取：since 之后的才算，默认只要 predeploy 结算的
+    from datetime import datetime
+    assert [v["dir"] for v in repo.versions_since("probe")] == ["1.0"]
+    assert repo.versions_since("probe", since=datetime(2026, 9, 13, 11, 30)) == []
+    assert [v["dir"] for v in repo.versions_since("probe", since=datetime(2026, 9, 13, 11, 30), sealed_by=None)] == ["1.0-2"]
+
 
 def test_push_mixed_flips_and_records_once(db):
     _svc()
