@@ -21,7 +21,7 @@ from .errors import CovhubError
 from .jacoco import make_report
 from .layout import ensure_dirs
 from .logbuf import log
-from .schemas import ServicePatch, ServiceSpec
+from .schemas import ProjectPatch, ProjectSpec, ServicePatch, ServiceSpec
 
 
 def agent_opts(cfg, name):
@@ -141,9 +141,9 @@ def retarget(cfg, name, version=None, classfiles=None, sourcefiles=None):
 
 # ---- 服务配置的增删改查 ----
 
-def service_list(cfg):
+def service_list(cfg, project=None):
     # 给人看的是入库原文（相对路径不展开）；运行时展开过的那份在 cfg["services"]
-    return repo.list_services()
+    return repo.list_services(project=project)
 
 
 def service_get(cfg, name):
@@ -183,6 +183,38 @@ def service_update(cfg, name, fields):
 def service_remove(cfg, name):
     repo.remove_service(name)
     log("已删除服务 %s 的配置（data/%s/ 里的采集数据未动，需要的话手工处理）" % (name, name))
+
+
+# ---- 项目 ----
+
+def project_list(cfg):
+    return repo.list_projects()
+
+
+def project_get(cfg, name):
+    return repo.get_project(name)
+
+
+def project_add(cfg, fields):
+    spec = _validate(ProjectSpec, fields)
+    row = repo.add_project(spec.model_dump())
+    log("已创建项目 %s" % row["name"])
+    return row
+
+
+def project_update(cfg, name, fields):
+    patch = _validate(ProjectPatch, fields).model_dump(exclude_unset=True)
+    if not patch:
+        raise CovhubError("没有给任何要修改的字段")
+    row = repo.update_project(name, patch)
+    log("已更新项目 %s：%s" % (name, ", ".join(sorted(patch))))
+    return row
+
+
+def project_remove(cfg, name):
+    proj = repo.get_project(name)
+    repo.remove_project(name)
+    log("已删除项目 %s（%d 个服务改为未分组，配置与数据都未动）" % (name, len(proj["services"])))
 
 
 def _validate(model, fields):

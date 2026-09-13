@@ -10,7 +10,7 @@ from .collector import get_collector, collector_instances
 from .db import repo
 from .diagnose import diagnose
 from .jacoco import do_dump, exec_sessions, fingerprint, make_report, run_cli
-from .layout import ensure_dirs, svc_dir
+from .layout import ensure_dirs, safe_segment, svc_dir
 from .logbuf import log
 
 
@@ -63,7 +63,7 @@ def _archive_path(root, version):
 
     归档里的 exec 是不可再生的执行轨迹，宁可多一个目录，也不能覆盖掉。
     """
-    base = os.path.join(root, "versions", version)
+    base = os.path.join(root, "versions", safe_segment(version))
     if not os.path.exists(os.path.join(base, "manifest.json")):
         return base
     n = 2

@@ -16,6 +16,8 @@ def run_migrations_offline():
 
 
 def run_migrations_online():
+    # 这里故意自建引擎、**不**挂 db/engine.py 的 SQLite PRAGMA 监听器：batch 模式改表要
+    # DROP 再重建，foreign_keys=ON 会把子表级联清空（见 0002 的说明）
     connectable = engine_from_config(config.get_section(config.config_ini_section, {}),
                                      prefix="sqlalchemy.", poolclass=pool.NullPool)
     with connectable.connect() as connection:

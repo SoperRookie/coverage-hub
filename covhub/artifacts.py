@@ -6,7 +6,7 @@ import shutil
 import tarfile
 import zipfile
 
-from .layout import ensure_dirs, svc_dir
+from .layout import ensure_dirs, safe_segment, svc_dir
 from .logbuf import log
 
 def _members_ok(names):
@@ -33,7 +33,7 @@ def store_classes(cfg, svc, version, blob):
     报告是 hub 出的，class 就必须在 hub 上 —— 且必须是线上跑的那一份。
     """
     ensure_dirs(cfg, svc)
-    dest = os.path.join(svc_dir(cfg, svc), "artifacts", version)
+    dest = os.path.join(svc_dir(cfg, svc), "artifacts", safe_segment(version))
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest, exist_ok=True)
 
@@ -85,6 +85,7 @@ def classes_sources(cfg, svc, version):
     配置里当前的 classfiles 不算数：它早就跟着新版本改掉了。
     """
     root = svc_dir(cfg, svc)
+    version = safe_segment(version)
     uploaded = os.path.join(root, "artifacts", version)
     if os.path.isdir(uploaded) and os.listdir(uploaded):
         return [("", uploaded)]

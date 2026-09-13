@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 # 服务名是目录名、URL 段、push 通道的 sessionid 前缀，字符集要保守
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+# 这些名字在 hub 的 URL 根下另有含义（前端产物、控制 API），服务不能叫这些
+RESERVED_NAMES = {"api", "assets", "index.html", "favicon.ico", "agent.jar"}
 
 
 def _as_str_list(value):
@@ -31,6 +33,7 @@ class ServiceSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: str = Field(max_length=100)
+    project: str | None = Field(default=None, max_length=100, description="所属项目名")
     version: str | None = Field(default=None, max_length=100)
     channel: str = "pull"
     address: str | None = Field(default=None, max_length=255)
@@ -50,6 +53,15 @@ class ServiceSpec(BaseModel):
     def _name(cls, v):
         if v is not None and not NAME_RE.match(v):
             raise ValueError("服务名只能用字母、数字、. _ -，且不能以 . 或 - 开头")
+        if v is not None and v.lower() in RESERVED_NAMES:
+            raise ValueError("%r 是保留名，不能用作服务名" % v)
+        return v
+
+    @field_validator("project")
+    @classmethod
+    def _project(cls, v):
+        if v is not None and not NAME_RE.match(v):
+            raise ValueError("项目名只能用字母、数字、. _ -，且不能以 . 或 - 开头")
         return v
 
     @field_validator("version", mode="before")
@@ -87,6 +99,7 @@ class ServicePatch(BaseModel):
     """局部更新：只校验给到的字段。"""
     model_config = ConfigDict(extra="forbid")
 
+    project: str | None = Field(default=None, max_length=100)   # 显式给 null 表示解绑
     version: str | None = Field(default=None, max_length=100)
     channel: str | None = None
     address: str | None = Field(default=None, max_length=255)
@@ -108,5 +121,30 @@ class ServicePatch(BaseModel):
                              "reportExcludes", mode="before")(
         lambda cls, v: None if v is None else _as_str_list(v))
 
+    _project = field_validator("project")(lambda cls, v: None if v is None
+                                          else ServiceSpec._project.__func__(cls, v))
+
     def to_fields(self):
         return self.model_dump(exclude_unset=True)
+
+
+class ProjectSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(max_length=100)
+    title: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name(cls, v):
+        if not NAME_RE.match(v):
+            raise ValueError("项目名只能用字母、数字、. _ -，且不能以 . 或 - 开头")
+        return v
+
+
+class ProjectPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, max_length=200)
+    description: str | None = None

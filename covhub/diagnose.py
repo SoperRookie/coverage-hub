@@ -4,7 +4,7 @@ import json
 import os
 
 from .jacoco import class_file_ids, exec_class_ids, exec_sessions
-from .layout import ensure_dirs
+from .layout import ensure_dirs, safe_segment
 from .db import repo
 
 # --------------------------------------------------------------------------
@@ -19,7 +19,7 @@ def diagnose(cfg, svc, version=None):
     """
     root = ensure_dirs(cfg, svc)
     if version:
-        archive = os.path.join(root, "versions", version)
+        archive = os.path.join(root, "versions", safe_segment(version))
         exec_dir = os.path.join(archive, "exec")
         manifest = os.path.join(archive, "manifest.json")
         classfiles = svc["classfiles"]

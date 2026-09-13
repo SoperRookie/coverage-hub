@@ -17,7 +17,7 @@ from ..db import engine
 from ..logbuf import log
 from ..runtime import load_runtime, prepare_database
 from ..watch import watch_loop
-from . import routes_control, routes_services, static
+from . import routes_control, routes_projects, routes_services, static
 from .responses import PrettyJSONResponse, install_handlers
 
 OPEN_ROUTES = ("/api/health", "/api/openapi.json")
@@ -38,6 +38,7 @@ TAGS = [
     {"name": "发版", "description": "结算、换产物 —— 顺序错了会丢数据"},
     {"name": "产物", "description": "class 产物的上传与取回"},
     {"name": "服务配置", "description": "服务的登记与修改（存数据库，改完立即生效）"},
+    {"name": "项目", "description": "服务的分组"},
 ]
 
 
@@ -105,6 +106,7 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
     app.include_router(routes_control.router)
     app.include_router(routes_services.router)
     app.include_router(routes_services.import_router)
+    app.include_router(routes_projects.router)
     app.include_router(static.router)        # 兜底，必须最后挂
     return app
 

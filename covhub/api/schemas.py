@@ -4,9 +4,9 @@
 from pydantic import BaseModel, ConfigDict, Field
 
 from .. import __version__
-from ..schemas import ServicePatch, ServiceSpec  # noqa: F401  —— 请求体模型在这里复用
+from ..schemas import ProjectPatch, ProjectSpec, ServicePatch, ServiceSpec  # noqa: F401
 
-__all__ = ["ServicePatch", "ServiceSpec"]
+__all__ = ["ProjectPatch", "ProjectSpec", "ServicePatch", "ServiceSpec"]
 
 
 class Error(BaseModel):
@@ -150,3 +150,20 @@ class ImportResult(BaseModel):
     log: str
     services: dict[str, str] = Field(description="每个服务的处理结果：added / updated / skipped / invalid")
     state: dict[str, dict[str, int]] = Field(description="每个服务导入的历史计数")
+
+
+class ProjectOut(ProjectSpec):
+    id: int
+    createdAt: str
+    updatedAt: str
+    services: list[str] = Field(description="项目下的服务名")
+
+
+class ProjectResponse(BaseModel):
+    ok: bool = True
+    project: ProjectOut
+
+
+class ProjectListResponse(BaseModel):
+    ok: bool = True
+    projects: list[ProjectOut]

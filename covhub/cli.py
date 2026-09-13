@@ -129,6 +129,7 @@ def cmd_init(cfg_path, args):
 
 SERVICE_FLAGS = (
     # (命令行参数, 字段名, 是否列表)
+    ("--project", "project", False),
     ("--version", "version", False), ("--channel", "channel", False),
     ("--address", "address", False), ("--port", "port", False),
     ("--bind-address", "bindAddress", False), ("--includes", "includes", True),
@@ -180,18 +181,18 @@ def _print_service(row):
 
 def cmd_service(cfg, args):
     if args.action == "list":
-        rows = ops.service_list(cfg)
+        rows = ops.service_list(cfg, project=args.project)
         if args.json:
             print(json.dumps(rows, ensure_ascii=False, indent=2))
             return
-        print("%-22s %-6s %-22s %-10s %s" % ("服务", "通道", "端点", "版本", "classfiles"))
-        print("-" * 90)
+        print("%-22s %-14s %-6s %-22s %-10s %s" % ("服务", "项目", "通道", "端点", "版本", "classfiles"))
+        print("-" * 100)
         for r in rows:
             endpoint = "%s:%s" % (r.get("address", "-"), r.get("port", "-")) \
                 if r.get("channel", "pull") == "pull" else "-"
-            print("%-22s %-6s %-22s %-10s %s" % (
-                r["name"], r.get("channel", "pull"), endpoint, r.get("version") or "-",
-                ", ".join(r.get("classfiles") or []) or "-"))
+            print("%-22s %-14s %-6s %-22s %-10s %s" % (
+                r["name"], r.get("project") or "-", r.get("channel", "pull"), endpoint,
+                r.get("version") or "-", ", ".join(r.get("classfiles") or []) or "-"))
         return
     if args.action == "show":
         return _print_service(ops.service_get(cfg, args.name))
@@ -200,13 +201,43 @@ def cmd_service(cfg, args):
         fields["name"] = args.name
         return _print_service(ops.service_add(cfg, fields))
     if args.action == "update":
-        return _print_service(ops.service_update(cfg, args.name, _service_fields(args, cfg)))
+        fields = _service_fields(args, cfg)
+        if args.no_project:
+            fields["project"] = None
+        return _print_service(ops.service_update(cfg, args.name, fields))
     if args.action == "remove":
         if not args.yes:
             die("删除服务配置需要加 --yes 确认（data/%s/ 里的采集数据不会被删）" % args.name)
         return ops.service_remove(cfg, args.name)
     if args.action == "template":
         print(SERVICE_TEMPLATE_YAML, end="")
+
+
+def cmd_project(cfg, args):
+    if args.action == "list":
+        rows = ops.project_list(cfg)
+        if args.json:
+            print(json.dumps(rows, ensure_ascii=False, indent=2))
+            return
+        print("%-20s %-24s %-6s %s" % ("项目", "标题", "服务数", "服务"))
+        print("-" * 90)
+        for r in rows:
+            print("%-20s %-24s %-6d %s" % (r["name"], r.get("title") or "-",
+                                          len(r["services"]), ", ".join(r["services"]) or "-"))
+        return
+    if args.action == "show":
+        return _print_service(ops.project_get(cfg, args.name))
+    if args.action == "add":
+        return _print_service(ops.project_add(cfg, {
+            "name": args.name, "title": args.title, "description": args.description}))
+    if args.action == "update":
+        fields = {k: v for k, v in (("title", args.title), ("description", args.description))
+                  if v is not None}
+        return _print_service(ops.project_update(cfg, args.name, fields))
+    if args.action == "remove":
+        if not args.yes:
+            die("删除项目需要加 --yes 确认（项目下的服务会变成未分组，不会被删）")
+        return ops.project_remove(cfg, args.name)
 
 
 def cmd_import(cfg, args):
@@ -299,6 +330,7 @@ def main():
     sp = p.add_subparsers(dest="action", required=True)
     q = sp.add_parser("list", help="列出全部服务")
     q.add_argument("--json", action="store_true")
+    q.add_argument("--project", help="只列某个项目下的服务")
     q = sp.add_parser("show", help="查看一条服务的完整配置")
     q.add_argument("name")
     q = sp.add_parser("add", help="登记一条服务")
@@ -307,10 +339,29 @@ def main():
     q = sp.add_parser("update", help="修改服务的若干字段")
     q.add_argument("name")
     _add_service_flags(q)
+    q.add_argument("--no-project", action="store_true", help="从项目里解绑")
     q = sp.add_parser("remove", help="删除服务配置（不删采集数据）")
     q.add_argument("name")
     q.add_argument("--yes", action="store_true")
     sp.add_parser("template", help="打印 --from-file 用的 YAML 模板")
+
+    p = sub.add_parser("project", help="项目的增删改查（服务的分组）")
+    sp = p.add_subparsers(dest="action", required=True)
+    q = sp.add_parser("list", help="列出全部项目")
+    q.add_argument("--json", action="store_true")
+    q = sp.add_parser("show", help="查看一个项目")
+    q.add_argument("name")
+    q = sp.add_parser("add", help="创建项目")
+    q.add_argument("name")
+    q.add_argument("--title")
+    q.add_argument("--description")
+    q = sp.add_parser("update", help="修改项目的标题 / 描述")
+    q.add_argument("name")
+    q.add_argument("--title")
+    q.add_argument("--description")
+    q = sp.add_parser("remove", help="删除项目（服务变成未分组）")
+    q.add_argument("name")
+    q.add_argument("--yes", action="store_true")
 
     p = sub.add_parser("import", help="把旧 targets.yaml 里的 services 导入数据库")
     p.add_argument("source", nargs="?", help="旧配置文件路径，缺省用 -c 指向的那个")
@@ -354,7 +405,8 @@ def main():
     except CovhubError as exc:
         die(str(exc))
     needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": (), "service": (),
-             "import": (), "db": (), "openapi": ()}.get(args.cmd, ("jacocoCli", "jacocoAgent"))
+             "project": (), "import": (), "db": (), "openapi": ()}.get(
+        args.cmd, ("jacocoCli", "jacocoAgent"))
     for key in needs:
         if not os.path.isfile(cfg.get(key, "")):
             die("配置项 %s 指向的文件不存在：%s" % (key, cfg.get(key)))
@@ -363,7 +415,8 @@ def main():
     handlers = {
         "agent-opts": cmd_agent_opts, "status": cmd_status, "dump": cmd_dump,
         "predeploy": cmd_predeploy, "report": cmd_report, "retarget": cmd_retarget,
-        "diagnose": cmd_diagnose, "service": cmd_service, "import": cmd_import, "db": cmd_db,
+        "diagnose": cmd_diagnose, "service": cmd_service, "project": cmd_project,
+        "import": cmd_import, "db": cmd_db,
         "openapi": cmd_openapi, "watch": cmd_watch, "serve": cmd_serve,
     }
     try:

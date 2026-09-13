@@ -1,6 +1,7 @@
 # 一条服务配置，用 covhub service add <name> --from-file 本文件 登记进数据库。
 # 字段含义见 README「配置」一节。
 name: example-service
+project: example             # 可选，所属项目（先 covhub project add example）
 version: "1.0.0"             # 版本号一律加引号，裸写的 1.4 会被读成数字
 channel: pull                # pull：hub 去连 agent；push：agent 连回 hub
 address: 127.0.0.1           # pull：agent 所在机器，hub 连过去拉数据

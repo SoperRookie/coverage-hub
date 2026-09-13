@@ -48,6 +48,27 @@ SERVICE_LISTS = (
 SERVICE_FIELDS = dict(SERVICE_SCALARS + SERVICE_LISTS)     # camelCase -> column
 
 
+class Project(Base):
+    """项目：若干服务的分组。删项目不删服务，服务的 project_id 置空。"""
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False)
+    title: Mapped[str | None] = mapped_column(String(200))
+    description: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
+                                                 default=_now, onupdate=_now)
+
+    services: Mapped[list["Service"]] = relationship(back_populates="project")
+
+    def to_dict(self):
+        return {"id": self.id, "name": self.name, "title": self.title,
+                "description": self.description,
+                "createdAt": self.created_at.isoformat(timespec="seconds"),
+                "updatedAt": self.updated_at.isoformat(timespec="seconds")}
+
+
 class Service(Base):
     __tablename__ = "services"
 
@@ -66,12 +87,15 @@ class Service(Base):
     classfiles: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     sourcefiles: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     report_excludes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    project_id: Mapped[int | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
                                                  default=_now, onupdate=_now)
 
     state: Mapped["ServiceState"] = relationship(back_populates="service", uselist=False,
                                                  cascade="all, delete-orphan")
+    project: Mapped[Project | None] = relationship(back_populates="services")
 
     def to_dict(self, base_dir=None):
         """还原成配置文件解析后的那种 svc dict。
@@ -87,6 +111,8 @@ class Service(Base):
             value = getattr(self, col)
             if value is not None:
                 d[key] = value
+        if self.project is not None:
+            d["project"] = self.project.name
         for key, col in SERVICE_LISTS:
             d[key] = list(getattr(self, col) or [])
         if base_dir:
@@ -96,8 +122,10 @@ class Service(Base):
         return d
 
     def apply(self, fields):
-        """按 camelCase 的字段名批量赋值（只动给到的键）。"""
+        """按 camelCase 的字段名批量赋值（只动给到的键）。project 不是列，调用方先解析成 id。"""
         for key, value in fields.items():
+            if key == "project":
+                continue
             col = SERVICE_FIELDS[key]
             if key in dict(SERVICE_LISTS):
                 value = list(value or [])
@@ -113,6 +141,9 @@ class ServiceState(Base):
     # Java Date.toString() 原文，只比对不解析
     session_start: Mapped[str | None] = mapped_column(String(64))
     push_mixed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # 采集线程每轮探活后写入；看板读这里，请求路径上不做 TCP 探活（离线服务一个 2 秒，页面会卡）
+    online: Mapped[bool | None] = mapped_column(Boolean)
+    online_at: Mapped[datetime | None] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False,
                                                  default=_now, onupdate=_now)
 
@@ -139,6 +170,10 @@ class Snapshot(Base):
     reason: Mapped[str | None] = mapped_column(String(32))          # seal: restart-detected
     session_start: Mapped[str | None] = mapped_column(String(64))   # seal: 封存前的会话基线
     match_rate: Mapped[float | None] = mapped_column(Double)        # predeploy 体检结论
+    # 本版本新增代码的覆盖：分母是 diff 新增行里 JaCoCo 有探针的行。没有 diff 时为 NULL
+    inc_covered: Mapped[int | None] = mapped_column(Integer)
+    inc_total: Mapped[int | None] = mapped_column(Integer)
+    inc_pct: Mapped[float | None] = mapped_column(Double)
 
     __table_args__ = (Index("ix_snapshots_service_at", "service_id", "at"),)
 
@@ -186,3 +221,46 @@ class Break(Base):
     instances: Mapped[int | None] = mapped_column(Integer)
 
     __table_args__ = (Index("ix_breaks_service_at", "service_id", "at"),)
+
+
+class UnitReport(Base):
+    """构建流水线传上来的单元测试覆盖率（jacoco-aggregate 的 jacoco.xml）。XML 原文在磁盘上。"""
+    __tablename__ = "unit_reports"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    service_id: Mapped[int] = mapped_column(
+        ForeignKey("services.id", ondelete="CASCADE"), nullable=False)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    instruction: Mapped[float] = mapped_column(Double, nullable=False)
+    branch: Mapped[float] = mapped_column(Double, nullable=False)
+    line: Mapped[float] = mapped_column(Double, nullable=False)
+    covered: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    total: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lines_covered: Mapped[int] = mapped_column(Integer, nullable=False)
+    lines_total: Mapped[int] = mapped_column(Integer, nullable=False)
+    classes_hit: Mapped[int] = mapped_column(Integer, nullable=False)
+    classes_total: Mapped[int] = mapped_column(Integer, nullable=False)
+    inc_covered: Mapped[int | None] = mapped_column(Integer)
+    inc_total: Mapped[int | None] = mapped_column(Integer)
+    inc_pct: Mapped[float | None] = mapped_column(Double)
+    xml_path: Mapped[str] = mapped_column(String(500), nullable=False)   # 相对 <dataDir>/<svc>/
+
+    __table_args__ = (UniqueConstraint("service_id", "version", name="uq_unit_reports_service_version"),)
+
+
+class Diff(Base):
+    """流水线传上来的 git diff 的摘要。行号明细落磁盘（大重构一次可达数 MB）。"""
+    __tablename__ = "diffs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    service_id: Mapped[int] = mapped_column(
+        ForeignKey("services.id", ondelete="CASCADE"), nullable=False)
+    version: Mapped[str] = mapped_column(String(100), nullable=False)
+    base: Mapped[str] = mapped_column(String(200), nullable=False)
+    head: Mapped[str | None] = mapped_column(String(200))
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    files: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    added_lines: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+    __table_args__ = (UniqueConstraint("service_id", "version", name="uq_diffs_service_version"),)
