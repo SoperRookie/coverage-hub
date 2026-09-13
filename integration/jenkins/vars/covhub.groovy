@@ -78,6 +78,37 @@ private String enc(Object value) {
     return java.net.URLEncoder.encode(value as String, 'UTF-8')
 }
 
+/**
+ * 把一个文件作为原始正文 POST 给 hub（--data-binary；-d 会吃掉换行，diff 就废了）。
+ * uploadClasses / pushUnitCoverage / pushDiff 共用。failOnError=false 时非 2xx 只警告，
+ * 返回 null。
+ */
+private String httpUpload(Map args, String path, String file, String what, boolean failOnError) {
+    String onFail = failOnError ? 'exit 1' : 'exit 0'
+    String script = """
+        set -e
+        code=\$(curl -sS -X POST -H "X-Covhub-Token: \${COVHUB_TOKEN:-}" \\
+                 --data-binary '@${file}' \\
+                 -o .covhub-resp -w '%{http_code}' '${hubUrl(args)}${path}')
+        cat .covhub-resp
+        rm -f .covhub-resp
+        case "\$code" in
+            2*) ;;
+            *) echo "[covhub] ${what}失败，HTTP \$code" >&2; ${onFail} ;;
+        esac
+    """
+    String out
+    if (args.tokenCredentialsId) {
+        withCredentials([string(credentialsId: args.tokenCredentialsId, variable: 'COVHUB_TOKEN')]) {
+            out = sh(script: script, returnStdout: true)
+        }
+    } else {
+        out = sh(script: script, returnStdout: true)
+    }
+    echo out
+    return out
+}
+
 // --------------------------------------------------------------------------
 // 步骤
 // --------------------------------------------------------------------------
@@ -249,28 +280,63 @@ String uploadClasses(Map args) {
 
     String qs = "service=${enc(args.service)}&version=${enc(args.version)}"
     if (args.retarget) { qs += '&retarget=1' }
-    String script = """
-        set -e
-        code=\$(curl -sS -X POST -H "X-Covhub-Token: \${COVHUB_TOKEN:-}" \\
-                 --data-binary '@${args.archive}' \\
-                 -o .covhub-resp -w '%{http_code}' '${hubUrl(args)}/api/upload-classes?${qs}')
-        cat .covhub-resp
-        rm -f .covhub-resp
-        case "\$code" in
-            2*) ;;
-            *) echo "[covhub] 上传 class 产物失败，HTTP \$code" >&2; exit 1 ;;
-        esac
-    """
-    String out
-    if (args.tokenCredentialsId) {
-        withCredentials([string(credentialsId: args.tokenCredentialsId, variable: 'COVHUB_TOKEN')]) {
-            out = sh(script: script, returnStdout: true)
-        }
-    } else {
-        out = sh(script: script, returnStdout: true)
-    }
-    echo out
-    return out
+    // class 产物传不上去，新版本的 exec 就和旧 class 对不上 —— 必须卡住
+    return httpUpload(args, "/api/upload-classes?${qs}", args.archive as String, '上传 class 产物', true)
+}
+
+/**
+ * 把构建期的单测覆盖率报告（jacoco-aggregate 的 jacoco.xml）传给 hub。
+ *   service   服务名（或 services: 'a,b'，一个仓库多个服务时一份报告落多个）
+ *   version   版本标识，须与发版时 predeploy / retarget 用的一致
+ *   xml       jacoco.xml 路径
+ *   group     可选，聚合报告里只取这个模块（<group name=artifactId>）
+ *   failOnError  默认 false：hub 停机不该卡住所有构建（这点和 predeploy 不同 ——
+ *                单测报告下次构建还会有，exec 不会）
+ */
+String pushUnitCoverage(Map args) {
+    assert (args.service || args.services) : 'pushUnitCoverage 需要 service'
+    assert args.version : 'pushUnitCoverage 需要 version'
+    assert args.xml : 'pushUnitCoverage 需要 xml（jacoco.xml 路径）'
+    assert hubUrl(args) : 'pushUnitCoverage 需要 hub（或环境变量 COVHUB_URL）'
+    String qs = (args.services ? "services=${enc(args.services)}" : "service=${enc(args.service)}") +
+                "&version=${enc(args.version)}"
+    if (args.group) { qs += "&group=${enc(args.group)}" }
+    return httpUpload(args, "/api/unit-coverage?${qs}", args.xml as String, '推送单测覆盖率',
+                      args.failOnError ? true : false)
+}
+
+/**
+ * 把 git diff 传给 hub，之后每次采集都能算出「本版本新增代码」的覆盖率。
+ *   service / services、version 同上
+ *   base      基线：上一版的 commit / tag（建议 git rev-parse 后的 SHA）
+ *   head      可选，本次的 commit
+ *   file      diff 文件。推荐生成命令：
+ *             git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 \
+ *                 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt' > covhub.diff
+ *   failOnError  默认 false
+ */
+String pushDiff(Map args) {
+    assert (args.service || args.services) : 'pushDiff 需要 service'
+    assert args.version : 'pushDiff 需要 version'
+    assert args.base : 'pushDiff 需要 base（基线的 commit / tag）'
+    assert args.file : 'pushDiff 需要 file（diff 文件路径）'
+    assert hubUrl(args) : 'pushDiff 需要 hub（或环境变量 COVHUB_URL）'
+    String qs = (args.services ? "services=${enc(args.services)}" : "service=${enc(args.service)}") +
+                "&version=${enc(args.version)}&base=${enc(args.base)}"
+    if (args.head) { qs += "&head=${enc(args.head)}" }
+    return httpUpload(args, "/api/diff?${qs}", args.file as String, '推送 git diff',
+                      args.failOnError ? true : false)
+}
+
+/**
+ * 问 hub「上一版是谁」：最近结算的版本及其 diff 的 head，流水线用它定 git diff 的基线。
+ * 返回 Map（latest 为 null 表示还没结算过任何版本）。
+ */
+Map lastVersion(Map args) {
+    assert args.service : 'lastVersion 需要 service'
+    assert hubUrl(args) : 'lastVersion 需要 hub（或环境变量 COVHUB_URL）'
+    String raw = http(args, 'GET', "/api/services/${enc(args.service)}/versions")
+    return readJSON(text: raw)
 }
 
 /**

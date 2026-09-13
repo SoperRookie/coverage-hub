@@ -11,3 +11,10 @@ Jenkinsfile* text eol=lf
 *.jar       binary
 *.exec      binary
 *.zip       binary
+
+# 前端构建产物：进版本库但不看 diff（hash 文件名每次构建都变）
+covhub/webui/** -diff -text linguist-generated=true
+*.vue        text eol=lf
+*.ts         text eol=lf
+*.woff2 binary
+*.woff binary

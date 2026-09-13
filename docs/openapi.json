@@ -1,46 +1,10 @@
 {
-  "openapi": "3.0.3",
+  "openapi": "3.1.0",
   "info": {
     "title": "covhub 控制 API",
-    "version": "1.3.0",
-    "description": "JaCoCo 运行期覆盖率的采集与看板。整套方案只有 hub 这一个服务端，被测机器和发版节点不装 Python、不装 java、不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。\n\n**写接口在 hub 内部串行执行**，返回体里带着这次执行的日志。**非 2xx 一律表示失败**，调用方应据此让部署流程停下来。\n\n发版节点上更省事的做法是用 integration/covhub-client.sh 包一层。"
+    "description": "JaCoCo 运行期覆盖率的采集与看板。整套方案只有 hub 这一个服务端，被测机器和发版节点不装 Python、不装 java、不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。\n\n**写接口在 hub 内部串行执行**，返回体里带着这次执行的日志。**非 2xx 一律表示失败**，调用方应据此让部署流程停下来。\n\n发版节点上更省事的做法是用 integration/covhub-client.sh 包一层。",
+    "version": "2.1.0"
   },
-  "servers": [
-    {
-      "url": "/",
-      "description": "hub 自身"
-    }
-  ],
-  "security": [
-    {
-      "tokenHeader": []
-    },
-    {
-      "tokenQuery": []
-    }
-  ],
-  "tags": [
-    {
-      "name": "探活",
-      "description": "不需要令牌"
-    },
-    {
-      "name": "查询",
-      "description": "只读，不改任何状态"
-    },
-    {
-      "name": "采集",
-      "description": "拉数据、出报告，会写 data/"
-    },
-    {
-      "name": "发版",
-      "description": "结算、换产物 —— 顺序错了会丢数据"
-    },
-    {
-      "name": "产物",
-      "description": "class 产物的上传与取回"
-    }
-  ],
   "paths": {
     "/api/health": {
       "get": {
@@ -48,11 +12,11 @@
           "探活"
         ],
         "summary": "存活探测",
-        "description": "唯一不需要令牌的接口。返回 hub 版本和已配置的服务名列表。",
-        "parameters": [],
+        "description": "唯一不需要令牌的接口。返回 hub 版本和已登记的服务名列表。\n\n故意不进线程池：写接口把线程池占满时它仍然要能答话。",
+        "operationId": "health_api_health_get",
         "responses": {
           "200": {
-            "description": "hub 活着",
+            "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
@@ -61,31 +25,7 @@
               }
             }
           }
-        },
-        "security": []
-      }
-    },
-    "/api/openapi.json": {
-      "get": {
-        "tags": [
-          "探活"
-        ],
-        "summary": "本文档",
-        "description": "这份 OpenAPI 描述自身。同样不需要令牌 —— 它是静态结构，不含任何部署信息，方便网关和 Swagger UI 直接拉取。",
-        "parameters": [],
-        "responses": {
-          "200": {
-            "description": "OpenAPI 3.0 文档",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
-                }
-              }
-            }
-          }
-        },
-        "security": []
+        }
       }
     },
     "/api/status": {
@@ -94,31 +34,52 @@
           "查询"
         ],
         "summary": "连通性与最新覆盖率",
-        "description": "看板上那些数字的 JSON 版。push 服务的 unknown=true 表示当前进程没有收集端，说不出在线与否 —— 那不等于离线。",
+        "description": "看板上那些数字的 JSON 版。push 服务的 unknown=true 表示当前进程没有收集端，\n说不出在线与否 —— 那不等于离线。",
+        "operationId": "status_api_status_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
             "required": false,
-            "description": "服务名。不给则返回全部服务",
             "schema": {
-              "type": "string"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "只看某一个服务；不给则全部",
+              "title": "Service"
+            },
+            "description": "只看某一个服务；不给则全部"
           }
         ],
         "responses": {
-          "400": {
-            "description": "缺少必需参数",
+          "200": {
+            "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/StatusResponse"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -128,17 +89,7 @@
             }
           },
           "404": {
-            "description": "配置里没有这个服务",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "方法不对，见各接口标注",
+            "description": "没有这个服务",
             "content": {
               "application/json": {
                 "schema": {
@@ -157,12 +108,12 @@
               }
             }
           },
-          "200": {
-            "description": "查询成功",
+          "422": {
+            "description": "Validation Error",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/StatusResponse"
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -176,42 +127,68 @@
           "查询"
         ],
         "summary": "取该服务应注入的 -javaagent 参数串",
-        "description": "被测服务零侵入接入的入口：把返回的参数串塞进 JAVA_TOOL_OPTIONS 即可，不改代码不改 pom。加 format=text 直接出纯文本，方便 shell 里 $(curl ...)。",
+        "description": "被测服务零侵入接入的入口：把返回的参数串塞进 JAVA_TOOL_OPTIONS 即可，\n不改代码不改 pom。加 format=text 直接出纯文本，方便 shell 里 $(curl ...)。",
+        "operationId": "agent_opts_api_agent_opts_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
             "required": true,
-            "description": "服务名，要和配置里的 name 对上",
             "schema": {
               "type": "string",
-              "example": "order-service"
-            }
+              "description": "服务名，须与 hub 配置一致",
+              "title": "Service"
+            },
+            "description": "服务名，须与 hub 配置一致"
           },
           {
             "name": "format",
             "in": "query",
             "required": false,
-            "description": "填 text 则返回纯文本而不是 JSON",
             "schema": {
-              "type": "string",
-              "example": "text"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "填 text 则返回纯文本而不是 JSON",
+              "title": "Format"
+            },
+            "description": "填 text 则返回纯文本而不是 JSON"
           }
         ],
         "responses": {
-          "400": {
-            "description": "缺少必需参数",
+          "200": {
+            "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/AgentOpts"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -221,17 +198,7 @@
             }
           },
           "404": {
-            "description": "配置里没有这个服务",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "方法不对，见各接口标注",
+            "description": "没有这个服务",
             "content": {
               "application/json": {
                 "schema": {
@@ -250,12 +217,12 @@
               }
             }
           },
-          "200": {
-            "description": "参数串",
+          "422": {
+            "description": "Validation Error",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AgentOpts"
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -269,21 +236,25 @@
           "查询"
         ],
         "summary": "下载 jacocoagent.jar",
-        "description": "被测机器不必预先铺一份 agent，容器的 initContainer 一条 curl 就能拿到。读的是配置里 jacocoAgent 指向的文件 —— 那一项填的是**被测端**路径，两者不一致时这个接口会 404，但 agent-opts 照样输出正确的参数串。",
-        "parameters": [],
+        "description": "被测机器不必预先铺一份 agent，容器的 initContainer 一条 curl 就能拿到。\n读的是配置里 jacocoAgent 指向的文件 —— 那一项填的是**被测端**路径，\n两者不一致时这个接口会 404，但 agent-opts 照样输出正确的参数串。",
+        "operationId": "agent_jar_api_agent_jar_get",
         "responses": {
-          "400": {
-            "description": "缺少必需参数",
+          "200": {
+            "description": "jar 文件",
             "content": {
               "application/json": {
+                "schema": {}
+              },
+              "application/java-archive": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "string",
+                  "format": "binary"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -302,16 +273,6 @@
               }
             }
           },
-          "405": {
-            "description": "方法不对，见各接口标注",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
           "500": {
             "description": "hub 内部错误",
             "content": {
@@ -321,19 +282,19 @@
                 }
               }
             }
-          },
-          "200": {
-            "description": "jar 文件",
-            "content": {
-              "application/java-archive": {
-                "schema": {
-                  "type": "string",
-                  "format": "binary"
-                }
-              }
-            }
           }
-        }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
       }
     },
     "/api/diagnose": {
@@ -342,41 +303,63 @@
           "查询"
         ],
         "summary": "诊断 exec 与 class 产物是否对得上",
-        "description": "**任何覆盖率数字不对劲，先跑这个。** 它把 exec 里记录的 class id 和 classfiles 的 class id 求交集 —— 匹配率低就是 class 产物对不上，这是接入时最贵、最难查、而且**不会报错**的一个坑（报告只会显示全部未覆盖）。",
+        "description": "**任何覆盖率数字不对劲，先跑这个。** 它把 exec 里记录的 class id 和 classfiles\n的 class id 求交集 —— 匹配率低就是 class 产物对不上，这是接入时最贵、最难查、\n而且**不会报错**的一个坑（报告只会显示全部未覆盖）。",
+        "operationId": "diagnose_api_diagnose_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
             "required": true,
-            "description": "服务名，要和配置里的 name 对上",
             "schema": {
               "type": "string",
-              "example": "order-service"
-            }
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
           },
           {
             "name": "version",
             "in": "query",
             "required": false,
-            "description": "诊断某个已归档版本，不给则诊断当前周期",
             "schema": {
-              "type": "string"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "诊断某个已归档版本，不给则诊断当前周期",
+              "title": "Version"
+            },
+            "description": "诊断某个已归档版本，不给则诊断当前周期"
           }
         ],
         "responses": {
-          "400": {
-            "description": "缺少必需参数",
+          "200": {
+            "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "$ref": "#/components/schemas/DiagnoseResponse"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -386,17 +369,7 @@
             }
           },
           "404": {
-            "description": "配置里没有这个服务",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "方法不对，见各接口标注",
+            "description": "没有这个服务",
             "content": {
               "application/json": {
                 "schema": {
@@ -415,12 +388,12 @@
               }
             }
           },
-          "200": {
-            "description": "诊断结果",
+          "422": {
+            "description": "Validation Error",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/DiagnoseResponse"
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -435,51 +408,51 @@
         ],
         "summary": "拉一次快照并出报告",
         "description": "累加，不清零。采完会重新渲染看板。",
+        "operationId": "dump_api_dump_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
-            "required": true,
-            "description": "服务名，要和配置里的 name 对上",
+            "required": false,
             "schema": {
-              "type": "string",
-              "example": "order-service"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
           }
         ],
         "responses": {
           "200": {
-            "description": "执行成功。log 是这次执行打印的日志",
+            "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CommandResult"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "业务失败（目标不可达、数据不满足前提等）。部署流程应当就此停下",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandResult"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "缺少必需参数",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -489,17 +462,7 @@
             }
           },
           "404": {
-            "description": "配置里没有这个服务",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "方法不对，见各接口标注",
+            "description": "没有这个服务",
             "content": {
               "application/json": {
                 "schema": {
@@ -514,6 +477,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "业务上失败了（目标不可达、没有数据……），log 里有原因",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -528,51 +511,51 @@
         ],
         "summary": "用已有 exec 重出报告",
         "description": "不碰被测服务，只是拿现有数据重新生成一次报告 —— 改了 reportExcludes 之后用。",
+        "operationId": "report_api_report_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
-            "required": true,
-            "description": "服务名，要和配置里的 name 对上",
+            "required": false,
             "schema": {
-              "type": "string",
-              "example": "order-service"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
           }
         ],
         "responses": {
           "200": {
-            "description": "执行成功。log 是这次执行打印的日志",
+            "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CommandResult"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "业务失败（目标不可达、数据不满足前提等）。部署流程应当就此停下",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandResult"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "缺少必需参数",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -582,17 +565,7 @@
             }
           },
           "404": {
-            "description": "配置里没有这个服务",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "方法不对，见各接口标注",
+            "description": "没有这个服务",
             "content": {
               "application/json": {
                 "schema": {
@@ -607,6 +580,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "业务上失败了（目标不可达、没有数据……），log 里有原因",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -620,70 +613,88 @@
           "发版"
         ],
         "summary": "结算并归档（停服前必须调用）",
-        "description": "dump --reset + 归档 + 出终版报告。\n\n**必须在停服之前执行。** 服务一停 agent 随进程消失，那段覆盖率没有任何补救手段 —— 所以目标不可达时它**故意报 409**，好让部署流程停下来。确实要跳过就带 allowMissing=1，但那意味着这段数据已经丢了。",
+        "description": "dump --reset + 归档 + 出终版报告。\n\n**必须在停服之前执行。** 服务一停 agent 随进程消失，那段覆盖率没有任何补救手段\n—— 所以目标不可达时它**故意报 409**，好让部署流程停下来。确实要跳过就带\nallowMissing=1，但那意味着这段数据已经丢了。",
+        "operationId": "predeploy_api_predeploy_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
-            "required": true,
-            "description": "服务名，要和配置里的 name 对上",
+            "required": false,
             "schema": {
-              "type": "string",
-              "example": "order-service"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
           },
           {
             "name": "version",
             "in": "query",
             "required": false,
-            "description": "版本标识，不给则取配置里的 version",
             "schema": {
-              "type": "string"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取配置里的 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取配置里的 version"
           },
           {
             "name": "allowMissing",
             "in": "query",
             "required": false,
-            "description": "填 1 则目标已离线时不报错",
             "schema": {
-              "type": "string"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "填 1 则目标已离线时不报错",
+              "title": "Allowmissing"
+            },
+            "description": "填 1 则目标已离线时不报错"
           }
         ],
         "responses": {
           "200": {
-            "description": "执行成功。log 是这次执行打印的日志",
+            "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CommandResult"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "业务失败（目标不可达、数据不满足前提等）。部署流程应当就此停下",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandResult"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "缺少必需参数",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -693,17 +704,7 @@
             }
           },
           "404": {
-            "description": "配置里没有这个服务",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "方法不对，见各接口标注",
+            "description": "没有这个服务",
             "content": {
               "application/json": {
                 "schema": {
@@ -718,6 +719,26 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "业务上失败了（目标不可达、没有数据……），log 里有原因",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -731,80 +752,109 @@
           "发版"
         ],
         "summary": "把配置指向新版本的 class 产物",
-        "description": "**发版流水线里最容易漏的一步。** JaCoCo 按 CRC64 class id 匹配，class 产物不跟着版本换，新周期采到的 exec 就和旧 class 对不上，报告全是未覆盖。用 upload-classes 带 retarget=1 可以省掉这一次调用。\n\nYAML 配置只替换目标服务的那几行，注释和排版原样保留。",
+        "description": "**发版流水线里最容易漏的一步。** JaCoCo 按 CRC64 class id 匹配，class 产物不跟着\n版本换，新周期采到的 exec 就和旧 class 对不上，报告全是未覆盖。用 upload-classes\n带 retarget=1 可以省掉这一次调用。改的是数据库里的服务配置，立即生效。",
+        "operationId": "retarget_api_retarget_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
-            "required": true,
-            "description": "服务名，要和配置里的 name 对上",
+            "required": false,
             "schema": {
-              "type": "string",
-              "example": "order-service"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
           },
           {
             "name": "version",
             "in": "query",
             "required": false,
-            "description": "新版本标识",
             "schema": {
-              "type": "string"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "新版本标识",
+              "title": "Version"
+            },
+            "description": "新版本标识"
           },
           {
             "name": "classfiles",
             "in": "query",
             "required": false,
-            "description": "**hub 上**的 class 产物路径，逗号分隔",
             "schema": {
-              "type": "string",
-              "example": "./data/order-service/artifacts/1.4.3"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "**hub 上**的 class 产物路径，逗号分隔",
+              "examples": [
+                "./data/order-service/artifacts/1.4.3"
+              ],
+              "title": "Classfiles"
+            },
+            "description": "**hub 上**的 class 产物路径，逗号分隔"
           },
           {
             "name": "sourcefiles",
             "in": "query",
             "required": false,
-            "description": "hub 上的源码路径，逗号分隔",
             "schema": {
-              "type": "string"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "hub 上的源码路径，逗号分隔",
+              "title": "Sourcefiles"
+            },
+            "description": "hub 上的源码路径，逗号分隔"
           }
         ],
         "responses": {
           "200": {
-            "description": "执行成功。log 是这次执行打印的日志",
+            "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/CommandResult"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "业务失败（目标不可达、数据不满足前提等）。部署流程应当就此停下",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/CommandResult"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "缺少必需参数",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -814,17 +864,7 @@
             }
           },
           "404": {
-            "description": "配置里没有这个服务",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "方法不对，见各接口标注",
+            "description": "没有这个服务",
             "content": {
               "application/json": {
                 "schema": {
@@ -842,6 +882,26 @@
                 }
               }
             }
+          },
+          "409": {
+            "description": "业务上失败了（目标不可达、没有数据……），log 里有原因",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommandResult"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
           }
         }
       }
@@ -852,39 +912,123 @@
           "产物"
         ],
         "summary": "上传该版本的 class 产物压缩包",
-        "description": "报告是 hub 出的，所以 class 必须在 hub 上，且必须是**线上跑的那一份**。有了这个接口，被测机器和发版节点都不必和 hub 共享文件系统。\n\n产物优先用 agent 的 classdumpdir 落盘那份 —— 它和 exec 的指纹定义上必然匹配，还包含 Spring AOP、MyBatis 代理这类构建产物里根本没有的动态类。\n\n包里习惯带的一层顶层目录会自动剥掉；绝对路径和跳出目录的成员一律拒绝。\n\n带 retarget=1 则上传完顺手把配置的 classfiles 指向这份产物，省一次 /api/retarget 调用 —— **发版时推荐这么用**。",
+        "description": "报告是 hub 出的，所以 class 必须在 hub 上，且必须是**线上跑的那一份**。\n有了这个接口，被测机器和发版节点都不必和 hub 共享文件系统。\n\n产物优先用 agent 的 classdumpdir 落盘那份 —— 它和 exec 的指纹定义上必然匹配，\n还包含 Spring AOP、MyBatis 代理这类构建产物里根本没有的动态类。\n\n包里习惯带的一层顶层目录会自动剥掉；绝对路径和跳出目录的成员一律拒绝。\n带 retarget=1 则上传完顺手把配置的 classfiles 指向这份产物 —— **发版时推荐这么用**。",
+        "operationId": "upload_classes_api_upload_classes_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
             "required": true,
-            "description": "服务名，要和配置里的 name 对上",
             "schema": {
               "type": "string",
-              "example": "order-service"
-            }
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
           },
           {
             "name": "version",
             "in": "query",
             "required": true,
-            "description": "版本标识",
             "schema": {
               "type": "string",
-              "example": "1.4.3"
-            }
+              "description": "版本标识",
+              "title": "Version"
+            },
+            "description": "版本标识"
           },
           {
             "name": "retarget",
             "in": "query",
             "required": false,
-            "description": "填 1 则上传后把配置指向这份产物",
             "schema": {
-              "type": "string",
-              "example": "1"
-            }
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "填 1 则上传后把配置指向这份产物",
+              "title": "Retarget"
+            },
+            "description": "填 1 则上传后把配置指向这份产物"
           }
         ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "hub 内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "缺参数、请求体为空、或压缩包里有不安全的路径",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
         "requestBody": {
           "required": true,
           "description": "压缩包本体，tar.gz 或 zip。curl 用 --data-binary @file",
@@ -908,68 +1052,6 @@
               }
             }
           }
-        },
-        "responses": {
-          "400": {
-            "description": "缺参数、请求体为空、或压缩包里有不安全的路径",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "配置里没有这个服务",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "405": {
-            "description": "方法不对，见各接口标注",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "500": {
-            "description": "hub 内部错误",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
-          "200": {
-            "description": "已接收。classes 是包里解出的 .class 数量，是 0 就说明打包方式不对",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UploadResult"
-                }
-              }
-            }
-          }
         }
       }
     },
@@ -979,42 +1061,73 @@
           "产物"
         ],
         "summary": "取回某个版本的 class 产物",
-        "description": "打成 tar.gz 回传。推 Sonar 时 -Dsonar.java.binaries 要的就是**采集时运行的那份 class** —— 有了它，发版节点不必自己囤历史产物。\n\n两个来源按可信度排序：先找 upload-classes 传上来的 artifacts/<版本>/，再找结算时 manifest 里记的 classfiles。都没有就 404。",
+        "description": "打成 tar.gz 回传。推 Sonar 时 -Dsonar.java.binaries 要的就是**采集时运行的那份 class**\n—— 有了它，发版节点不必自己囤历史产物。\n\n两个来源按可信度排序：先找 upload-classes 传上来的 artifacts/<版本>/，\n再找结算时 manifest 里记的 classfiles。都没有就 404。",
+        "operationId": "classes_api_classes_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
         "parameters": [
           {
             "name": "service",
             "in": "query",
             "required": true,
-            "description": "服务名，要和配置里的 name 对上",
             "schema": {
               "type": "string",
-              "example": "order-service"
-            }
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
           },
           {
             "name": "version",
             "in": "query",
             "required": true,
-            "description": "版本标识",
             "schema": {
               "type": "string",
-              "example": "1.4.3"
-            }
+              "description": "版本标识",
+              "title": "Version"
+            },
+            "description": "版本标识"
           }
         ],
         "responses": {
-          "400": {
-            "description": "缺少必需参数",
+          "200": {
+            "description": "tar.gz 包。响应头 X-Covhub-Classes 是 .class 数量",
             "content": {
               "application/json": {
+                "schema": {}
+              },
+              "application/gzip": {
                 "schema": {
-                  "$ref": "#/components/schemas/Error"
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            },
+            "headers": {
+              "X-Covhub-Classes": {
+                "description": "包里的 .class 数量",
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
                 }
               }
             }
           },
           "401": {
-            "description": "令牌无效或缺失（hub 配了 serve.token 时）",
+            "description": "令牌无效或缺失",
             "content": {
               "application/json": {
                 "schema": {
@@ -1033,16 +1146,6 @@
               }
             }
           },
-          "405": {
-            "description": "方法不对，见各接口标注",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Error"
-                }
-              }
-            }
-          },
           "500": {
             "description": "hub 内部错误",
             "content": {
@@ -1053,26 +1156,1988 @@
               }
             }
           },
-          "200": {
-            "description": "tar.gz 包。响应头 X-Covhub-Classes 是 .class 数量",
-            "headers": {
-              "X-Covhub-Classes": {
-                "description": "包里的 .class 数量",
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
                 "schema": {
-                  "type": "integer"
-                }
-              },
-              "Content-Disposition": {
-                "schema": {
-                  "type": "string"
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
-            },
+            }
+          }
+        }
+      }
+    },
+    "/api/services": {
+      "get": {
+        "tags": [
+          "服务配置"
+        ],
+        "summary": "列出全部服务",
+        "description": "返回的是入库原文：classfiles / sourcefiles 里的相对路径不展开。",
+        "operationId": "list_services_api_services_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
             "content": {
-              "application/gzip": {
+              "application/json": {
                 "schema": {
-                  "type": "string",
-                  "format": "binary"
+                  "$ref": "#/components/schemas/ServiceListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "配置不合法或同名服务已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "服务配置"
+        ],
+        "summary": "登记一条服务",
+        "description": "pull 通道必须给 address 和 port；拼错的键名直接拒绝。\nbindAddress / dumpRetry / version 不给就不存 —— 运行时按「键不存在」取默认。",
+        "operationId": "add_service_api_services_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceSpec"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "配置不合法或同名服务已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
+      }
+    },
+    "/api/services/{name}": {
+      "get": {
+        "tags": [
+          "服务配置"
+        ],
+        "summary": "查看一条服务",
+        "operationId": "get_service_api_services__name__get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "配置不合法或同名服务已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "服务配置"
+        ],
+        "summary": "整份替换一条服务",
+        "description": "没给的可选字段会被清空。请求体里的 name 以路径为准。",
+        "operationId": "replace_service_api_services__name__put",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServiceBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "配置不合法或同名服务已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "服务配置"
+        ],
+        "summary": "修改若干字段",
+        "description": "只动给到的字段。改完必须仍是一条合法配置（比如不能把 pull 服务的 address 清掉）。",
+        "operationId": "update_service_api_services__name__patch",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ServicePatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ServiceResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "配置不合法或同名服务已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "服务配置"
+        ],
+        "summary": "删除服务配置",
+        "description": "只删配置。data/<name>/ 里的 exec 与归档**不动** —— 那是不可再生的执行轨迹。",
+        "operationId": "remove_service_api_services__name__delete",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "配置不合法或同名服务已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/import": {
+      "post": {
+        "tags": [
+          "服务配置"
+        ],
+        "summary": "从旧 targets.yaml 导入服务与历史",
+        "description": "幂等，可重复调用。和 CLI 的 covhub import 是同一份实现。",
+        "operationId": "import_legacy_api_import_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "source",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "hub 上的旧配置文件路径，不给则用当前配置文件",
+              "title": "Source"
+            },
+            "description": "hub 上的旧配置文件路径，不给则用当前配置文件"
+          },
+          {
+            "name": "overwrite",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "同名服务已存在时覆盖",
+              "default": false,
+              "title": "Overwrite"
+            },
+            "description": "同名服务已存在时覆盖"
+          },
+          {
+            "name": "dryRun",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "只报告会做什么，不写库",
+              "default": false,
+              "title": "Dryrun"
+            },
+            "description": "只报告会做什么，不写库"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "配置不合法或同名服务已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects": {
+      "get": {
+        "tags": [
+          "项目"
+        ],
+        "summary": "列出全部项目",
+        "operationId": "list_projects_api_projects_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectListResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个项目",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "不合法或同名项目已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
+      },
+      "post": {
+        "tags": [
+          "项目"
+        ],
+        "summary": "创建项目",
+        "operationId": "add_project_api_projects_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectSpec"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个项目",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "不合法或同名项目已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
+      }
+    },
+    "/api/projects/{name}": {
+      "get": {
+        "tags": [
+          "项目"
+        ],
+        "summary": "查看一个项目",
+        "operationId": "get_project_api_projects__name__get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个项目",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "不合法或同名项目已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "项目"
+        ],
+        "summary": "修改项目的标题 / 描述",
+        "operationId": "update_project_api_projects__name__patch",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectPatch"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个项目",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "不合法或同名项目已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "项目"
+        ],
+        "summary": "删除项目",
+        "description": "只删分组。项目下的服务变成未分组，配置与采集数据都不动。",
+        "operationId": "remove_project_api_projects__name__delete",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个项目",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "不合法或同名项目已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/unit-coverage": {
+      "post": {
+        "tags": [
+          "构建期"
+        ],
+        "summary": "收一份单测覆盖率报告（jacoco.xml）",
+        "description": "构建流水线在 `mvn verify` 之后把聚合报告 POST 过来。hub 解析计数器入库，XML 原文留在\n`data/<svc>/unit/<version>/`；该版本已有 diff 时顺手算出**单测的新增代码覆盖率**。\n同版本重传覆盖。",
+        "operationId": "unit_coverage_api_unit_coverage_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
+          },
+          {
+            "name": "services",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "一份报告落多个服务，逗号分隔（一个仓库多个服务时用）",
+              "title": "Services"
+            },
+            "description": "一份报告落多个服务，逗号分隔（一个仓库多个服务时用）"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取服务当前 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取服务当前 version"
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "聚合报告里只取这个模块（<group name=artifactId>）",
+              "title": "Group"
+            },
+            "description": "聚合报告里只取这个模块（<group name=artifactId>）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitCoverageResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "正文为空、不是 JaCoCo XML / git diff、或版本串不能作目录名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/xml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "mvn verify 产出的 jacoco.xml（jacoco-aggregate 的也行）。curl 用 --data-binary @file"
+        }
+      }
+    },
+    "/api/diff": {
+      "post": {
+        "tags": [
+          "构建期"
+        ],
+        "summary": "收一份 git diff，用于新增代码覆盖率",
+        "description": "推荐的生成命令：\n`git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt'`。\n\nhub 记下每个源码文件的新增行号，之后每次快照都按它算**新增代码的运行时覆盖率**；\n该版本已有的快照与单测报告立刻重算一遍。分母是新增行里 JaCoCo 有探针的行。\n返回体里的 `matchesCurrentVersion` 为 false 说明版本串对不上服务当前 version ——\n运行时快照按 version 找 diff，对不上就永远算不出新增覆盖。",
+        "operationId": "push_diff_api_diff_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
+          },
+          {
+            "name": "services",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "一份 diff 落多个服务，逗号分隔",
+              "title": "Services"
+            },
+            "description": "一份 diff 落多个服务，逗号分隔"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取服务当前 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取服务当前 version"
+          },
+          {
+            "name": "base",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "基线：上一版的 commit / tag（建议传 rev-parse 后的 SHA）",
+              "title": "Base"
+            },
+            "description": "基线：上一版的 commit / tag（建议传 rev-parse 后的 SHA）"
+          },
+          {
+            "name": "head",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "本次的 commit",
+              "title": "Head"
+            },
+            "description": "本次的 commit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiffResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "正文为空、不是 JaCoCo XML / git diff、或版本串不能作目录名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/xml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "`git diff <基线>..<本次>` 的输出。curl 用 --data-binary @file"
+        }
+      }
+    },
+    "/api/recompute": {
+      "post": {
+        "tags": [
+          "构建期"
+        ],
+        "summary": "按已有 diff 重算某版本的新增代码覆盖",
+        "operationId": "recompute_api_recompute_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取服务当前 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取服务当前 version"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "正文为空、不是 JaCoCo XML / git diff、或版本串不能作目录名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/overview": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "首页总览：项目 → 服务 → 指标",
+        "description": "每个服务一行：在线（由采集线程写入，这里不探活）、是否采集停了（stale）、\n运行时最新覆盖（总 + 新增）、单测最新覆盖（总 + 新增）、断代数。项目行只有计数，\n不算平均覆盖率。",
+        "operationId": "overview_api_overview_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
+      }
+    },
+    "/api/services/{name}/detail": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "服务详情页的全部数据",
+        "description": "运行时：latest / history / 已结算版本 / 断代 / 在线实例 / 新增代码按文件明细；\n单测：latest / history / 新增代码按文件明细；以及报告链接。带 version 时运行时那一栏切到那个归档。",
+        "operationId": "service_detail_api_services__name__detail_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "看某个已结算版本（归档目录名，如 1.4.2 或 1.4.2-2）；不给则看当前周期",
+              "title": "Version"
+            },
+            "description": "看某个已结算版本（归档目录名，如 1.4.2 或 1.4.2-2）；不给则看当前周期"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{name}/compare": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "两个版本的覆盖率对比",
+        "description": "总量（指令 / 分支 / 触达类 / 新增代码）的差，以及按源码文件的指令覆盖差（含只在一侧出现的文件）。",
+        "operationId": "compare_api_services__name__compare_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "a",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "基准：current 或归档目录名",
+              "default": "current",
+              "title": "A"
+            },
+            "description": "基准：current 或归档目录名"
+          },
+          {
+            "name": "b",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "对比：current 或归档目录名",
+              "default": "current",
+              "title": "B"
+            },
+            "description": "对比：current 或归档目录名"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/projects/{name}/report": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "项目报表：各服务的数字与时间范围内的已结算版本",
+        "description": "逐服务、逐版本的原始数字，不算项目平均覆盖率。name 为 __unassigned 时是未分组的服务。",
+        "operationId": "project_report_api_projects__name__report_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 3650,
+              "minimum": 0,
+              "description": "只看最近多少天的结算版本与单测报告；0 表示不限",
+              "default": 30,
+              "title": "Days"
+            },
+            "description": "只看最近多少天的结算版本与单测报告；0 表示不限"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{name}/versions": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "最近结算的版本（流水线定基线用）",
+        "description": "构建流水线先问 hub「上一版是谁」再算 git diff：返回最近几个已结算版本及其 diff 的 head。",
+        "operationId": "versions_api_services__name__versions_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/services/{name}/source": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "某个文件的新增代码源码视图",
+        "description": "新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用算增量时存下的片段\n（历史版本靠它），其次从服务的 sourcefiles 里找，都没有时只有行号与状态。",
+        "operationId": "incremental_source_api_services__name__source_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "file",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "新增代码明细里的文件路径",
+              "title": "File"
+            },
+            "description": "新增代码明细里的文件路径"
+          },
+          {
+            "name": "kind",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "runtime 或 unit",
+              "default": "runtime",
+              "title": "Kind"
+            },
+            "description": "runtime 或 unit"
+          },
+          {
+            "name": "context",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 20,
+              "minimum": 0,
+              "description": "新增行前后带几行上下文",
+              "default": 3,
+              "title": "Context"
+            },
+            "description": "新增行前后带几行上下文"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "看某个已结算版本的（归档目录名）",
+              "title": "Version"
+            },
+            "description": "看某个已结算版本的（归档目录名）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1082,441 +3147,1946 @@
     }
   },
   "components": {
-    "securitySchemes": {
-      "tokenHeader": {
-        "type": "apiKey",
-        "in": "header",
-        "name": "X-Covhub-Token",
-        "description": "推荐。令牌走请求头而不是 URL，免得被 access log 和 ps 输出记下来"
-      },
-      "tokenQuery": {
-        "type": "apiKey",
-        "in": "query",
-        "name": "token",
-        "description": "浏览器里访问看板时用；hub 会种一个 Cookie 再跳回不带令牌的地址"
-      }
-    },
     "schemas": {
-      "Error": {
-        "type": "object",
-        "properties": {
-          "ok": {
-            "type": "boolean",
-            "example": false
-          },
-          "error": {
-            "type": "string",
-            "description": "给人看的失败原因"
-          }
-        },
-        "required": [
-          "ok",
-          "error"
-        ]
-      },
-      "Health": {
-        "type": "object",
-        "properties": {
-          "ok": {
-            "type": "boolean",
-            "example": true
-          },
-          "version": {
-            "type": "string",
-            "description": "hub 版本",
-            "example": "1.3.0"
-          },
-          "services": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          }
-        }
-      },
-      "Summary": {
-        "type": "object",
-        "properties": {
-          "at": {
-            "type": "string",
-            "description": "采集时刻",
-            "example": "2026-09-10T18:05:00"
-          },
-          "kind": {
-            "type": "string",
-            "description": "哪个动作产生的",
-            "enum": [
-              "dump",
-              "watch",
-              "predeploy",
-              "report",
-              "seal"
-            ]
-          },
-          "version": {
-            "type": "string",
-            "description": "版本标识"
-          },
-          "instruction": {
-            "type": "number",
-            "description": "指令覆盖率百分比",
-            "example": 13.5
-          },
-          "branch": {
-            "type": "number",
-            "description": "分支覆盖率百分比"
-          },
-          "covered": {
-            "type": "integer",
-            "description": "已执行指令数"
-          },
-          "total": {
-            "type": "integer",
-            "description": "指令总数"
-          },
-          "classesHit": {
-            "type": "integer",
-            "description": "被执行到的类数"
-          },
-          "classesTotal": {
-            "type": "integer",
-            "description": "类总数"
-          }
-        },
-        "description": "一次采集的结果摘要"
-      },
-      "ServiceStatus": {
-        "type": "object",
-        "properties": {
-          "name": {
-            "type": "string"
-          },
-          "channel": {
-            "type": "string",
-            "enum": [
-              "pull",
-              "push"
-            ],
-            "description": "pull：hub 去连 agent；push：agent 连回 hub"
-          },
-          "endpoint": {
-            "type": "string",
-            "description": "在哪儿取数的一句话描述",
-            "example": "10.0.1.7:6300"
-          },
-          "online": {
-            "type": "boolean",
-            "description": "pull 是端口连得通；push 是当前有实例连着"
-          },
-          "unknown": {
-            "type": "boolean",
-            "description": "push 专有：当前进程没有收集端，说不出在线与否。这不等于离线"
-          },
-          "instances": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "peer": {
-                  "type": "string"
-                },
-                "since": {
-                  "type": "string"
-                },
-                "last": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "version": {
-            "type": "string"
-          },
-          "classfiles": {
-            "type": "array",
-            "items": {
-              "type": "string",
-              "description": "hub 上的路径"
-            }
-          },
-          "latest": {
-            "type": "object",
-            "properties": {
-              "at": {
-                "type": "string",
-                "description": "采集时刻",
-                "example": "2026-09-10T18:05:00"
-              },
-              "kind": {
-                "type": "string",
-                "description": "哪个动作产生的",
-                "enum": [
-                  "dump",
-                  "watch",
-                  "predeploy",
-                  "report",
-                  "seal"
-                ]
-              },
-              "version": {
-                "type": "string",
-                "description": "版本标识"
-              },
-              "instruction": {
-                "type": "number",
-                "description": "指令覆盖率百分比",
-                "example": 13.5
-              },
-              "branch": {
-                "type": "number",
-                "description": "分支覆盖率百分比"
-              },
-              "covered": {
-                "type": "integer",
-                "description": "已执行指令数"
-              },
-              "total": {
-                "type": "integer",
-                "description": "指令总数"
-              },
-              "classesHit": {
-                "type": "integer",
-                "description": "被执行到的类数"
-              },
-              "classesTotal": {
-                "type": "integer",
-                "description": "类总数"
-              }
-            },
-            "description": "一次采集的结果摘要"
-          }
-        }
-      },
-      "StatusResponse": {
-        "type": "object",
-        "properties": {
-          "ok": {
-            "type": "boolean",
-            "example": true
-          },
-          "services": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ServiceStatus"
-            }
-          }
-        }
-      },
       "AgentOpts": {
-        "type": "object",
         "properties": {
           "ok": {
             "type": "boolean",
-            "example": true
+            "title": "Ok",
+            "default": true
           },
           "service": {
-            "type": "string"
+            "type": "string",
+            "title": "Service"
           },
           "agentOpts": {
             "type": "string",
+            "title": "Agentopts",
             "description": "塞进被测服务 JAVA_TOOL_OPTIONS 的参数串",
-            "example": "-javaagent:/opt/jacoco/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,sessionid=1.4.3"
+            "examples": [
+              "-javaagent:/opt/jacoco/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,sessionid=1.4.2"
+            ]
           }
-        }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "agentOpts"
+        ],
+        "title": "AgentOpts"
+      },
+      "BreakOut": {
+        "properties": {
+          "at": {
+            "type": "string",
+            "title": "At"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          },
+          "sealedAs": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sealedas",
+            "description": "pull：重启已被自动结算成这个归档"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason",
+            "description": "push：mixed-versions 表示在线实例跑着两份不同的 class"
+          },
+          "instances": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instances"
+          }
+        },
+        "type": "object",
+        "required": [
+          "at"
+        ],
+        "title": "BreakOut"
+      },
+      "CommandResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "description": "false 时同时会是非 2xx"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "log": {
+            "type": "string",
+            "title": "Log",
+            "description": "这次执行打印的日志，原样回给调用方"
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Summary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "service",
+          "log"
+        ],
+        "title": "CommandResult",
+        "description": "写接口的返回体。非 2xx 时 ok=false，log 里有失败原因。"
       },
       "Diagnose": {
-        "type": "object",
         "properties": {
           "service": {
-            "type": "string"
+            "type": "string",
+            "title": "Service"
           },
           "version": {
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
           },
           "execFiles": {
             "type": "integer",
+            "title": "Execfiles",
             "description": "本周期已有多少个 exec 快照"
           },
-          "classfiles": {
+          "sessions": {
+            "items": {
+              "$ref": "#/components/schemas/Session"
+            },
             "type": "array",
+            "title": "Sessions"
+          },
+          "classfiles": {
             "items": {
               "type": "string"
-            }
-          },
-          "sessions": {
+            },
             "type": "array",
-            "items": {
-              "type": "object",
-              "properties": {
-                "id": {
-                  "type": "string"
-                },
-                "start": {
-                  "type": "string",
-                  "description": "被测进程的启动时刻。它变了就说明重启过"
-                },
-                "dump": {
-                  "type": "string"
-                }
-              }
-            }
+            "title": "Classfiles"
           },
           "execClasses": {
             "type": "integer",
+            "title": "Execclasses",
             "description": "exec 里记录了多少个类"
           },
           "classFileClasses": {
             "type": "integer",
+            "title": "Classfileclasses",
             "description": "class 产物里有多少个类"
           },
           "matched": {
             "type": "integer",
+            "title": "Matched",
             "description": "两边指纹对得上的类数"
           },
           "matchRate": {
-            "type": "number",
-            "nullable": true,
-            "description": "匹配率百分比。低于 95 报告就会偏低，低于 50 基本是废的。null 表示 exec 里还没有任何执行记录，不是对不上"
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matchrate",
+            "description": "匹配率百分比。低于 95 报告就会偏低，低于 50 基本是废的；无执行数据时为 null"
           },
           "verdict": {
             "type": "string",
+            "title": "Verdict",
             "description": "给人看的判定"
           },
           "missingSamples": {
-            "type": "array",
             "items": {
-              "type": "string",
-              "description": "exec 里有、class 产物里没有的类"
-            }
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Missingsamples",
+            "description": "exec 里有、class 产物里没有的类"
           },
           "breaks": {
-            "type": "array",
             "items": {
-              "type": "object",
-              "properties": {
-                "at": {
-                  "type": "string"
-                },
-                "sealedAs": {
-                  "type": "string",
-                  "description": "pull：重启已被自动结算成这个归档"
-                },
-                "reason": {
-                  "type": "string",
-                  "description": "push：mixed-versions 表示在线实例跑着两份不同的 class，未结算"
-                }
-              }
-            }
+              "$ref": "#/components/schemas/BreakOut"
+            },
+            "type": "array",
+            "title": "Breaks"
           }
         },
-        "description": "回答「为什么我的报告是全红的」"
+        "type": "object",
+        "required": [
+          "service",
+          "execFiles",
+          "sessions",
+          "classfiles",
+          "execClasses",
+          "classFileClasses",
+          "matched",
+          "verdict",
+          "missingSamples",
+          "breaks"
+        ],
+        "title": "Diagnose",
+        "description": "回答「为什么我的报告是全红的」。"
       },
       "DiagnoseResponse": {
-        "type": "object",
         "properties": {
           "ok": {
             "type": "boolean",
-            "example": true
+            "title": "Ok",
+            "default": true
           },
           "diagnose": {
             "$ref": "#/components/schemas/Diagnose"
           }
-        }
-      },
-      "CommandResult": {
+        },
         "type": "object",
+        "required": [
+          "diagnose"
+        ],
+        "title": "DiagnoseResponse"
+      },
+      "DiffOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "base": {
+            "type": "string",
+            "title": "Base"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "at": {
+            "type": "string",
+            "title": "At"
+          },
+          "files": {
+            "type": "integer",
+            "title": "Files"
+          },
+          "addedLines": {
+            "type": "integer",
+            "title": "Addedlines"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "version",
+          "base",
+          "at",
+          "files",
+          "addedLines"
+        ],
+        "title": "DiffOut"
+      },
+      "DiffResult": {
         "properties": {
           "ok": {
             "type": "boolean",
-            "description": "false 时同时会是非 2xx"
+            "title": "Ok",
+            "default": true
           },
           "service": {
-            "type": "string"
+            "type": "string",
+            "title": "Service"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/DiffOut"
+          },
+          "matchesCurrentVersion": {
+            "type": "boolean",
+            "title": "Matchescurrentversion",
+            "description": "diff 的版本与服务当前 version 是否一致；不一致时运行时快照算不出新增覆盖"
+          },
+          "currentVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currentversion"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "重算后的运行时新增覆盖（该版本还没有快照时为 null）"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "log": {
             "type": "string",
-            "description": "这次执行打印的日志，原样回给调用方"
-          },
-          "latest": {
-            "type": "object",
-            "properties": {
-              "at": {
-                "type": "string",
-                "description": "采集时刻",
-                "example": "2026-09-10T18:05:00"
-              },
-              "kind": {
-                "type": "string",
-                "description": "哪个动作产生的",
-                "enum": [
-                  "dump",
-                  "watch",
-                  "predeploy",
-                  "report",
-                  "seal"
-                ]
-              },
-              "version": {
-                "type": "string",
-                "description": "版本标识"
-              },
-              "instruction": {
-                "type": "number",
-                "description": "指令覆盖率百分比",
-                "example": 13.5
-              },
-              "branch": {
-                "type": "number",
-                "description": "分支覆盖率百分比"
-              },
-              "covered": {
-                "type": "integer",
-                "description": "已执行指令数"
-              },
-              "total": {
-                "type": "integer",
-                "description": "指令总数"
-              },
-              "classesHit": {
-                "type": "integer",
-                "description": "被执行到的类数"
-              },
-              "classesTotal": {
-                "type": "integer",
-                "description": "类总数"
-              }
-            },
-            "description": "一次采集的结果摘要"
+            "title": "Log"
           }
-        }
-      },
-      "UploadResult": {
+        },
         "type": "object",
+        "required": [
+          "service",
+          "diff",
+          "matchesCurrentVersion",
+          "log"
+        ],
+        "title": "DiffResult"
+      },
+      "Error": {
         "properties": {
           "ok": {
             "type": "boolean",
-            "example": true
+            "title": "Ok",
+            "default": false
           },
-          "service": {
-            "type": "string"
+          "error": {
+            "type": "string",
+            "title": "Error",
+            "description": "给人看的失败原因"
+          },
+          "hint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hint"
+          }
+        },
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "Error"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "Health": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
           },
           "version": {
-            "type": "string"
+            "type": "string",
+            "title": "Version",
+            "description": "hub 版本",
+            "examples": [
+              "2.1.0"
+            ]
+          },
+          "services": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Services",
+            "description": "已登记的服务名"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "services"
+        ],
+        "title": "Health"
+      },
+      "ImportResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "log": {
+            "type": "string",
+            "title": "Log"
+          },
+          "services": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Services",
+            "description": "每个服务的处理结果：added / updated / skipped / invalid"
+          },
+          "state": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            "type": "object",
+            "title": "State",
+            "description": "每个服务导入的历史计数"
+          }
+        },
+        "type": "object",
+        "required": [
+          "log",
+          "services",
+          "state"
+        ],
+        "title": "ImportResult"
+      },
+      "IncrementalBrief": {
+        "properties": {
+          "covered": {
+            "type": "integer",
+            "title": "Covered",
+            "description": "新增行里被执行到的行数"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "新增行里 JaCoCo 有探针记录的行数（分母）"
+          },
+          "pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct",
+            "description": "百分比；分母为 0 时为 null"
+          },
+          "unmatched": {
+            "type": "integer",
+            "title": "Unmatched",
+            "description": "diff 里有、报告里找不到的源码文件数"
+          },
+          "ambiguous": {
+            "type": "integer",
+            "title": "Ambiguous",
+            "description": "多条 diff 路径落到同一个报告文件的次数"
+          }
+        },
+        "type": "object",
+        "required": [
+          "covered",
+          "total",
+          "unmatched",
+          "ambiguous"
+        ],
+        "title": "IncrementalBrief"
+      },
+      "Instance": {
+        "properties": {
+          "peer": {
+            "type": "string",
+            "title": "Peer",
+            "description": "实例的来源地址"
+          },
+          "since": {
+            "type": "string",
+            "title": "Since",
+            "description": "连入时刻"
+          },
+          "last": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last",
+            "description": "最近一次取数时刻"
+          }
+        },
+        "type": "object",
+        "required": [
+          "peer",
+          "since"
+        ],
+        "title": "Instance"
+      },
+      "ProjectListResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectOut"
+            },
+            "type": "array",
+            "title": "Projects"
+          }
+        },
+        "type": "object",
+        "required": [
+          "projects"
+        ],
+        "title": "ProjectListResponse"
+      },
+      "ProjectOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Name"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "createdAt": {
+            "type": "string",
+            "title": "Createdat"
+          },
+          "updatedAt": {
+            "type": "string",
+            "title": "Updatedat"
+          },
+          "services": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Services",
+            "description": "项目下的服务名"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name",
+          "id",
+          "createdAt",
+          "updatedAt",
+          "services"
+        ],
+        "title": "ProjectOut"
+      },
+      "ProjectPatch": {
+        "properties": {
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ProjectPatch"
+      },
+      "ProjectResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "project": {
+            "$ref": "#/components/schemas/ProjectOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "project"
+        ],
+        "title": "ProjectResponse"
+      },
+      "ProjectSpec": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Name"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 200
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ProjectSpec"
+      },
+      "ServiceBody": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project",
+            "description": "所属项目名"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "channel": {
+            "type": "string",
+            "title": "Channel",
+            "default": "pull"
+          },
+          "address": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 65535.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "bindAddress": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bindaddress"
+          },
+          "includes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Includes",
+            "default": []
+          },
+          "excludes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Excludes",
+            "default": []
+          },
+          "classDumpDir": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classdumpdir"
+          },
+          "classfiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Classfiles",
+            "default": []
+          },
+          "sourcefiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sourcefiles",
+            "default": []
+          },
+          "reportExcludes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reportexcludes",
+            "default": []
+          },
+          "sourceEncoding": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourceencoding"
+          },
+          "dumpRetry": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dumpretry"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ServiceBody",
+        "description": "PUT 的请求体：name 以路径为准，体里可以不带。其余校验随父类。"
+      },
+      "ServiceListResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceOut"
+            },
+            "type": "array",
+            "title": "Services"
+          }
+        },
+        "type": "object",
+        "required": [
+          "services"
+        ],
+        "title": "ServiceListResponse"
+      },
+      "ServiceOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Name"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project",
+            "description": "所属项目名"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "channel": {
+            "type": "string",
+            "title": "Channel",
+            "default": "pull"
+          },
+          "address": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 65535.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "bindAddress": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bindaddress"
+          },
+          "includes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Includes",
+            "default": []
+          },
+          "excludes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Excludes",
+            "default": []
+          },
+          "classDumpDir": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classdumpdir"
+          },
+          "classfiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Classfiles",
+            "default": []
+          },
+          "sourcefiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sourcefiles",
+            "default": []
+          },
+          "reportExcludes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reportexcludes",
+            "default": []
+          },
+          "sourceEncoding": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourceencoding"
+          },
+          "dumpRetry": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dumpretry"
+          },
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "id"
+        ],
+        "title": "ServiceOut",
+        "description": "库里的一条服务配置（原文，相对路径不展开）。"
+      },
+      "ServicePatch": {
+        "properties": {
+          "project": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "channel": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Channel"
+          },
+          "address": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 65535.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "bindAddress": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bindaddress"
+          },
+          "includes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Includes"
+          },
+          "excludes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Excludes"
+          },
+          "classDumpDir": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classdumpdir"
+          },
+          "classfiles": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classfiles"
+          },
+          "sourcefiles": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourcefiles"
+          },
+          "reportExcludes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reportexcludes"
+          },
+          "sourceEncoding": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourceencoding"
+          },
+          "dumpRetry": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dumpretry"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ServicePatch",
+        "description": "局部更新：只校验给到的字段。"
+      },
+      "ServiceResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "service": {
+            "$ref": "#/components/schemas/ServiceOut"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service"
+        ],
+        "title": "ServiceResponse"
+      },
+      "ServiceSpec": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "title": "Name"
+          },
+          "project": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project",
+            "description": "所属项目名"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "channel": {
+            "type": "string",
+            "title": "Channel",
+            "default": "pull"
+          },
+          "address": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Address"
+          },
+          "port": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 65535.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Port"
+          },
+          "bindAddress": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 255
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bindaddress"
+          },
+          "includes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Includes",
+            "default": []
+          },
+          "excludes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Excludes",
+            "default": []
+          },
+          "classDumpDir": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classdumpdir"
+          },
+          "classfiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Classfiles",
+            "default": []
+          },
+          "sourcefiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Sourcefiles",
+            "default": []
+          },
+          "reportExcludes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Reportexcludes",
+            "default": []
+          },
+          "sourceEncoding": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 32
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sourceencoding"
+          },
+          "dumpRetry": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dumpretry"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "ServiceSpec",
+        "description": "一条完整的服务配置。\n\nbindAddress / dumpRetry / version 故意不给默认值：agent_opts 等处用的是\nsvc.get(\"bindAddress\", \"0.0.0.0\") 这种「键不存在才取默认」的写法，入库时\n填了默认值反而会改变 sessionid 之类的行为。"
+      },
+      "ServiceStatus": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "channel": {
+            "type": "string",
+            "title": "Channel",
+            "description": "pull：hub 去连 agent；push：agent 连回 hub"
+          },
+          "endpoint": {
+            "type": "string",
+            "title": "Endpoint",
+            "description": "在哪儿取数的一句话描述"
+          },
+          "online": {
+            "type": "boolean",
+            "title": "Online",
+            "description": "pull 是端口连得通；push 是当前有实例连着"
+          },
+          "unknown": {
+            "type": "boolean",
+            "title": "Unknown",
+            "description": "push 专有：当前进程没有收集端，说不出在线与否 —— 那不等于离线"
+          },
+          "instances": {
+            "items": {
+              "$ref": "#/components/schemas/Instance"
+            },
+            "type": "array",
+            "title": "Instances"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
+          },
+          "classfiles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Classfiles",
+            "description": "hub 上的路径"
+          },
+          "latest": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Summary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "channel",
+          "endpoint",
+          "online",
+          "unknown",
+          "instances",
+          "classfiles"
+        ],
+        "title": "ServiceStatus"
+      },
+      "Session": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "start": {
+            "type": "string",
+            "title": "Start",
+            "description": "被测进程的启动时刻。它变了就说明重启过"
+          },
+          "dump": {
+            "type": "string",
+            "title": "Dump"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "start",
+          "dump"
+        ],
+        "title": "Session"
+      },
+      "StatusResponse": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceStatus"
+            },
+            "type": "array",
+            "title": "Services"
+          }
+        },
+        "type": "object",
+        "required": [
+          "services"
+        ],
+        "title": "StatusResponse"
+      },
+      "Summary": {
+        "properties": {
+          "id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id",
+            "description": "快照在数据库里的 id"
+          },
+          "at": {
+            "type": "string",
+            "title": "At",
+            "description": "采集时刻",
+            "examples": [
+              "2026-09-10T18:05:00"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "description": "哪个动作产生的：dump / watch / predeploy / report / seal"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version",
+            "description": "版本标识"
+          },
+          "instruction": {
+            "type": "number",
+            "title": "Instruction",
+            "description": "指令覆盖率百分比",
+            "examples": [
+              13.5
+            ]
+          },
+          "branch": {
+            "type": "number",
+            "title": "Branch",
+            "description": "分支覆盖率百分比"
+          },
+          "covered": {
+            "type": "integer",
+            "title": "Covered",
+            "description": "已执行指令数"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "指令总数"
+          },
+          "classesHit": {
+            "type": "integer",
+            "title": "Classeshit",
+            "description": "被执行到的类数"
+          },
+          "classesTotal": {
+            "type": "integer",
+            "title": "Classestotal",
+            "description": "类总数"
+          },
+          "matchRate": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Matchrate",
+            "description": "predeploy 时的指纹匹配率"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "at",
+          "kind",
+          "instruction",
+          "branch",
+          "covered",
+          "total",
+          "classesHit",
+          "classesTotal"
+        ],
+        "title": "Summary",
+        "description": "一次采集的结果摘要。"
+      },
+      "UnitCoverageResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "report": {
+            "$ref": "#/components/schemas/UnitReportOut"
+          },
+          "incremental": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "log": {
+            "type": "string",
+            "title": "Log"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "report",
+          "log"
+        ],
+        "title": "UnitCoverageResult"
+      },
+      "UnitReportOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "at": {
+            "type": "string",
+            "title": "At"
+          },
+          "instruction": {
+            "type": "number",
+            "title": "Instruction"
+          },
+          "branch": {
+            "type": "number",
+            "title": "Branch"
+          },
+          "line": {
+            "type": "number",
+            "title": "Line"
+          },
+          "covered": {
+            "type": "integer",
+            "title": "Covered"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "linesCovered": {
+            "type": "integer",
+            "title": "Linescovered"
+          },
+          "linesTotal": {
+            "type": "integer",
+            "title": "Linestotal"
+          },
+          "classesHit": {
+            "type": "integer",
+            "title": "Classeshit"
+          },
+          "classesTotal": {
+            "type": "integer",
+            "title": "Classestotal"
+          },
+          "xmlPath": {
+            "type": "string",
+            "title": "Xmlpath"
+          },
+          "incCovered": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inccovered"
+          },
+          "incTotal": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inctotal"
+          },
+          "incPct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incpct"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "version",
+          "at",
+          "instruction",
+          "branch",
+          "line",
+          "covered",
+          "total",
+          "linesCovered",
+          "linesTotal",
+          "classesHit",
+          "classesTotal",
+          "xmlPath"
+        ],
+        "title": "UnitReportOut"
+      },
+      "UploadResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok"
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
           },
           "path": {
             "type": "string",
+            "title": "Path",
             "description": "产物在 hub 上的落点"
           },
           "classes": {
             "type": "integer",
+            "title": "Classes",
             "description": "包里解出多少个 .class。是 0 就说明打包方式不对"
           },
           "retarget": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retarget",
             "description": "带了 retarget=1 时，那一步的日志"
           }
-        }
+        },
+        "type": "object",
+        "required": [
+          "ok",
+          "service",
+          "version",
+          "path",
+          "classes"
+        ],
+        "title": "UploadResult"
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "ctx": {
+            "type": "object",
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      }
+    },
+    "securitySchemes": {
+      "tokenHeader": {
+        "type": "apiKey",
+        "description": "推荐。令牌走请求头而不是 URL，免得被 access log 和 ps 输出记下来",
+        "in": "header",
+        "name": "X-Covhub-Token"
+      },
+      "tokenQuery": {
+        "type": "apiKey",
+        "description": "浏览器里访问看板时用；hub 会种一个 Cookie 再跳回不带令牌的地址",
+        "in": "query",
+        "name": "token"
+      },
+      "tokenCookie": {
+        "type": "apiKey",
+        "description": "?token= 带对一次之后由 hub 自动种下，浏览器后续请求靠它",
+        "in": "cookie",
+        "name": "covhub_token"
       }
     }
-  }
+  },
+  "tags": [
+    {
+      "name": "探活",
+      "description": "不需要令牌"
+    },
+    {
+      "name": "查询",
+      "description": "只读，不改任何状态"
+    },
+    {
+      "name": "采集",
+      "description": "拉数据、出报告，会写 data/"
+    },
+    {
+      "name": "发版",
+      "description": "结算、换产物 —— 顺序错了会丢数据"
+    },
+    {
+      "name": "产物",
+      "description": "class 产物的上传与取回"
+    },
+    {
+      "name": "服务配置",
+      "description": "服务的登记与修改（存数据库，改完立即生效）"
+    },
+    {
+      "name": "项目",
+      "description": "服务的分组"
+    },
+    {
+      "name": "构建期",
+      "description": "构建流水线送进来的单测报告与 git diff，用于单测覆盖率和新增代码覆盖率"
+    },
+    {
+      "name": "看板",
+      "description": "前端面板用的只读视图"
+    }
+  ]
 }

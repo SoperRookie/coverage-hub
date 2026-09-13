@@ -17,9 +17,16 @@ lib/*
 !lib/jacococli.jar
 
 # 本地配置：含各环境地址与路径，通常每台机器不同
+covhub.yaml
+covhub.yml
+covhub.json
 targets.yaml
 targets.yml
 targets.json
+
+# 默认的 SQLite 库（含 WAL 文件）。只适合单机试用，正式环境用 MySQL / PostgreSQL
+covhub.db
+covhub.db-*
 
 # 运行日志
 *.log
@@ -27,3 +34,8 @@ targets.json
 # Python
 __pycache__/
 *.py[cod]
+
+# 前端：只忽略依赖，构建产物 covhub/webui/ 进版本库（改前端后在开发机 npm run build 一起提交）
+web/node_modules/
+web/auto-imports.d.ts
+web/components.d.ts

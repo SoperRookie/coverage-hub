@@ -23,7 +23,7 @@ state "采集中" as Active
 Active : **exec/<时间戳>.exec**  每次 dump 追加一个快照
 Active : **current/**  基于本周期<b>全部</b> exec 重出的报告
 Active : ..html/ + jacoco.xml + jacoco.csv..
-Active : **state.json**  history / latest，看板趋势的数据源
+Active : **snapshots 表**  每次采集一行，看板趋势的数据源
 
 state "已归档  versions/<版本>/" as Sealed #EAEEED
 Sealed : **html/ + jacoco.xml + jacoco.csv**  终版报告，只读

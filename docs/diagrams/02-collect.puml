@@ -54,10 +54,10 @@ else 可连通
   == 断代检测（仅 reset=False 时做）==
   S -> CLI : execinfo .incoming.exec
   CLI --> S : Session "<id>": <启动时刻> - <dump 时刻>
-  alt 启动时刻与 state.json 里记的不同
+  alt 启动时刻与库里记的会话基线不同
     S -> S : detect_break()：被测进程重启过
     S -> CLI : report + merge（用**现有**的 exec 出终版）
-    S -> D : archive_cycle()\n封存旧周期到 versions/<版本>/\n并在 state.json 记一条 breaks
+    S -> D : archive_cycle()\n封存旧周期到 versions/<版本>/\n并在库里记一条 breaks
     note right of S
       重启意味着 agent 计数器已归零。
       不先封存的话，新旧两个进程的数据
@@ -83,7 +83,7 @@ else 可连通
 
   == 记账 ==
   S -> S : summarize(jacoco.csv)\n算指令/分支/类覆盖率
-  S -> D : record() 追加 state.json\n(history / latest / versions)
+  S -> D : record() 写一条 snapshot\n(含本版本新增代码的覆盖)
   S --> T : 返回 entry
 end
 

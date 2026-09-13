@@ -187,6 +187,21 @@ class 对不上，报告全是"未覆盖"**且不会报错**。第 5 步就是�
 （`predeploy` 自己也会在归档前做一次同样的体检，匹配率低时告警但**不阻断结算** ——
 exec 不可再生，因为对不上就拒绝归档只会两头落空。）
 
+## 反代（nginx）
+
+hub 前面放 nginx 时两件事：上传接口（class 产物、单测 XML、diff）走原始正文，`client_max_body_size`
+默认 1m 不够；看板前端本身免令牌，但 `/api/*` 与报告目录仍要令牌，别在 nginx 层再加一套 basic auth
+（Cookie 流程会被打断）。
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:8900;
+    proxy_set_header Host $host;
+    client_max_body_size 200m;
+    proxy_read_timeout 300s;      # predeploy 要跑 jacococli，几分钟是正常的
+}
+```
+
 ## 把运行期报告推 SonarQube
 
 报告和 class 产物都在 hub 上，先取回来 —— 本机不必留任何历史产物：

@@ -21,12 +21,14 @@
 #   covhub-client.sh upload-classes <service> <version> <包路径> [--retarget]
 #   covhub-client.sh fetch-classes <service> <version> <目标目录>
 #   covhub-client.sh wait-online <service> [超时秒数，默认 120]
+#   covhub-client.sh unit-coverage <service> <version> <jacoco.xml> [--group 模块名]
+#   covhub-client.sh diff <service> <version> <diff文件> --base <基线> [--head <本次>]
 #
 # hub 返回非 2xx 时一律非零码退出 —— 让部署脚本停下来，而不是静默丢数据。
 
 set -e
 
-usage() { sed -n '2,26p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; }
+usage() { sed -n '2,28p' "$0" | sed 's/^#\{1,\} \{0,1\}//'; }
 
 [ -n "${COVHUB_URL:-}" ] || {
     echo "[covhub] 请设置 COVHUB_URL，例如 http://covhub.internal:8900" >&2
@@ -57,6 +59,20 @@ call() {
 enc() { printf '%s' "$1" | sed 's/%/%25/g; s/ /%20/g; s/#/%23/g; s/&/%26/g; s/?/%3F/g; s/+/%2B/g'; }
 
 need() { [ -n "${1:-}" ] || { echo "$2" >&2; exit 1; }; }
+
+# upload <路径带查询串> <文件>：正文是原始文件（--data-binary，-d 会吃掉换行），非 2xx 退出
+upload() {
+    [ -f "$2" ] || { echo "[covhub] 找不到文件：$2" >&2; exit 1; }
+    _out=$(curl -sS -X POST -H "$AUTH" --data-binary "@$2" \
+                -w '\n%{http_code}' "$URL$1") || {
+        echo "[covhub] 连不上 hub：$URL" >&2; exit 2; }
+    _code=$(printf '%s\n' "$_out" | tail -n 1)
+    printf '%s\n' "$_out" | sed '$d'
+    case "$_code" in
+        2*) ;;
+        *)  echo "[covhub] hub 返回 HTTP $_code" >&2; exit 1 ;;
+    esac
+}
 
 CMD=${1:-}
 [ -n "$CMD" ] || { usage; exit 1; }
@@ -134,18 +150,37 @@ upload-classes)
     # class 必须在 hub 上，且必须是线上跑的那一份。
     # 加 --retarget 则上传完顺手把配置指向这份产物。
     need "${3:-}" "用法：$0 upload-classes <service> <version> <包路径> [--retarget]"
-    [ -f "$3" ] || { echo "[covhub] 找不到文件：$3" >&2; exit 1; }
     QS="service=$(enc "$1")&version=$(enc "$2")"
     case "${4:-}" in --retarget) QS="$QS&retarget=1" ;; esac
-    _out=$(curl -sS -X POST -H "$AUTH" --data-binary "@$3" \
-                -w '\n%{http_code}' "$URL/api/upload-classes?$QS") || {
-        echo "[covhub] 连不上 hub：$URL" >&2; exit 2; }
-    _code=$(printf '%s\n' "$_out" | tail -n 1)
-    printf '%s\n' "$_out" | sed '$d'
-    case "$_code" in
-        2*) ;;
-        *)  echo "[covhub] hub 返回 HTTP $_code" >&2; exit 1 ;;
-    esac
+    upload "/api/upload-classes?$QS" "$3"
+    ;;
+
+unit-coverage)
+    # 构建流水线在 mvn verify 之后把 jacoco.xml（jacoco-aggregate 的也行）传给 hub：
+    # 单测覆盖率入库；该版本已有 diff 时顺手算出单测的新增代码覆盖率。
+    need "${3:-}" "用法：$0 unit-coverage <service> <version> <jacoco.xml> [--group 模块名]"
+    QS="service=$(enc "$1")&version=$(enc "$2")"
+    case "${4:-}" in --group) need "${5:-}" "--group 后面要跟模块名"; QS="$QS&group=$(enc "$5")" ;; esac
+    upload "/api/unit-coverage?$QS" "$3"
+    ;;
+
+diff)
+    # 把 git diff 传给 hub，之后每次采集都能算出「本版本新增代码」的覆盖率。推荐：
+    #   git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 \
+    #       --diff-filter=AMR "$BASE".."$HEAD" -- '*.java' '*.kt' > v.diff
+    need "${3:-}" "用法：$0 diff <service> <version> <diff文件> --base <基线> [--head <本次>]"
+    QS="service=$(enc "$1")&version=$(enc "$2")"
+    FILE=$3; shift 3
+    BASE=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --base) BASE=$2; shift 2 ;;
+            --head) QS="$QS&head=$(enc "$2")"; shift 2 ;;
+            *) echo "[covhub] 未知参数：$1" >&2; exit 1 ;;
+        esac
+    done
+    need "$BASE" "diff 需要 --base <基线的 commit / tag>"
+    upload "/api/diff?$QS&base=$(enc "$BASE")" "$FILE"
     ;;
 
 fetch-classes)
