@@ -48,7 +48,7 @@ class ServiceSpec(BaseModel):
     @field_validator("name")
     @classmethod
     def _name(cls, v):
-        if not NAME_RE.match(v):
+        if v is not None and not NAME_RE.match(v):
             raise ValueError("服务名只能用字母、数字、. _ -，且不能以 . 或 - 开头")
         return v
 

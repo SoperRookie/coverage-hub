@@ -86,7 +86,7 @@ class PushCollector:
         while True:
             try:
                 sock, peer = self.srv.accept()
-            except OSError as exc:
+            except (OSError, AttributeError) as exc:
                 if self.srv is None or self.srv.fileno() < 0:
                     return                      # 监听 socket 已关闭，正常收场
                 log("! push 收集端 accept 出错，1 秒后重试 —— %s" % exc)
@@ -176,6 +176,15 @@ class PushCollector:
                 if (sets[i] - sets[j]) and (sets[j] - sets[i]):
                     return True
         return False
+
+    def stop(self):
+        """进程退出时收尾：关监听、断掉所有实例。实例那头的 agent 会自己重连。"""
+        srv, self.srv = self.srv, None
+        _close_quietly(srv)
+        with self.lock:
+            cids = list(self.conns)
+        for cid in cids:
+            self.drop(cid, "hub 退出")
 
     def instances(self, service):
         with self.lock:

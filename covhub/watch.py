@@ -1,6 +1,6 @@
 """定时轮询。"""
 
-import time
+import threading
 
 from .agent import reachable
 from .runtime import load_runtime
@@ -25,11 +25,17 @@ def watch_once(cfg):
     render_dashboard(cfg)
 
 
-def watch_loop(cfg_path, interval):
-    """每轮重新加载配置 —— retarget 换了 classfiles 之后不必重启采集进程。"""
-    while True:
+def watch_loop(cfg_path, interval, stop=None):
+    """每轮重新加载配置 —— retarget 换了 classfiles 之后不必重启采集进程。
+
+    stop 是一个 threading.Event：serve 退出时 set 一下，循环立刻收场，
+    不用等完一整个间隔。
+    """
+    stop = stop or threading.Event()
+    while not stop.is_set():
         try:
             watch_once(load_runtime(cfg_path))
         except (Exception, SystemExit) as exc:
             log("轮询失败 —— %s" % exc)
-        time.sleep(interval)
+        if stop.wait(interval):
+            return

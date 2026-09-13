@@ -15,7 +15,6 @@ from .config import (CONFIG_CANDIDATES, CONFIG_TEMPLATE_JSON, CONFIG_TEMPLATE_YA
                      parse_yaml, resolve_config_path, resolve_database_url)
 from .db import migrate
 from .errors import CovhubError
-from .httpd import cmd_serve
 from .logbuf import log
 from .runtime import load_runtime
 from .watch import watch_loop
@@ -215,6 +214,32 @@ def cmd_import(cfg, args):
                       dry_run=args.dry_run, overwrite=args.overwrite)
 
 
+def cmd_serve(cfg, args):
+    from .api.app import serve
+    port = args.port or (cfg.get("serve") or {}).get("port", 8900)
+    serve(args.config, port, with_watch=args.with_watch, interval=args.interval)
+
+
+def cmd_openapi(cfg, args):
+    """把 FastAPI 生成的 OpenAPI 描述导出成文件（docs/openapi.json 就是这么来的）。"""
+    from .api.app import create_app
+    spec = create_app(args.config).openapi()
+    text = json.dumps(spec, ensure_ascii=False, indent=2) + "\n"
+    if args.check:
+        try:
+            with open(args.out, encoding="utf-8") as f:
+                current = f.read()
+        except OSError:
+            current = None
+        if current != text:
+            die("%s 与当前接口定义不一致，重新导出：covhub openapi --out %s" % (args.out, args.out))
+        print("%s 是最新的" % args.out)
+        return
+    with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+    print("已导出 %s（%d 条路径）" % (args.out, len(spec.get("paths", {}))))
+
+
 def cmd_db(cfg, args):
     url = resolve_database_url(cfg)
     if args.action == "upgrade":
@@ -301,6 +326,10 @@ def main():
     q.add_argument("-m", "--message", required=True)
     q.add_argument("--empty", action="store_true", help="不自动比对模型，生成空脚本")
 
+    p = sub.add_parser("openapi", help="导出接口的 OpenAPI 描述")
+    p.add_argument("--out", default="docs/openapi.json")
+    p.add_argument("--check", action="store_true", help="只比对文件是否最新，不一致则非零退出")
+
     p = sub.add_parser("watch", help="守护进程：定时轮询全部目标")
     p.add_argument("--interval", type=int, help="间隔秒数")
 
@@ -325,7 +354,7 @@ def main():
     except CovhubError as exc:
         die(str(exc))
     needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": (), "service": (),
-             "import": (), "db": ()}.get(args.cmd, ("jacocoCli", "jacocoAgent"))
+             "import": (), "db": (), "openapi": ()}.get(args.cmd, ("jacocoCli", "jacocoAgent"))
     for key in needs:
         if not os.path.isfile(cfg.get(key, "")):
             die("配置项 %s 指向的文件不存在：%s" % (key, cfg.get(key)))
@@ -335,7 +364,7 @@ def main():
         "agent-opts": cmd_agent_opts, "status": cmd_status, "dump": cmd_dump,
         "predeploy": cmd_predeploy, "report": cmd_report, "retarget": cmd_retarget,
         "diagnose": cmd_diagnose, "service": cmd_service, "import": cmd_import, "db": cmd_db,
-        "watch": cmd_watch, "serve": cmd_serve,
+        "openapi": cmd_openapi, "watch": cmd_watch, "serve": cmd_serve,
     }
     try:
         handlers[args.cmd](cfg, args)
