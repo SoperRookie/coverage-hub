@@ -9,8 +9,15 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string): Promise<T> {
-  const resp = await fetch(path, { credentials: "same-origin", headers: { Accept: "application/json" } });
+async function request<T>(path: string, init?: { method?: string; body?: unknown }): Promise<T> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (init?.body !== undefined) headers["Content-Type"] = "application/json";
+  const resp = await fetch(path, {
+    method: init?.method || "GET",
+    credentials: "same-origin",
+    headers,
+    body: init?.body !== undefined ? JSON.stringify(init.body) : undefined,
+  });
   let body: any = null;
   try {
     body = await resp.json();
@@ -142,10 +149,29 @@ export interface Detail extends StatusFields {
   };
 }
 
+export interface Project {
+  id: number;
+  name: string;
+  title: string | null;
+  description: string | null;
+  services: string[];
+}
+
+const enc = encodeURIComponent;
+
 export const api = {
   overview: () => request<Overview>("api/overview"),
-  detail: (name: string) => request<Detail>(`api/services/${encodeURIComponent(name)}/detail`),
+  detail: (name: string) => request<Detail>(`api/services/${enc(name)}/detail`),
   health: () => request<{ ok: boolean; version: string }>("api/health"),
+  projects: () => request<{ projects: Project[] }>("api/projects"),
+  createProject: (body: { name: string; title?: string | null; description?: string | null }) =>
+    request<{ project: Project }>("api/projects", { method: "POST", body }),
+  updateProject: (name: string, body: { title?: string | null; description?: string | null }) =>
+    request<{ project: Project }>(`api/projects/${enc(name)}`, { method: "PATCH", body }),
+  deleteProject: (name: string) => request<{ ok: boolean }>(`api/projects/${enc(name)}`, { method: "DELETE" }),
+  /** 把服务归到某个项目；project 传 null 表示解绑 */
+  assignService: (service: string, project: string | null) =>
+    request<{ service: unknown }>(`api/services/${enc(service)}`, { method: "PATCH", body: { project } }),
 };
 
 /** 401 时跳到带令牌的地址，hub 种 Cookie 后 302 回来（hash 路由的深链会保留）。 */
