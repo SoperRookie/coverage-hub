@@ -1,0 +1,93 @@
+@startuml 06-构建期数据
+' covhub 2.1 —— 构建期输入：单测 jacoco.xml 与 git diff，以及「新增代码覆盖率」怎么算
+' 对应代码：ops.unit_coverage() / ops.push_diff() → build.store_unit_report() / store_diff()
+'           → build.recompute() → incremental.compute()
+' 三个触发点（快照出报告后、单测 XML 到达、diff 到达）都走同一个 recompute，调用方持 LOCK。
+
+title 构建期数据 · 单测覆盖率与新增代码覆盖率
+
+skinparam shadowing false
+skinparam ParticipantPadding 8
+skinparam BoxPadding 12
+skinparam NoteFontSize 11
+autonumber "<b>[0]"
+
+actor "构建流水线\n（Jenkinsfile.build）" as J
+participant "covhub-client.sh /\ncovhub.groovy" as C
+
+box "covhub 服务端" #F4F6F5
+  participant "控制 API" as API
+  participant "build.py" as B
+  participant "incremental.py\n（纯函数）" as I
+  database "data/<service>/" as D
+  database "数据库" as DB
+end box
+
+== 0 · 流水线先问「上一版是谁」==
+J -> C : lastVersion order-service
+C -> API : GET /api/services/order-service/versions
+API -> DB : archives + diffs
+API --> C : {"latest": {"version": "1.4.2", "head": "<sha>"}}
+note right of J
+  diff 的基线就是上一次结算版本的 head，
+  hub 记着，不用流水线自己猜。
+end note
+
+== 1 · 推 git diff ==
+J -> J : git diff ""--unified=0"" ""--diff-filter=AMR"" <base>..<head> -- '*.java' '*.kt'
+J -> C : diff order-service 1.4.3 ""--base"" <sha> x.diff
+C -> API : POST /api/diff?service&version&base&head（正文为 diff 文本）
+API -> I : parse_unified_diff()：状态机逐 hunk 走\n只有 --- 后紧跟 +++ 才是文件头；src/test/ 整个丢掉
+I --> API : {源码路径: [新增行号]}
+API -> D : diff/1.4.3.diff（原文）+ diff/1.4.3.lines.json
+API -> DB : diffs 一行：base / head / 文件数 / 新增行数
+API -> B : recompute(version=1.4.3)
+API --> C : 200，返回体点名「服务当前 version=1.4.2，本 diff version=1.4.3，不匹配」
+note right of API
+  版本串对不上是最容易静默翻车的地方：
+  运行时快照按 version 找 diff，找不到就算不出
+  新增覆盖。所以返回体明说，流水线日志里能看见。
+end note
+
+== 2 · 推单测 jacoco.xml ==
+J -> J : mvn verify → target/site/jacoco/jacoco.xml\n（多模块用 report-aggregate 的聚合 XML）
+J -> C : unit-coverage order-service 1.4.3 jacoco.xml [""--group"" 模块]
+C -> API : POST /api/unit-coverage?service&version[&group]（正文为 XML）
+API -> I : parse_jacoco()：iterparse 流式读\nreport > [group >] package > sourcefile > line
+I --> API : 计数器摘要 + {(group, pkg/File.java): {行号: (mi, ci)}}
+API -> D : unit/1.4.3/jacoco.xml
+API -> B : _incremental(version, 行级数据, unit/1.4.3/)
+API -> DB : unit_reports 一行（指令 / 分支 / 行 / 类 + inc_* 三列），同版本重传覆盖
+API --> C : 200 + 摘要
+
+== 3 · 新增代码覆盖率怎么算（三处共用）==
+B -> D : load_diff_lines(version)：读 diff/<v>.lines.json
+alt 没有这一版的 diff
+  B --> B : 返回 None，incremental.json 删掉\n（看板显示「—」，不是 0）
+else 有 diff
+  B -> I : compute(新增行, jacoco 行级数据)
+  note right of I
+    **匹配**：diff 路径按 src/main/java/ 规整成 pkg/File.java，
+    聚合报告优先用 (group≈module, pkg/File) 二元键；
+    多路径落同一报告文件 → 合并并标 ambiguous；
+    diff 里有、报告里没有 → 列进 unmatched（不静默吞）。
+
+    **口径**：分母 = 新增行里 JaCoCo 有探针的行（空行 / 注释 /
+    import 不计），分子 = ci > 0（含部分覆盖）。
+    total == 0 → pct = None（「无新增」）。
+  end note
+  I --> B : {covered, total, pct, files: {路径: {covered, total, missed, hit, added}}, unmatched, ambiguous}
+  B -> B : attach_snippets()：sourcefiles 指向的就是这一版时\n把新增行前后 3 行的源码存进结果
+  B -> D : <目录>/incremental.json
+  B -> DB : 回写快照 / 单测报告的 inc_covered / inc_total / inc_pct
+end
+
+note over J, DB
+  **三个触发点走同一个 build.recompute()**
+  · 运行时快照出完报告（cycle.record，每次都算，历史里就有新增覆盖的趋势）
+  · 单测 XML 到达
+  · diff 到达（可能晚于快照，甚至晚于归档 —— 归档版本用 archives.archive_dir 定位 jacoco.xml 重算）
+  行号明细只落磁盘，库里只有三列聚合；大 diff / 大 XML 不会撞 max_allowed_packet。
+end note
+
+@enduml

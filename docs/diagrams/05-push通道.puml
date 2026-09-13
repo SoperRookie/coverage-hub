@@ -1,6 +1,6 @@
-@startuml 05-push
-' coverage-hub —— push 通道：agent 主动连回来
-' 对应代码：PushCollector（_claim / dump_service）与 remote_dump()
+@startuml 05-push通道
+' covhub 2.1 —— push 通道：agent 主动连回来
+' 对应代码：collector.PushCollector（_claim / dump_service）与 exec_format.remote_dump()
 '
 ' 这条通道的协议是自己实现的：jacococli 只有 dump（去连 tcpserver），
 ' 没有收集端命令，接 tcpclient 方向反了，官方工具帮不上忙。
@@ -18,9 +18,10 @@ participant "副本 B\noutput=tcpclient" as B
 
 box "covhub 服务端（serve --with-watch）" #F4F6F5
   participant "PushCollector\n:6400" as COL
-  participant "采集线程\nwatch_loop()" as W
+  participant "采集线程\nwatch_once()" as W
   participant "jacococli" as CLI
   database "data/<service>/" as D
+  database "数据库" as DB
 end box
 
 == 认领：连上来的是谁 ==
@@ -35,6 +36,7 @@ note right of COL
   连上来只有一个 TCP 连接，要等 dump 回来的
   SessionInfo 里才有 sessionid ——
   所以 accept 之后立刻 dump 一次做认领。
+  认领时现查库（cfg_loader），配置改了不用重启。
 end note
 A --> COL : header + SessionInfo + ExecutionData + ""BLOCK_CMDOK""
 COL -> COL : sessionid「order-service」→ 认领为该服务
@@ -42,8 +44,10 @@ COL -> D : 认领那一次的数据本身有效，直接存下\nexec/<时间戳>
 
 B -> COL : 同上，认领为 push2
 COL -> D : exec/<时间戳>-push2.exec
+COL -> DB : 两个实例的 sessionid 不同版本时\nrecord_push_mixed() → breaks 记「混版本」，看板告警
 
 == 取数：每轮向所有在线实例各要一次 ==
+W -> DB : set_online(name, 实例数 > 0)
 W -> COL : dump_service(svc, reset=False)
 COL -> A : ""BLOCK_CMDDUMP""
 A --> COL : SessionInfo + ExecutionData
@@ -69,8 +73,10 @@ note right of CLI
   比 pull 省事的地方：副本扩缩不用改任何配置。
 end note
 CLI -> D : current/{html, jacoco.xml, jacoco.csv}
+W -> D : incremental.json（有 diff 才算）
+W -> DB : snapshots 记一行
 
-note over A, D
+note over A, DB
   **两条限制**
   · 收集端必须和采集在同一进程：长连接握在收集端手上，
     另起的 watch 进程够不着 —— 所以要求 serve --with-watch
