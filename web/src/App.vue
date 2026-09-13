@@ -2,7 +2,6 @@
 import { computed, onMounted, provide, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ApiError, api, gotoWithToken, type Project } from "./api";
-import ProjectDialog from "./components/ProjectDialog.vue";
 
 // 壳：左侧栏（品牌、项目选择、导航）+ 内容区。层级是项目 → 服务，所以项目选择固定在侧栏。
 const route = useRoute();
@@ -43,7 +42,6 @@ function onSelect(value: string) {
 const needToken = ref(false);
 const token = ref("");
 const message = ref("");
-const createOpen = ref(false);
 
 function onError(err: unknown): boolean {
   if (err instanceof ApiError && err.status === 401) {
@@ -53,7 +51,6 @@ function onError(err: unknown): boolean {
   message.value = err instanceof Error ? err.message : String(err);
   return false;
 }
-function onCreated(name: string) { router.push(`/projects/${encodeURIComponent(name)}`); }
 </script>
 
 <template>
@@ -84,9 +81,6 @@ function onCreated(name: string) { router.push(`/projects/${encodeURIComponent(n
         </router-link>
         <router-link v-if="unassignedCount" to="/unassigned" :class="{ active: route.path === '/unassigned' }">未分组服务<span class="count">{{ unassignedCount }}</span></router-link>
       </nav>
-      <div style="padding: 8px 14px">
-        <el-button style="width: 100%" plain @click="createOpen = true">新建项目</el-button>
-      </div>
 
       <div class="foot">
         <div>covhub {{ version || "" }}</div>
@@ -103,8 +97,6 @@ function onCreated(name: string) { router.push(`/projects/${encodeURIComponent(n
       </div>
     </main>
   </div>
-
-  <ProjectDialog v-model="createOpen" :editing="null" :on-error="onError" @saved="onCreated" />
 
   <el-dialog v-model="needToken" title="需要访问令牌" width="420px" :close-on-click-modal="false">
     <p class="muted">这个 hub 配了 serve.token。填一次，之后靠 Cookie 放行。</p>

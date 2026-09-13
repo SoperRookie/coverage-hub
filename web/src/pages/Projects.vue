@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import { api, type Overview, type Project, type ServiceRow } from "../api";
+import ProjectDialog from "../components/ProjectDialog.vue";
 import type { Nav } from "../App.vue";
 import Kpi from "../components/Kpi.vue";
 import PageHeader from "../components/PageHeader.vue";
@@ -10,6 +12,10 @@ import { SERIES, STATUS, ago, pct } from "../ui/colors";
 const props = defineProps<{ onError: (err: unknown) => boolean }>();
 const nav = inject<Nav>("nav")!;
 nav.project = "";
+const router = useRouter();
+// 新建项目在这一页：项目总览就是管项目的地方，建完直接进它的面板
+const createOpen = ref(false);
+function onCreated(name: string) { router.push(`/projects/${encodeURIComponent(name)}`); }
 const data = ref<Overview | null>(null);
 const projects = ref<Project[]>([]);
 const loading = ref(true);
@@ -55,8 +61,13 @@ const cards = computed<Card[]>(() => {
     <template #meta>
       <span v-if="data">{{ projects.length }} 个项目 · {{ data.counts.services }} 个服务 · 更新于 {{ data.generatedAt.replace("T", " ") }}</span>
     </template>
-    <template #actions><el-button size="small" @click="load">刷新</el-button></template>
+    <template #actions>
+      <el-button size="small" type="primary" plain @click="createOpen = true">新建项目</el-button>
+      <el-button size="small" @click="load">刷新</el-button>
+    </template>
   </PageHeader>
+
+  <ProjectDialog v-model="createOpen" :editing="null" :on-error="onError" @saved="onCreated" />
 
   <div v-if="data" class="kpis" style="margin-bottom: 18px">
     <Kpi label="项目" :value="String(projects.length)" />
@@ -66,7 +77,7 @@ const cards = computed<Card[]>(() => {
   </div>
 
   <div v-if="loading" class="muted">加载中…</div>
-  <div v-else-if="!projects.length" class="card"><div class="empty"><b>还没有项目</b>先用左侧「新建项目」，再把服务加进去（服务用 <code>covhub service add</code> 登记）。</div></div>
+  <div v-else-if="!projects.length" class="card"><div class="empty"><b>还没有项目</b>点右上角「新建项目」，再把服务加进去（服务用 <code>covhub service add</code> 登记）。</div></div>
 
   <div class="cards">
     <router-link v-for="c in cards" :key="c.name" class="pcard" :to="`/projects/${encodeURIComponent(c.name)}`">
