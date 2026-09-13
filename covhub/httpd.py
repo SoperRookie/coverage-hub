@@ -13,6 +13,7 @@ from . import __version__, ops
 from .artifacts import pack_classes, store_classes
 from .collector import PushCollector, set_collector
 from .config import find_service, load_config, token as _token
+from .runtime import load_runtime
 from .dashboard import render_dashboard
 from .errors import CovhubError
 from .locks import LOCK
@@ -94,7 +95,7 @@ def _capture(fn, *a, **kw):
 
 def api_dispatch(cfg_path, method, route, params):
     """返回 (状态码, JSON 可序列化对象)。配置每次重读，retarget 后立即生效。"""
-    cfg = load_config(cfg_path)
+    cfg = load_runtime(cfg_path)
 
     if route == "/api/health":
         return 200, {"ok": True, "version": __version__,
@@ -373,7 +374,7 @@ def cmd_serve(cfg, args):
             route = self._route()
             try:
                 params = self._params()
-                current = load_config(cfg_path)
+                current = load_runtime(cfg_path)
             except CovhubError:
                 return self._send(500, {"ok": False, "error": "配置文件读取失败"})
             if not self._authorized(current, params):
@@ -420,7 +421,7 @@ def cmd_serve(cfg, args):
 
     collect = cfg.get("collect") or {}
     if collect.get("port"):
-        collector = PushCollector(lambda: load_config(cfg_path))
+        collector = PushCollector(lambda: load_runtime(cfg_path))
         set_collector(collector)
         collector.start(int(collect["port"]), collect.get("bindAddress", "0.0.0.0"))
         if not getattr(args, "with_watch", False):

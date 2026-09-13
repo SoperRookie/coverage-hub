@@ -3,7 +3,7 @@
 import time
 
 from .agent import reachable
-from .config import load_config
+from .runtime import load_runtime
 from .cycle import snapshot
 from .dashboard import render_dashboard
 from .locks import LOCK
@@ -29,7 +29,7 @@ def watch_loop(cfg_path, interval):
     """每轮重新加载配置 —— retarget 换了 classfiles 之后不必重启采集进程。"""
     while True:
         try:
-            watch_once(load_config(cfg_path))
+            watch_once(load_runtime(cfg_path))
         except (Exception, SystemExit) as exc:
             log("轮询失败 —— %s" % exc)
         time.sleep(interval)

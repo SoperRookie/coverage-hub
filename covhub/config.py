@@ -1,11 +1,18 @@
-"""hub 级配置：读取、探测、相对路径规整。"""
+"""hub 级配置：读取、探测、相对路径规整、数据库地址。
+
+服务配置（services）不在这里 —— 它们在数据库里，由 runtime.load_runtime()
+填进 cfg["services"]。配置文件只剩 hub 自己的几项。
+"""
 
 import json
 import os
 
 from .errors import ConfigError, ServiceNotFound
+from .logbuf import log
 
-CONFIG_CANDIDATES = ("targets.yaml", "targets.yml", "targets.json")
+# 新名字在前，旧名字继续认：已有部署的 targets.yaml 不用改名也能跑
+CONFIG_CANDIDATES = ("covhub.yaml", "covhub.yml", "covhub.json",
+                     "targets.yaml", "targets.yml", "targets.json")
 
 
 def config_format(path):
@@ -14,9 +21,9 @@ def config_format(path):
 
 
 def resolve_config_path(explicit):
-    """-c 没给时按 targets.yaml → targets.yml → targets.json 顺序探测。
+    """-c 没给时按 CONFIG_CANDIDATES 顺序探测。
 
-    两种格式长期并存：已有部署的 targets.json 原样能跑，新机器默认用 YAML
+    两种格式长期并存：已有部署的 JSON 原样能跑，新机器默认用 YAML
     （能写注释、不用数逗号）。都不存在时返回推荐的那个，让报错指向 YAML。
     """
     if explicit:
@@ -74,11 +81,46 @@ def load_config(path):
     for key in ("jacocoCli", "jacocoAgent", "dataDir"):
         if cfg.get(key) and not os.path.isabs(cfg[key]):
             cfg[key] = os.path.normpath(os.path.join(base, cfg[key]))
-    for svc in cfg.get("services", []):
-        for key in ("classfiles", "sourcefiles"):
-            svc[key] = [p if os.path.isabs(p) else os.path.normpath(os.path.join(base, p))
-                        for p in svc.get(key, [])]
+    # 文件里的 services 早已不生效。不报错（升级第一步就把人卡住太粗暴），
+    # 但每个进程提醒一次，直到有人跑过 import 并把这一段删掉
+    if cfg.get("services") and not _warned.get(cfg["configPath"]):
+        _warned[cfg["configPath"]] = True
+        log("! %s 里的 services 已不再生效，服务改由数据库管理：先 covhub import，"
+            "再删掉这一段" % path)
+    cfg["services"] = []
     return cfg
+
+
+_warned = {}
+
+
+def resolve_database_url(cfg):
+    """环境变量 COVHUB_DATABASE_URL > database.url > 配置文件旁的 SQLite。
+
+    默认库放在配置文件旁边而**不是 dataDir 里**：dataDir 是看板的静态目录，
+    放进去等于把整个库开放下载。
+    """
+    url = os.environ.get("COVHUB_DATABASE_URL") or (cfg.get("database") or {}).get("url")
+    if not url:
+        url = "sqlite:///" + os.path.join(cfg["baseDir"], "covhub.db").replace("\\", "/")
+    return url
+
+
+def database_auto_upgrade(cfg):
+    value = (cfg.get("database") or {}).get("autoUpgrade", True)
+    return str(value).lower() not in ("0", "false", "no", "off")
+
+
+def describe_database_url(url):
+    """启动日志用：方言 + 主机，密码打码。生产忘配环境变量静默跑在 SQLite 上是常见事故。"""
+    if url.startswith("sqlite"):
+        return url
+    head, _, rest = url.partition("://")
+    if "@" in rest:
+        creds, _, hostpart = rest.rpartition("@")
+        user = creds.split(":", 1)[0]
+        return "%s://%s:***@%s" % (head, user, hostpart)
+    return url
 
 
 def find_service(cfg, name):
@@ -94,10 +136,19 @@ def token(cfg):
 
 
 CONFIG_TEMPLATE_YAML = """\
-# covhub 配置。相对路径一律相对本文件所在目录解析。
-jacocoAgent: ./lib/jacocoagent.jar
+# covhub 配置（hub 自己的几项）。相对路径一律相对本文件所在目录解析。
+# 服务配置不在这里 —— 它们在数据库里，用 covhub service add 登记，
+# 或者 covhub import 从旧的 targets.yaml 一次性导入。
+jacocoAgent: ./lib/jacocoagent.jar   # 被测端能看到的路径，容器场景写容器内路径
 jacocoCli: ./lib/jacococli.jar
 dataDir: ./data
+
+database:
+  # 环境变量 COVHUB_DATABASE_URL 优先于这里。留空则用本文件旁边的 SQLite
+  # （covhub.db，只适合单机试用）。MySQL 8 写法：
+  #   mysql+pymysql://covhub:密码@主机:3306/covhub?charset=utf8mb4
+  url: ""
+  autoUpgrade: true          # 启动时自动把表结构升到最新；关掉则结构不对时拒绝启动
 
 serve:
   port: 8900
@@ -111,23 +162,38 @@ collect:                     # push 通道的收集端，只有配了 port，ser
   bindAddress: 0.0.0.0
   advertiseAddress: 改成被测端能访问到的 hub 地址
   dumpTimeoutSeconds: 20     # 向单个实例取数的上限，卡住的实例等这么久就丢弃
+"""
 
-services:
-  - name: example-service
-    version: "1.0.0"
-    channel: pull            # pull：hub 去连 agent；push：agent 连回 hub
-    address: 127.0.0.1       # agent 所在机器，hub 连过去拉数据
-    port: 6300
-    bindAddress: 0.0.0.0     # agent 在被测端监听的地址
-    includes:                # 传给 agent，决定是否插桩，改了要重启服务
-      - com.example.*
-    excludes: []
-    classDumpDir: /tmp/covhub-classes/example-service   # 被测端路径
-    classfiles:              # 出报告用的 class，必须与运行中的服务同一份产物
-      - /path/to/classes
-    sourcefiles:             # 可选，配了才能在报告里下钻到源码行
-      - /path/to/src/main/java
-    reportExcludes:          # 只影响报告口径，随时可改重出报告
-      - com/example/**/dto/**
-    sourceEncoding: UTF-8
+CONFIG_TEMPLATE_JSON = {
+    "jacocoAgent": "./lib/jacocoagent.jar",
+    "jacocoCli": "./lib/jacococli.jar",
+    "dataDir": "./data",
+    "database": {"url": "", "autoUpgrade": True},
+    "serve": {"port": 8900, "token": ""},
+    "watch": {"intervalSeconds": 300},
+    "collect": {"port": 6400, "bindAddress": "0.0.0.0",
+                "advertiseAddress": "改成被测端能访问到的 hub 地址",
+                "dumpTimeoutSeconds": 20},
+}
+
+# service add --from-file 用的模板
+SERVICE_TEMPLATE_YAML = """\
+# 一条服务配置，用 covhub service add <name> --from-file 本文件 登记进数据库。
+# 字段含义见 README「配置」一节。
+name: example-service
+version: "1.0.0"             # 版本号一律加引号，裸写的 1.4 会被读成数字
+channel: pull                # pull：hub 去连 agent；push：agent 连回 hub
+address: 127.0.0.1           # pull：agent 所在机器，hub 连过去拉数据
+port: 6300
+bindAddress: 0.0.0.0         # pull：agent 在被测端监听的地址
+includes:                    # 传给 agent，决定是否插桩，改了要重启服务
+  - com.example.*
+excludes: []
+classDumpDir: /tmp/covhub-classes/example-service   # 被测端路径
+classfiles:                  # 出报告用的 class（hub 上的路径），必须与运行中的服务同一份产物
+  - ./data/example-service/artifacts/1.0.0
+sourcefiles: []              # 可选，配了才能在报告里下钻到源码行
+reportExcludes:              # 只影响报告口径，随时可改重出报告
+  - com/example/**/dto/**
+sourceEncoding: UTF-8
 """

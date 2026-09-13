@@ -8,17 +8,20 @@ raise（见 errors.py），由 cli.main() 翻成退出码、HTTP 层翻成状态
 from datetime import datetime
 import os
 
+from pydantic import ValidationError
+
 from .agent import agent_opts as _agent_opts, endpoint_label, reachable, service_channel
 from .collector import get_collector, collector_instances
-from .config import config_format, find_service, read_config_file
-from .config_edit import json_update_service, yaml_update_service
+from .config import find_service
 from .cycle import archive_cycle, check_data_health, snapshot
 from .dashboard import render_dashboard
+from .db import importer, repo
 from .diagnose import diagnose as _diagnose
-from .errors import CovhubError, ServiceNotFound
+from .errors import CovhubError
 from .jacoco import make_report
 from .layout import ensure_dirs
 from .logbuf import log
+from .schemas import ServicePatch, ServiceSpec
 from .state import load_state, record
 
 
@@ -123,27 +126,88 @@ def retarget(cfg, name, version=None, classfiles=None, sourcefiles=None):
     JaCoCo 按 CRC64 class id 匹配数据，class 产物不跟着版本换，新周期采到的 exec
     就和旧 class 对不上，报告全是"未覆盖"。这一步是发版流水线里最容易漏的。
 
-    直接改配置文件原文（而不是回写 load_config 解析后的结果），避免把相对路径
-    固化成绝对路径 —— 整个目录要能原样搬到别的机器上。
+    路径存原文（不展开成绝对路径）—— 整个目录要能原样搬到别的机器上。
     """
-    path = cfg["configPath"]
-    updates = {}
+    find_service(cfg, name)
+    fields = {}
     if version:
-        updates["version"] = version
+        fields["version"] = str(version)
     if classfiles:
-        updates["classfiles"] = list(classfiles)
+        fields["classfiles"] = list(classfiles)
     if sourcefiles:
-        updates["sourcefiles"] = list(sourcefiles)
-
-    raw = read_config_file(path)
-    if not any(s.get("name") == name for s in raw.get("services", [])):
-        raise ServiceNotFound("配置里没有名为 %r 的服务" % name)
-    if updates:
-        if config_format(path) == "yaml":
-            yaml_update_service(path, name, updates)
-        else:
-            json_update_service(path, name, updates)
-        raw = read_config_file(path)
-    hit = next(s for s in raw["services"] if s.get("name") == name)
+        fields["sourcefiles"] = list(sourcefiles)
+    hit = repo.update_service(name, fields) if fields else repo.get_service(name)
     log("%s -> version=%s classfiles=%s" % (name, hit.get("version"), hit.get("classfiles")))
     return {"version": hit.get("version"), "classfiles": hit.get("classfiles")}
+
+
+# ---- 服务配置的增删改查 ----
+
+def service_list(cfg):
+    # 给人看的是入库原文（相对路径不展开）；运行时展开过的那份在 cfg["services"]
+    return repo.list_services()
+
+
+def service_get(cfg, name):
+    return repo.get_service(name)
+
+
+def service_add(cfg, fields):
+    """fields 是 camelCase 的 dict（来自 CLI 参数、--from-file 或请求体）。"""
+    spec = _validate(ServiceSpec, fields)
+    row = repo.add_service(spec.to_fields())
+    log("已登记服务 %s（%s）" % (row["name"], row.get("channel", "pull")))
+    return row
+
+
+def service_replace(cfg, name, fields):
+    fields = dict(fields, name=name)
+    spec = _validate(ServiceSpec, fields)
+    row = repo.replace_service(name, spec.to_fields())
+    log("已整份替换服务 %s 的配置" % name)
+    return row
+
+
+def service_update(cfg, name, fields):
+    patch = _validate(ServicePatch, fields).to_fields()
+    if not patch:
+        raise CovhubError("没有给任何要修改的字段")
+    # 改完必须仍是一条合法配置（比如把 pull 服务的 address 清掉）
+    merged = dict(repo.get_service(name))
+    merged.pop("id", None)
+    merged.update(patch)
+    _validate(ServiceSpec, merged)
+    row = repo.update_service(name, patch)
+    log("已更新服务 %s：%s" % (name, ", ".join(sorted(patch))))
+    return row
+
+
+def service_remove(cfg, name):
+    repo.remove_service(name)
+    log("已删除服务 %s 的配置（data/%s/ 里的采集数据未动，需要的话手工处理）" % (name, name))
+
+
+def _validate(model, fields):
+    try:
+        return model(**fields)
+    except ValidationError as exc:
+        # pydantic 的报错给机器看的成分太多，只留「字段：原因」
+        parts = []
+        for err in exc.errors():
+            loc = ".".join(str(x) for x in err.get("loc", ())) or "配置"
+            msg = err.get("msg", "")
+            if msg.startswith("Value error, "):
+                msg = msg[len("Value error, "):]
+            parts.append("%s：%s" % (loc, msg))
+        raise CovhubError("服务配置不合法 —— " + "；".join(parts))
+
+
+def import_legacy(cfg, config_path, dry_run=False, overwrite=False):
+    """把旧 targets.yaml 的 services 导进数据库。"""
+    log("从 %s 导入服务配置%s" % (config_path, "（试运行）" if dry_run else ""))
+    services = importer.import_services(config_path, dry_run=dry_run, overwrite=overwrite)
+    counts = {}
+    for outcome in services.values():
+        counts[outcome] = counts.get(outcome, 0) + 1
+    log("服务：%s" % (", ".join("%s %d" % kv for kv in sorted(counts.items())) or "无"))
+    return {"services": services}
