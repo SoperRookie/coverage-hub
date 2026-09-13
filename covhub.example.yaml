@@ -1,0 +1,26 @@
+# covhub 配置（hub 自己的几项）。相对路径一律相对本文件所在目录解析。
+# 服务配置不在这里 —— 它们在数据库里，用 covhub service add 登记，
+# 或者 covhub import 从旧的 targets.yaml 一次性导入。
+jacocoAgent: ./lib/jacocoagent.jar   # 被测端能看到的路径，容器场景写容器内路径
+jacocoCli: ./lib/jacococli.jar
+dataDir: ./data
+
+database:
+  # 环境变量 COVHUB_DATABASE_URL 优先于这里。留空则用本文件旁边的 SQLite
+  # （covhub.db，只适合单机试用）。MySQL 8 写法：
+  #   mysql+pymysql://covhub:密码@主机:3306/covhub?charset=utf8mb4
+  url: ""
+  autoUpgrade: true          # 启动时自动把表结构升到最新；关掉则结构不对时拒绝启动
+
+serve:
+  port: 8900
+  token: ""                  # 控制 API 的令牌，不配则任何人都能调写接口
+
+watch:
+  intervalSeconds: 300       # 轮询间隔，同时是断代时数据丢失的上界
+
+collect:                     # push 通道的收集端，只有配了 port，serve 才会起它
+  port: 6400
+  bindAddress: 0.0.0.0
+  advertiseAddress: 改成被测端能访问到的 hub 地址
+  dumpTimeoutSeconds: 20     # 向单个实例取数的上限，卡住的实例等这么久就丢弃

@@ -1,0 +1,18 @@
+# 一条服务配置，用 covhub service add <name> --from-file 本文件 登记进数据库。
+# 字段含义见 README「配置」一节。
+name: example-service
+version: "1.0.0"             # 版本号一律加引号，裸写的 1.4 会被读成数字
+channel: pull                # pull：hub 去连 agent；push：agent 连回 hub
+address: 127.0.0.1           # pull：agent 所在机器，hub 连过去拉数据
+port: 6300
+bindAddress: 0.0.0.0         # pull：agent 在被测端监听的地址
+includes:                    # 传给 agent，决定是否插桩，改了要重启服务
+  - com.example.*
+excludes: []
+classDumpDir: /tmp/covhub-classes/example-service   # 被测端路径
+classfiles:                  # 出报告用的 class（hub 上的路径），必须与运行中的服务同一份产物
+  - ./data/example-service/artifacts/1.0.0
+sourcefiles: []              # 可选，配了才能在报告里下钻到源码行
+reportExcludes:              # 只影响报告口径，随时可改重出报告
+  - com/example/**/dto/**
+sourceEncoding: UTF-8
