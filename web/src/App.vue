@@ -2,6 +2,7 @@
 import { computed, onMounted, provide, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ApiError, api, gotoWithToken, type Project } from "./api";
+import { theme } from "./ui/theme";
 
 // 壳：左侧栏（品牌、项目选择、导航）+ 内容区。层级是项目 → 服务，所以项目选择固定在侧栏。
 const route = useRoute();
@@ -85,6 +86,14 @@ function onError(err: unknown): boolean {
       </nav>
 
       <div class="foot">
+        <div class="theme-row">
+          <span>主题</span>
+          <el-radio-group v-model="theme" size="small">
+            <el-radio-button value="light">浅</el-radio-button>
+            <el-radio-button value="dark">深</el-radio-button>
+            <el-radio-button value="system">自动</el-radio-button>
+          </el-radio-group>
+        </div>
         <div>covhub {{ version || "" }}</div>
         <div><a href="api/openapi.json" target="_blank">接口文档 (OpenAPI)</a></div>
         <div>覆盖率不按阈值着色，颜色只表示运维状态</div>

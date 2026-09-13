@@ -4,6 +4,8 @@ import * as echarts from "echarts/core";
 import { PieChart } from "echarts/charts";
 import { CanvasRenderer } from "echarts/renderers";
 
+import { chartTokens, isDark } from "../ui/theme";
+
 echarts.use([PieChart, CanvasRenderer]);
 
 // 环形图指标块：一个百分比 = 已覆盖那一弧（系列色）+ 剩余那一弧（浅灰）。
@@ -15,6 +17,7 @@ let chart: echarts.ECharts | null = null;
 function render() {
   if (!el.value) return;
   chart = chart || echarts.init(el.value);
+  const rest = chartTokens().line;
   const r = props.ratio === null ? null : Math.max(0, Math.min(100, props.ratio));
   chart.setOption({
     animation: false,
@@ -24,8 +27,8 @@ function render() {
       startAngle: 90, clockwise: true, padAngle: r === null || r === 0 || r === 100 ? 0 : 2,
       itemStyle: { borderRadius: 3 },
       data: r === null
-        ? [{ value: 1, itemStyle: { color: "#e4e6ea" } }]
-        : [{ value: r, itemStyle: { color: props.color } }, { value: 100 - r, itemStyle: { color: "#e4e6ea" } }],
+        ? [{ value: 1, itemStyle: { color: rest } }]
+        : [{ value: r, itemStyle: { color: props.color } }, { value: 100 - r, itemStyle: { color: rest } }],
     }],
   }, true);
 }
@@ -34,6 +37,7 @@ const onResize = () => chart?.resize();
 onMounted(() => { render(); window.addEventListener("resize", onResize); });
 onBeforeUnmount(() => { window.removeEventListener("resize", onResize); chart?.dispose(); chart = null; });
 watch(() => [props.ratio, props.color], render);
+watch(isDark, render);
 </script>
 
 <template>

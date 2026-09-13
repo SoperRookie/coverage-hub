@@ -6,6 +6,7 @@ import { GridComponent, LegendComponent, TooltipComponent } from "echarts/compon
 import { CanvasRenderer } from "echarts/renderers";
 import type { Brief } from "../api";
 import { SERIES } from "../ui/colors";
+import { chartTokens, isDark } from "../ui/theme";
 
 echarts.use([LineChart, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer]);
 
@@ -19,20 +20,21 @@ let chart: echarts.ECharts | null = null;
 function render() {
   if (!el.value) return;
   chart = chart || echarts.init(el.value);
+  const t = chartTokens();
   const xs = props.history.map((h) => h.at.replace("T", " "));
   chart.setOption({
     animation: false,
     grid: { left: 48, right: 20, top: 16, bottom: 30 },
     tooltip: {
-      trigger: "axis", axisPointer: { type: "cross", lineStyle: { color: "#c9ccd1" }, label: { backgroundColor: "#4b5059" } },
-      backgroundColor: "#fff", borderColor: "#e4e6ea", textStyle: { color: "#111318", fontSize: 12 },
+      trigger: "axis", axisPointer: { type: "cross", lineStyle: { color: t.lineStrong }, label: { backgroundColor: t.ink2 } },
+      backgroundColor: t.surface, borderColor: t.line, textStyle: { color: t.ink, fontSize: 12 },
       valueFormatter: (v: unknown) => (v === null || v === undefined ? "—" : `${v}%`),
     },
     legend: { show: false },   // 图例在卡片头上，这里不重复
-    xAxis: { type: "category", data: xs, axisLine: { lineStyle: { color: "#e4e6ea" } }, axisTick: { show: false },
-             axisLabel: { fontSize: 10, color: "#7a8089" } },
-    yAxis: { type: "value", min: 0, max: 100, axisLabel: { formatter: "{value}%", color: "#7a8089", fontSize: 11 },
-             splitLine: { lineStyle: { color: "#eef0f2" } } },
+    xAxis: { type: "category", data: xs, axisLine: { lineStyle: { color: t.line } }, axisTick: { show: false },
+             axisLabel: { fontSize: 10, color: t.ink3 } },
+    yAxis: { type: "value", min: 0, max: 100, axisLabel: { formatter: "{value}%", color: t.ink3, fontSize: 11 },
+             splitLine: { lineStyle: { color: t.grid } } },
     series: [
       { name: "总覆盖", type: "line", data: props.history.map((h) => h.instruction), color: SERIES.total,
         lineStyle: { width: 2 }, symbol: "circle", symbolSize: 8, showSymbol: false, emphasis: { scale: 1.2 } },
@@ -46,6 +48,7 @@ const onResize = () => chart?.resize();
 onMounted(() => { render(); window.addEventListener("resize", onResize); });
 onBeforeUnmount(() => { window.removeEventListener("resize", onResize); chart?.dispose(); chart = null; });
 watch(() => props.history, render, { deep: true });
+watch(isDark, render);
 </script>
 
 <template>

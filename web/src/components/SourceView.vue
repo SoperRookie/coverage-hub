@@ -47,19 +47,19 @@ onMounted(async () => {
 
 <style scoped>
 .src { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin: 4px 0 8px; }
-.src-head { display: flex; align-items: center; gap: 12px; padding: 6px 10px; background: #fafafa; border-bottom: 1px solid var(--line); font-size: 12px; }
+.src-head { display: flex; align-items: center; gap: 12px; padding: 6px 10px; background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: 12px; }
 .src-head .spacer { flex: 1; }
 .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-.sw.covered { background: #c8e6c9; }
-.sw.missed { background: #ffcdd2; }
-.sw.nocode { background: #eeeeee; }
+.sw.covered { background: var(--src-covered-strong); }
+.sw.missed { background: var(--src-missed-strong); }
+.sw.nocode { background: var(--src-nocode-strong); }
 table.code { border-collapse: collapse; width: 100%; font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 12px; }
 table.code td { padding: 0 8px; vertical-align: top; white-space: pre; }
-table.code td.nr { width: 48px; text-align: right; color: #9aa0a6; user-select: none; border-right: 1px solid var(--line); }
-table.code td.mark { width: 12px; color: #9aa0a6; user-select: none; }
+table.code td.nr { width: 48px; text-align: right; color: var(--ink-3); user-select: none; border-right: 1px solid var(--line); }
+table.code td.mark { width: 12px; color: var(--ink-3); user-select: none; }
 table.code pre { margin: 0; font: inherit; }
-tr.covered { background: #e8f5e9; }
-tr.missed { background: #ffebee; }
-tr.nocode { background: #f5f5f5; }
-tr.gap td { color: #9aa0a6; text-align: center; background: #fafafa; }
+tr.covered { background: var(--src-covered); }
+tr.missed { background: var(--src-missed); }
+tr.nocode { background: var(--src-nocode); }
+tr.gap td { color: var(--ink-3); text-align: center; background: var(--surface-2); }
 </style>

@@ -1,18 +1,59 @@
-/* 不引任何外部字体 / CDN：hub 常在内网。 */
+/* 不引任何外部字体 / CDN：hub 常在内网。
+   颜色全走 token：浅色在 :root，深色在 html.dark 覆盖同名 token（theme.ts 负责挂 class）。
+   系列色 / 状态色不在这里 —— 它们固定，不随主题变（colors.ts）。 */
 :root {
   --bg: #f4f5f7;
   --surface: #ffffff;
   --surface-2: #f9fafb;
   --line: #e4e6ea;
   --line-strong: #d3d6db;
+  --grid: #eef0f2;
   --ink: #111318;
   --ink-2: #4b5059;
   --ink-3: #7a8089;
   --accent: #2a78d6;
   --accent-soft: #e8f0fb;
+  --hover: #f6f9fe;
+  --on-accent: #fff;
+  --notice-bg: #fff7ed;
+  --notice-line: #fed7aa;
+  --notice-ink: #7c2d12;
+  --src-covered: #e8f5e9;
+  --src-missed: #ffebee;
+  --src-nocode: #f5f5f5;
+  --src-covered-strong: #c8e6c9;
+  --src-missed-strong: #ffcdd2;
+  --src-nocode-strong: #e0e0e0;
   --radius: 8px;
   --shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
   --sidebar: 232px;
+  color-scheme: light;
+}
+html.dark {
+  --bg: #121417;
+  --surface: #1b1e23;
+  --surface-2: #20242a;
+  --line: #2c3139;
+  --line-strong: #3a404a;
+  --grid: #262b33;
+  --ink: #e7e9ee;
+  --ink-2: #b4bac4;
+  --ink-3: #7f8793;
+  --accent: #5b9cf0;
+  --accent-soft: #1d2b40;
+  --hover: #1f252e;
+  --on-accent: #fff;
+  --notice-bg: #2a2118;
+  --notice-line: #5a3d1e;
+  --notice-ink: #f3c9a3;
+  --src-covered: #16301c;
+  --src-missed: #3a1d20;
+  --src-nocode: #23262b;
+  --src-covered-strong: #2e6b3a;
+  --src-missed-strong: #8a3a41;
+  --src-nocode-strong: #3a3f47;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 1px 3px rgba(0, 0, 0, 0.35);
+  color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -41,7 +82,7 @@ code { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 12px
   display: flex; flex-direction: column; position: sticky; top: 0; height: 100vh;
 }
 .sidebar .brand { display: flex; align-items: center; gap: 10px; padding: 18px 18px 12px; font-weight: 700; font-size: 15px; color: var(--ink); letter-spacing: .2px; }
-.sidebar .brand .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: #fff; display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; }
+.sidebar .brand .logo { width: 26px; height: 26px; border-radius: 7px; background: var(--accent); color: var(--on-accent); display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; }
 .sidebar .brand small { display: block; font-weight: 400; font-size: 11px; color: var(--ink-3); }
 .sidebar .section { padding: 10px 18px 6px; font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .6px; }
 .sidebar .picker { padding: 0 14px 6px; }
@@ -52,8 +93,9 @@ code { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 12px
 .sidebar nav a:hover { background: var(--surface-2); text-decoration: none; color: var(--ink); }
 .sidebar nav a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 .sidebar nav a .count { margin-left: auto; font-size: 11px; color: var(--ink-3); background: var(--surface-2); border: 1px solid var(--line); border-radius: 10px; padding: 0 7px; }
-.sidebar nav a.active .count { background: #fff; }
+.sidebar nav a.active .count { background: var(--surface); }
 .sidebar .foot { margin-top: auto; padding: 12px 18px; border-top: 1px solid var(--line); font-size: 11px; color: var(--ink-3); line-height: 1.7; }
+.sidebar .foot .theme-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; color: var(--ink-2); }
 .content { flex: 1; min-width: 0; }
 .page { max-width: 1320px; margin: 0 auto; padding: 22px 28px 48px; }
 
@@ -105,7 +147,7 @@ code { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 12px
 /* ---- 空状态 / 提示 ---- */
 .empty { padding: 28px 16px; text-align: center; color: var(--ink-3); }
 .empty b { display: block; color: var(--ink-2); font-weight: 600; margin-bottom: 4px; }
-.notice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; background: #fff7ed; border: 1px solid #fed7aa; color: #7c2d12; }
+.notice { display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; border-radius: 6px; margin-bottom: 12px; font-size: 12px; background: var(--notice-bg); border: 1px solid var(--notice-line); color: var(--notice-ink); }
 .notice.info { background: var(--surface-2); border-color: var(--line); color: var(--ink-2); }
 
 /* ---- 打印（报表另存 PDF）：去掉侧栏与操作按钮，表格不截断 ---- */
@@ -114,12 +156,14 @@ code { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 12px
   .content { width: 100%; }
   .page { max-width: none; padding: 0; }
   .card, .kpi { box-shadow: none; break-inside: avoid; }
-  body { background: #fff; }
+  html.dark, html.dark body { background: #fff; color: #111; }
   a { color: inherit; }
 }
 
 /* ---- Element Plus 表格微调：更紧凑、表头更轻 ---- */
-.el-table { --el-table-header-bg-color: var(--surface-2); --el-table-border-color: var(--line); --el-table-row-hover-bg-color: #f6f9fe; font-size: 13px; }
+.el-table { --el-table-header-bg-color: var(--surface-2); --el-table-border-color: var(--line); --el-table-row-hover-bg-color: var(--hover); --el-table-bg-color: var(--surface); --el-table-tr-bg-color: var(--surface); --el-table-text-color: var(--ink); font-size: 13px; }
+/* Element Plus 的深色变量只换它自己的组件；卡片、页面底、文字仍是我们的 token。弹窗 / 下拉跟着 --surface 走 */
+html.dark { --el-bg-color: var(--surface); --el-bg-color-overlay: var(--surface); --el-fill-color-blank: var(--surface); --el-border-color: var(--line); --el-border-color-light: var(--line); --el-border-color-lighter: var(--line); --el-text-color-primary: var(--ink); --el-text-color-regular: var(--ink-2); --el-text-color-secondary: var(--ink-3); }
 .el-table th.el-table__cell { font-weight: 600; color: var(--ink-2); font-size: 12px; }
 .el-table .cell { line-height: 1.5; }
 .el-table td.el-table__cell, .el-table th.el-table__cell.is-leaf { border-right: none; }
