@@ -13,6 +13,7 @@ from .agent import endpoint_label, service_channel
 from .collector import collector_instances, get_collector
 from .config import find_service
 from .db import repo
+from .errors import CovhubError
 from .layout import svc_dir
 
 
@@ -188,3 +189,77 @@ def versions_for_pipeline(cfg, name):
         out.append({"version": v["version"], "dir": v["dir"], "sealedAt": v["sealedAt"],
                     "head": diff["head"] if diff else None, "base": diff["base"] if diff else None})
     return {"service": name, "versions": out, "latest": out[0] if out else None}
+
+
+def _report_page(report_file):
+    """JaCoCo HTML 报告里源码页的相对路径：包目录用点号，文件名加 .java.html。"""
+    pkg, _, name = report_file.rpartition("/")
+    return "%s/%s.html" % (pkg.replace("/", ".") if pkg else "default", name)
+
+
+def incremental_source(cfg, name, kind, path, context=3):
+    """某个文件的新增代码源码视图：新增行标覆盖状态，前后带 context 行上下文。
+
+    源码从服务的 sourcefiles 里找（报告里的 包路径/文件名 拼到每个源码根下），找不到就
+    只返回行号与状态 —— 前端照样能列出未覆盖的行，只是没有代码文本。
+    """
+    svc = find_service(cfg, name)
+    where = "current"
+    if kind == "unit":
+        unit = repo.latest_unit_report(name)
+        if not unit:
+            raise CovhubError("还没有单测报告")
+        where = "unit/%s" % unit["version"]
+    result = build.read_incremental(cfg, svc, where)
+    if not result or path not in result.get("files", {}):
+        raise CovhubError("没有 %s 的新增代码明细" % path)
+    entry = result["files"][path]
+    report_file = entry.get("reportFile") or path
+    added = set(entry.get("added") or [])
+    hits, missed = set(entry.get("hit") or []), set(entry.get("missed") or [])
+
+    text_lines, source_path = None, None
+    candidates = [os.path.join(root, report_file) for root in svc.get("sourcefiles", [])]
+    candidates.append(os.path.join(cfg.get("baseDir", ""), path))
+    for cand in candidates:
+        if os.path.isfile(cand):
+            with open(cand, encoding=svc.get("sourceEncoding", "UTF-8"), errors="replace") as f:
+                text_lines = f.read().splitlines()
+            source_path = cand
+            break
+
+    def status(nr):
+        if nr not in added:
+            return "context"
+        if nr in hits:
+            return "covered"
+        if nr in missed:
+            return "missed"
+        return "nocode"          # 新增行但 JaCoCo 没探针：空行、注释、声明
+
+    lines = []
+    if text_lines is not None:
+        wanted = set()
+        for nr in added:
+            for k in range(nr - context, nr + context + 1):
+                if 1 <= k <= len(text_lines):
+                    wanted.add(k)
+        prev = 0
+        for nr in sorted(wanted):
+            if prev and nr != prev + 1:
+                lines.append({"nr": None, "text": "…", "status": "gap"})
+            lines.append({"nr": nr, "text": text_lines[nr - 1], "status": status(nr)})
+            prev = nr
+    else:
+        for nr in sorted(added):
+            lines.append({"nr": nr, "text": None, "status": status(nr)})
+
+    base = "/%s" % name
+    report_dir = "%s/current/html" % base if kind == "runtime" else None
+    return {
+        "service": name, "kind": kind, "path": path, "reportFile": report_file,
+        "sourceFound": text_lines is not None, "sourcePath": source_path,
+        "covered": entry["covered"], "total": entry["total"], "added": len(added),
+        "lines": lines,
+        "reportUrl": ("%s/%s" % (report_dir, _report_page(report_file))) if report_dir else None,
+    }

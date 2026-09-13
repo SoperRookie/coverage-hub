@@ -109,6 +109,24 @@ export interface IncView {
   skipped: number;
 }
 
+export interface SourceLine {
+  nr: number | null;
+  text: string | null;
+  status: "covered" | "missed" | "nocode" | "context" | "gap";
+}
+
+export interface SourceView {
+  path: string;
+  reportFile: string;
+  sourceFound: boolean;
+  sourcePath: string | null;
+  covered: number;
+  total: number;
+  added: number;
+  lines: SourceLine[];
+  reportUrl: string | null;
+}
+
 export interface VersionRow extends Brief {
   dir: string;
   sealedAt: string;
@@ -163,6 +181,8 @@ export const api = {
   overview: () => request<Overview>("api/overview"),
   detail: (name: string) => request<Detail>(`api/services/${enc(name)}/detail`),
   health: () => request<{ ok: boolean; version: string }>("api/health"),
+  source: (name: string, kind: "runtime" | "unit", file: string) =>
+    request<SourceView>(`api/services/${enc(name)}/source?kind=${kind}&file=${enc(file)}`),
   projects: () => request<{ projects: Project[] }>("api/projects"),
   createProject: (body: { name: string; title?: string | null; description?: string | null }) =>
     request<{ project: Project }>("api/projects", { method: "POST", body }),

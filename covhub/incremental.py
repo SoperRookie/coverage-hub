@@ -241,7 +241,7 @@ def compute(diff_lines, jacoco_files):
     for key, slot in per_key.items():
         probe = jacoco_files[key]
         f_cov = f_tot = 0
-        missed = []
+        missed, hits = [], []
         for nr in sorted(slot["lines"]):
             hit = probe.get(nr)
             if hit is None:
@@ -249,6 +249,7 @@ def compute(diff_lines, jacoco_files):
             f_tot += 1
             if hit[1] > 0:
                 f_cov += 1
+                hits.append(nr)
             else:
                 missed.append(nr)
         covered += f_cov
@@ -256,7 +257,8 @@ def compute(diff_lines, jacoco_files):
         label = slot["paths"][0] if len(slot["paths"]) == 1 else key[1]
         if len(slot["paths"]) > 1:
             ambiguous.append({"file": key[1], "paths": slot["paths"]})
-        files[label] = {"covered": f_cov, "total": f_tot, "missed": missed,
+        files[label] = {"covered": f_cov, "total": f_tot, "missed": missed, "hit": hits,
+                        "added": sorted(slot["lines"]),
                         "reportFile": key[1], "group": key[0] or None}
     return {
         "covered": covered, "total": total,

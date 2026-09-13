@@ -101,8 +101,10 @@ const metrics = computed<Metric[]>(() => d.value ? [
           </el-radio-group>
         </span>
       </h2>
-      <IncrementalTable v-if="incTab === 'runtime'" :view="d.runtime.incremental" empty="当前周期没有新增代码的覆盖明细（没有这一版的 diff，或还没采集过）。" />
-      <IncrementalTable v-else :view="d.unit.incremental" empty="没有单测的新增代码明细（还没收到这一版的单测报告或 diff）。" />
+      <IncrementalTable v-if="incTab === 'runtime'" :view="d.runtime.incremental" :service="name" kind="runtime" :on-error="onError"
+                        empty="当前周期没有新增代码的覆盖明细（没有这一版的 diff，或还没采集过）。" />
+      <IncrementalTable v-else :view="d.unit.incremental" :service="name" kind="unit" :on-error="onError"
+                        empty="没有单测的新增代码明细（还没收到这一版的单测报告或 diff）。" />
     </div>
 
     <div class="card">

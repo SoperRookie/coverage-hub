@@ -1,6 +1,6 @@
 """前端（Vue 面板）用的只读视图接口。"""
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 
 from .. import views
 from . import schemas
@@ -32,3 +32,16 @@ def service_detail(name: str, cfg: dict = Depends(get_cfg)):
 def versions(name: str, cfg: dict = Depends(get_cfg)):
     """构建流水线先问 hub「上一版是谁」再算 git diff：返回最近几个已结算版本及其 diff 的 head。"""
     return PrettyJSONResponse({"ok": True, **views.versions_for_pipeline(cfg, name)})
+
+
+@router.get("/api/services/{name}/source", summary="某个文件的新增代码源码视图", responses=ERR)
+def incremental_source(name: str,
+                       file: str = Query(..., description="新增代码明细里的文件路径"),
+                       kind: str = Query("runtime", description="runtime 或 unit"),
+                       context: int = Query(3, ge=0, le=20, description="新增行前后带几行上下文"),
+                       cfg: dict = Depends(get_cfg)):
+    """新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码从服务的 sourcefiles 里找，
+    找不到时只有行号与状态。"""
+    if kind not in ("runtime", "unit"):
+        kind = "runtime"
+    return PrettyJSONResponse({"ok": True, **views.incremental_source(cfg, name, kind, file, context)})
