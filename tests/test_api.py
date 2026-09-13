@@ -138,6 +138,23 @@ def test_services_crud(hub):
     assert hub.get("/api/services/svc", headers=H).status_code == 404
 
 
+def test_docs_page_is_open_and_self_hosted(hub):
+    """/docs 不要令牌，Swagger UI 的资源从包里出，不引 CDN；spec 带令牌的 securityScheme。"""
+    from covhub.api.static import WEB_DIR
+    r = hub.get("/docs")
+    if not (WEB_DIR / "swagger" / "swagger-ui-bundle.js").is_file():
+        assert r.status_code == 503
+    else:
+        assert r.status_code == 200 and "http://" not in r.text and "https://" not in r.text
+        assert "./swagger/swagger-ui-bundle.js" in r.text and "./api/openapi.json" in r.text
+        assert hub.get("/swagger/swagger-ui.css").status_code == 200        # 免令牌
+    # 令牌三来源已经是 spec 里的 securitySchemes，Swagger UI 的 Authorize 能直接用
+    spec = hub.get("/api/openapi.json").json()
+    assert spec["components"]["securitySchemes"]["tokenHeader"]["name"] == "X-Covhub-Token"
+    assert {"tokenHeader": []} in spec["paths"]["/api/dump"]["post"]["security"]
+    assert "security" not in spec["paths"]["/api/health"]["get"]
+
+
 def test_cors_only_on_openapi(hub):
     r = hub.get("/api/openapi.json")
     assert r.status_code == 200 and r.headers["access-control-allow-origin"] == "*"

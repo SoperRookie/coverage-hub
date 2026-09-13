@@ -263,10 +263,14 @@ covhub-client.sh wait-online    order-service            # 4. 确认新实例采
 
 ### 查看接口文档
 
+**在线文档：`http://<hub>:8900/docs`**（看板侧栏底部也有入口）。这是 hub 自己托管的 Swagger UI，
+资源打在包里（`covhub/webui/swagger/`，随前端一起构建），不从 CDN 拉，内网能开；页面不要令牌。
+带令牌的接口先点右上角 **Authorize** 填 `X-Covhub-Token`，之后 Try it out 每个请求都带上 ——
+注意写接口会真的执行（`dump` / `predeploy` 会改数据）。
+
 `GET /api/openapi.json` 是由 FastAPI 从路由和模型生成的 OpenAPI 描述（仓库里的 `docs/openapi.json`
 是同一份，`python covhub.py openapi` 导出）。它和 `/api/health` 一样**不需要令牌**，并且带
-`Access-Control-Allow-Origin: *` —— 外面的 Swagger UI / Apifox / 网关能直接拉。hub 没有内置
-Swagger UI 页面（那要从 CDN 拉资源，内网打不开）：
+`Access-Control-Allow-Origin: *` —— Apifox / 网关 / 别处的 Swagger UI 也能直接拉：
 
 ```bash
 docker run --rm -p 8080:8080 -e SWAGGER_JSON_URL=http://covhub.internal:8900/api/openapi.json swaggerapi/swagger-ui

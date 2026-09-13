@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
+    "build": "vue-tsc --noEmit && vite build && node scripts/copy-swagger.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
@@ -17,6 +17,7 @@
   "devDependencies": {
     "@element-plus/icons-vue": "^2.3.2",
     "@vitejs/plugin-vue": "^6.0.8",
+    "swagger-ui-dist": "^5.32.15",
     "typescript": "~5.9",
     "unplugin-auto-import": "^21.1.0",
     "unplugin-vue-components": "^32.1.0",

@@ -16,7 +16,7 @@ from ..db import engine
 from ..logbuf import log
 from ..runtime import load_runtime, prepare_database
 from ..watch import watch_loop
-from . import routes_build, routes_control, routes_projects, routes_services, routes_view, static
+from . import docs, routes_build, routes_control, routes_projects, routes_services, routes_view, static
 from .responses import PrettyJSONResponse, install_handlers
 
 OPEN_ROUTES = ("/api/health", "/api/openapi.json")
@@ -97,7 +97,7 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
         title="covhub 控制 API", version=__version__, description=DESCRIPTION,
         openapi_tags=TAGS, lifespan=lifespan,
         # 内置的 /docs 从 CDN 拉 Swagger UI，内网起不来，也违背看板不引 CDN 的约定；
-        # 文档统一走 /api/openapi.json（免令牌、带 CORS），用外面的 Swagger UI 看
+        # 关掉它，/docs 由 api/docs.py 用包里自带的 swagger-ui-dist 托管，spec 走 /api/openapi.json
         docs_url=None, redoc_url=None, openapi_url=None,
         default_response_class=PrettyJSONResponse,
     )
@@ -122,6 +122,7 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
     app.include_router(routes_projects.router)
     app.include_router(routes_build.router)
     app.include_router(routes_view.router)
+    app.include_router(docs.router)
     app.include_router(static.router)        # 兜底，必须最后挂
     return app
 
