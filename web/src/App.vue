@@ -59,7 +59,7 @@ function onError(err: unknown): boolean {
     <aside class="sidebar">
       <router-link class="brand" to="/">
         <span class="logo">C</span>
-        <span>covhub<small>JaCoCo 覆盖率看板</small></span>
+        <span>coverage-hub<small>JaCoCo 覆盖率看板</small></span>
       </router-link>
 
       <div class="section">项目</div>
@@ -94,7 +94,7 @@ function onError(err: unknown): boolean {
             <el-radio-button value="system">自动</el-radio-button>
           </el-radio-group>
         </div>
-        <div>covhub {{ version || "" }}</div>
+        <div>coverage-hub {{ version || "" }}</div>
         <div><a href="docs" target="_blank">接口文档 (Swagger)</a></div>
         <div>覆盖率不按阈值着色，颜色只表示运维状态</div>
       </div>
