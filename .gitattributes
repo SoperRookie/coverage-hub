@@ -18,5 +18,4 @@ covhub/webui/** -diff -text linguist-generated=true
 *.ts         text eol=lf
 *.woff2 binary
 *.woff binary
-*.puml text eol=lf
 *.md text eol=lf

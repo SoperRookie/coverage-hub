@@ -39,3 +39,6 @@ __pycache__/
 web/node_modules/
 web/auto-imports.d.ts
 web/components.d.ts
+
+# 架构图只在本地维护，不进版本库
+docs/diagrams/
