@@ -5,7 +5,7 @@ import os
 
 from .jacoco import class_file_ids, exec_class_ids, exec_sessions
 from .layout import ensure_dirs
-from .state import load_state
+from .db import repo
 
 # --------------------------------------------------------------------------
 # 诊断
@@ -39,7 +39,7 @@ def diagnose(cfg, svc, version=None):
         "execFiles": len(execs), "classfiles": classfiles,
         "sessions": [], "execClasses": 0, "classFileClasses": 0,
         "matched": 0, "matchRate": None, "verdict": None,
-        "missingSamples": [], "breaks": load_state(cfg, svc).get("breaks", [])[-5:],
+        "missingSamples": [], "breaks": repo.breaks(svc["name"], 5),
     }
     if not execs:
         result["verdict"] = "还没有任何 exec 数据"

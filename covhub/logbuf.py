@@ -8,14 +8,16 @@ ContextVar：请求线程池会拷贝上下文，采集线程和收集端线程�
 
 import contextlib
 import contextvars
+import sys
 from datetime import datetime
 
 _sink = contextvars.ContextVar("covhub_log", default=None)
 
 
 def log(msg):
+    """日志走 stderr：stdout 只留命令的结果，agent-opts / --json 的输出才能被 $(...) 直接用。"""
     line = "[%s] %s" % (datetime.now().strftime("%H:%M:%S"), msg)
-    print(line, flush=True)
+    print(line, file=sys.stderr, flush=True)
     sink = _sink.get()
     if sink is not None:
         sink.append(line + "\n")

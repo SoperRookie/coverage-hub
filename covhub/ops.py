@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from .agent import agent_opts as _agent_opts, endpoint_label, reachable, service_channel
 from .collector import get_collector, collector_instances
 from .config import find_service
-from .cycle import archive_cycle, check_data_health, snapshot
+from .cycle import archive_cycle, check_data_health, record, snapshot
 from .dashboard import render_dashboard
 from .db import importer, repo
 from .diagnose import diagnose as _diagnose
@@ -22,7 +22,6 @@ from .jacoco import make_report
 from .layout import ensure_dirs
 from .logbuf import log
 from .schemas import ServicePatch, ServiceSpec
-from .state import load_state, record
 
 
 def agent_opts(cfg, name):
@@ -31,8 +30,7 @@ def agent_opts(cfg, name):
 
 def service_status(cfg, svc):
     """单个服务的状态快照。CLI 表格与 HTTP API 共用同一份数据。"""
-    state = load_state(cfg, svc)
-    latest = state.get("latest")
+    latest = repo.latest(svc["name"])
     channel = service_channel(svc)
     insts = collector_instances(svc["name"]) if channel == "push" else []
     endpoint = endpoint_label(svc)
@@ -202,12 +200,22 @@ def _validate(model, fields):
         raise CovhubError("服务配置不合法 —— " + "；".join(parts))
 
 
-def import_legacy(cfg, config_path, dry_run=False, overwrite=False):
-    """把旧 targets.yaml 的 services 导进数据库。"""
+def import_legacy(cfg, config_path, dry_run=False, overwrite=False, with_state=True):
+    """把旧 targets.yaml 的 services 和 data/<svc>/state.json 导进数据库。幂等。"""
     log("从 %s 导入服务配置%s" % (config_path, "（试运行）" if dry_run else ""))
     services = importer.import_services(config_path, dry_run=dry_run, overwrite=overwrite)
     counts = {}
     for outcome in services.values():
         counts[outcome] = counts.get(outcome, 0) + 1
     log("服务：%s" % (", ".join("%s %d" % kv for kv in sorted(counts.items())) or "无"))
-    return {"services": services}
+
+    states = {}
+    if with_state:
+        for name, outcome in services.items():
+            if outcome == "invalid" or (dry_run and outcome == "added"):
+                continue        # 试运行时服务还没入库，历史没法挂
+            c = importer.import_state(cfg, name, dry_run=dry_run)
+            states[name] = c
+            log("  %s 的历史：快照 %d、归档 %d、断代 %d，已存在跳过 %d"
+                % (name, c["snapshots"], c["archives"], c["breaks"], c["skipped"]))
+    return {"services": services, "state": states}

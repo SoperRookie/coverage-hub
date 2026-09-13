@@ -19,7 +19,7 @@ from .errors import CovhubError
 from .locks import LOCK
 from .logbuf import capture_logs, log
 from .openapi_spec import OPENAPI_SPEC
-from .state import load_state
+from .db import repo
 from .watch import watch_loop
 
 # --------------------------------------------------------------------------
@@ -115,7 +115,7 @@ def api_dispatch(cfg_path, method, route, params):
         return 400, {"ok": False, "error": "缺少参数 service"}
     if not any(s["name"] == name for s in cfg.get("services", [])):
         return 404, {"ok": False, "error": "配置里没有名为 %r 的服务" % name}
-    svc = find_service(cfg, name)
+    find_service(cfg, name)
 
     if route == "/api/agent-opts":
         if method != "GET":
@@ -154,7 +154,7 @@ def api_dispatch(cfg_path, method, route, params):
     code, output = _capture(fn, cfg, name, **kw)
     body = {"ok": code == 200, "service": name, "log": output}
     if code == 200:
-        body["latest"] = load_state(load_config(cfg_path), svc).get("latest")
+        body["latest"] = repo.latest(name)
     return code, body
 
 

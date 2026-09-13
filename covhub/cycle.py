@@ -7,11 +7,29 @@ import shutil
 
 from .agent import service_channel
 from .collector import get_collector, collector_instances
+from .db import repo
 from .diagnose import diagnose
 from .jacoco import do_dump, exec_sessions, fingerprint, make_report, run_cli
 from .layout import ensure_dirs, svc_dir
 from .logbuf import log
-from .state import load_state, record, save_state, update_state
+
+
+def record(cfg, svc, summary, kind, version=None, extra=None):
+    """把一次报告的统计结果记成一条快照，返回带 id 的 entry。"""
+    entry = {
+        "at": datetime.now().isoformat(timespec="seconds"),
+        "kind": kind,
+        "version": version or svc.get("version"),
+        "instruction": round(summary["INSTRUCTION"]["pct"], 2),
+        "branch": round(summary["BRANCH"]["pct"], 2),
+        "covered": summary["INSTRUCTION"]["covered"],
+        "total": summary["INSTRUCTION"]["total"],
+        "classesHit": summary["CLASS"]["covered"],
+        "classesTotal": summary["CLASS"]["total"],
+    }
+    if extra:
+        entry.update(extra)
+    return repo.add_snapshot(svc["name"], entry)
 
 # --------------------------------------------------------------------------
 # 周期封存与断代检测
@@ -112,28 +130,29 @@ def archive_cycle(cfg, svc, version, entry, out_dir, execs, reason, health=None)
             log("  ! merge 失败，跳过（原始快照不受影响）：%s" % exc)
             merged = None
 
+    manifest = {
+        "service": svc["name"], "version": version,
+        "sealedAt": entry["at"], "sealedBy": reason, "summary": entry,
+        "classfiles": svc["classfiles"],
+        "fingerprint": _safe_fingerprint(cfg, svc),
+        "execCount": len(moved),
+        "matchRate": (health or {}).get("matchRate"),
+        "healthVerdict": (health or {}).get("verdict"),
+        "merged": os.path.basename(merged) if merged else None,
+        "note": "exec 仅对本 manifest 记录的 class 产物有效（JaCoCo 按 CRC64 class id 匹配）",
+    }
     with open(os.path.join(archive, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump({
-            "service": svc["name"], "version": version,
-            "sealedAt": entry["at"], "sealedBy": reason, "summary": entry,
-            "classfiles": svc["classfiles"],
-            "fingerprint": _safe_fingerprint(cfg, svc),
-            "execCount": len(moved),
-            "matchRate": (health or {}).get("matchRate"),
-            "healthVerdict": (health or {}).get("verdict"),
-            "merged": os.path.basename(merged) if merged else None,
-            "note": "exec 仅对本 manifest 记录的 class 产物有效（JaCoCo 按 CRC64 class id 匹配）",
-        }, f, ensure_ascii=False, indent=2)
+        json.dump(manifest, f, ensure_ascii=False, indent=2)
 
-    # 体检结论跟着这一版的结算记录走，日后查「这版数字能不能信」不用翻 manifest
-    if health and health.get("matchRate") is not None:
-        state = load_state(cfg, svc)
-        if state.get("versions"):
-            state["versions"][-1]["matchRate"] = health["matchRate"]
-            save_state(cfg, svc, state)
-
-    # 新周期从零开始：会话基线作废，等下一次采集重新认。
-    update_state(cfg, svc, sessionStart=None)
+    # 磁盘先、DB 后：归档目录和 manifest 都落好了才记一行 archives。体检结论跟着
+    # 这一版的结算记录走，日后查「这版数字能不能信」不用翻 manifest；会话基线
+    # 同时清掉 —— 新周期从零开始，等下一次采集重新认。
+    repo.finish_archive(
+        svc["name"], snapshot_id=entry["id"], version=version,
+        archive_dir=os.path.relpath(archive, root).replace("\\", "/"),
+        sealed_by=reason, sealed_at=entry["at"], fingerprint=manifest["fingerprint"],
+        exec_count=len(moved), match_rate=manifest["matchRate"],
+        health_verdict=manifest["healthVerdict"], merged=manifest["merged"])
     log("  已归档 → %s" % archive)
     return archive
 
@@ -153,8 +172,7 @@ def detect_break(cfg, svc, new_exec):
     if not current:
         return None, None
 
-    state = load_state(cfg, svc)
-    prev = state.get("sessionStart")
+    prev = repo.get_state(svc["name"])["sessionStart"]
     if not prev or prev == current:
         return current, None
 
@@ -175,13 +193,8 @@ def detect_break(cfg, svc, new_exec):
     archive = archive_cycle(cfg, svc, version, entry, os.path.join(root, "current"),
                             existing, "restart-detected")
 
-    state = load_state(cfg, svc)
-    state.setdefault("breaks", []).append({
-        "at": entry["at"], "from": prev, "to": current,
-        "sealedAs": os.path.basename(archive),
-    })
-    state["breaks"] = state["breaks"][-50:]
-    save_state(cfg, svc, state)
+    repo.add_break(svc["name"], at=entry["at"], from_session=prev, to_session=current,
+                   sealed_as=os.path.basename(archive))
     return current, archive
 
 
@@ -202,26 +215,16 @@ def detect_push_break(cfg, svc):
     if get_collector() is None:
         return None
     mixed = get_collector().mixed_versions(svc["name"])
-    state = load_state(cfg, svc)
-    if mixed == bool(state.get("pushMixed")):
+    if mixed == repo.get_state(svc["name"])["pushMixed"]:
         return None                 # 状态没变。一次滚动发版会连着好几轮都成立
 
-    entry = None
+    entry = repo.record_push_mixed(svc["name"], mixed, len(collector_instances(svc["name"])))
     if mixed:
-        entry = {
-            "at": datetime.now().isoformat(timespec="seconds"),
-            "reason": "mixed-versions",
-            "instances": len(collector_instances(svc["name"])),
-        }
-        state.setdefault("breaks", []).append(entry)
-        state["breaks"] = state["breaks"][-50:]
         log("  !! 在线实例跑着两份不同的 class —— 多半是滚动发版正在进行")
         log("     这一批 exec 跨了两个版本，对着任一份 class 产物都只能对上一半")
         log("     发版流程里补一次 predeploy，把旧版本先结算掉")
     else:
         log("  实例的 class 已经统一，混版本状态解除")
-    state["pushMixed"] = mixed
-    save_state(cfg, svc, state)
     return entry
 def snapshot(cfg, svc, reset, kind, version=None):
     ensure_dirs(cfg, svc)
@@ -271,7 +274,7 @@ def snapshot(cfg, svc, reset, kind, version=None):
                           "%s (%s)" % (svc["name"], version or svc.get("version", "runtime")))
     entry = record(cfg, svc, summary, kind, version)
     if session_start:
-        update_state(cfg, svc, sessionStart=session_start)
+        repo.set_session_start(svc["name"], session_start)
     log("  指令 %.1f%%（%d/%d）  分支 %.1f%%  触达类 %d/%d" % (
         summary["INSTRUCTION"]["pct"], summary["INSTRUCTION"]["covered"],
         summary["INSTRUCTION"]["total"], summary["BRANCH"]["pct"],

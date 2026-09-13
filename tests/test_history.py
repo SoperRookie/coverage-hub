@@ -1,0 +1,101 @@
+"""覆盖率历史入库：快照 / 归档 / 断代的读写，以及从旧 state.json + manifest 导入。"""
+import json
+import os
+import shutil
+
+from covhub.db import importer, repo
+from covhub.schemas import ServiceSpec
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SAMPLE = os.path.join(ROOT, "data", "covprobe")
+
+SUMMARY = {"INSTRUCTION": {"covered": 18, "total": 22, "pct": 81.818},
+           "BRANCH": {"covered": 2, "total": 2, "pct": 100.0},
+           "CLASS": {"covered": 1, "total": 1, "pct": 100.0}}
+
+
+def _svc(name="probe"):
+    fields = ServiceSpec(name=name, address="127.0.0.1", port=6399).to_fields()
+    repo.add_service(fields)
+    return fields
+
+
+def _entry(at, kind="dump", version="1.0", **extra):
+    e = {"at": at, "kind": kind, "version": version, "instruction": 81.82, "branch": 100.0,
+         "covered": 18, "total": 22, "classesHit": 1, "classesTotal": 1}
+    e.update(extra)
+    return e
+
+
+def test_snapshot_latest_history_order(db):
+    _svc()
+    for i in range(5):
+        repo.add_snapshot("probe", _entry("2026-09-13T10:00:0%d" % i))
+    assert repo.latest("probe")["at"] == "2026-09-13T10:00:04"
+    hist = repo.history("probe", 3)
+    assert [h["at"][-1] for h in hist] == ["2", "3", "4"]      # 最近 3 条、时间正序
+    assert "reason" not in hist[0] and "matchRate" not in hist[0]
+
+
+def test_archive_sets_match_rate_and_clears_session(db):
+    _svc()
+    repo.set_session_start("probe", "Sun Sep 13 13:11:30 JST 2026")
+    entry = repo.add_snapshot("probe", _entry("2026-09-13T11:00:00", kind="predeploy"))
+    repo.finish_archive("probe", snapshot_id=entry["id"], version="1.0",
+                        archive_dir="versions/1.0", sealed_by="predeploy",
+                        sealed_at=entry["at"], match_rate=97.5, exec_count=3, merged="merged.exec")
+    assert repo.latest("probe")["matchRate"] == 97.5
+    assert repo.get_state("probe")["sessionStart"] is None
+    vs = repo.versions("probe")
+    assert len(vs) == 1 and vs[0]["dir"] == "1.0" and vs[0]["matchRate"] == 97.5
+
+    # 重启封存不算「已结算版本」，但 sealed_by=None 能看到；断代能对上归档目录
+    seal = repo.add_snapshot("probe", _entry("2026-09-13T12:00:00", kind="seal",
+                                              reason="restart-detected", sessionStart="A"))
+    repo.finish_archive("probe", snapshot_id=seal["id"], version="1.0",
+                        archive_dir="versions/1.0-2", sealed_by="restart-detected",
+                        sealed_at=seal["at"])
+    assert [v["dir"] for v in repo.versions("probe")] == ["1.0"]
+    assert [v["dir"] for v in repo.versions("probe", sealed_by=None)] == ["1.0", "1.0-2"]
+    b = repo.add_break("probe", at=seal["at"], from_session="A", to_session="B", sealed_as="1.0-2")
+    assert b == {"at": "2026-09-13T12:00:00", "from": "A", "to": "B", "sealedAs": "1.0-2"}
+    assert repo.breaks("probe", 1) == [b]
+
+
+def test_push_mixed_flips_and_records_once(db):
+    _svc()
+    assert repo.get_state("probe")["pushMixed"] is False
+    b = repo.record_push_mixed("probe", True, 3)
+    assert b["reason"] == "mixed-versions" and b["instances"] == 3
+    assert repo.get_state("probe")["pushMixed"] is True
+    assert repo.record_push_mixed("probe", False, 2) is None
+    assert repo.get_state("probe")["pushMixed"] is False
+    assert len(repo.breaks("probe")) == 1
+
+
+def test_import_state_from_sample_is_idempotent(db, tmp_path):
+    if not os.path.isfile(os.path.join(SAMPLE, "state.json")):
+        import pytest
+        pytest.skip("data/covprobe 样本不存在")
+    data = tmp_path / "data"
+    shutil.copytree(SAMPLE, data / "covprobe")
+    # 再造一个带 breaks 的 state.json，覆盖旧样本里没有的分支
+    state = json.load(open(data / "covprobe" / "state.json", encoding="utf-8"))
+    state["breaks"] = [{"at": "2026-09-02T18:53:00", "from": "X", "to": "Y", "sealedAs": "0.1.0-rc1"},
+                       {"at": "2026-09-02T18:54:00", "reason": "mixed-versions", "instances": 2}]
+    state["sessionStart"] = "Y"
+    json.dump(state, open(data / "covprobe" / "state.json", "w", encoding="utf-8"))
+    cfg = {"dataDir": str(data), "baseDir": str(tmp_path)}
+    _svc("covprobe")
+
+    first = importer.import_state(cfg, "covprobe")
+    assert first["snapshots"] == len(state["history"]) and first["archives"] == 1
+    assert first["breaks"] == 2
+    again = importer.import_state(cfg, "covprobe")
+    assert again["snapshots"] == again["archives"] == again["breaks"] == 0
+    assert again["skipped"] == first["snapshots"] + first["archives"] + first["breaks"]
+
+    assert repo.latest("covprobe")["at"] == state["latest"]["at"]
+    assert repo.versions("covprobe")[0]["dir"] == "0.1.0-rc1"
+    assert repo.breaks("covprobe")[0]["sealedAs"] == "0.1.0-rc1"
+    assert repo.get_state("covprobe")["sessionStart"] == "Y"

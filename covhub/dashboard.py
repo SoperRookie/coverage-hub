@@ -9,7 +9,7 @@ from . import __version__
 from .agent import endpoint_label, reachable, service_channel
 from .collector import get_collector, collector_instances
 from .layout import svc_dir
-from .state import load_state
+from .db import repo
 
 # --------------------------------------------------------------------------
 # 看板
@@ -48,9 +48,8 @@ def dashboard_rows(cfg):
 
     rows = []
     for svc in cfg.get("services", []):
-        state = load_state(cfg, svc)
-        latest = state.get("latest")
-        history = state.get("history", [])[-40:]
+        latest = repo.latest(svc["name"])
+        history = repo.history(svc["name"], 40)
 
         age = None
         if latest:
@@ -79,8 +78,8 @@ def dashboard_rows(cfg):
             "stale": age is not None and age > stale_after,
             "delta": delta,
             "history": history,
-            "versions": state.get("versions", [])[-10:],
-            "breaks": state.get("breaks", [])[-3:],
+            "versions": repo.versions(svc["name"], 10),
+            "breaks": repo.breaks(svc["name"], 3),
             "hasReport": os.path.isfile(
                 os.path.join(svc_dir(cfg, svc), "current", "html", "index.html")),
         })
@@ -215,7 +214,7 @@ def _card(r):
                      % _url(r["name"]))
     if r["versions"]:
         vs = "".join('<a class="vtag" href="%s/versions/%s/html/index.html">%s</a>'
-                     % (_url(r["name"]), _url(v["version"]), _esc(v["version"]))
+                     % (_url(r["name"]), _url(v.get("dir") or v["version"]), _esc(v["version"]))
                      for v in reversed(r["versions"]))
         links.append('<div class="vers"><span>已结算</span>%s</div>' % vs)
 
