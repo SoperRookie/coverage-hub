@@ -104,17 +104,10 @@ def upgrade():
 
 
 def downgrade():
-    with op.batch_alter_table('breaks', schema=None) as batch_op:
-        batch_op.drop_index('ix_breaks_service_at')
-
-    op.drop_table('breaks')
-    with op.batch_alter_table('archives', schema=None) as batch_op:
-        batch_op.drop_index('ix_archives_service_sealed')
-
-    op.drop_table('archives')
-    with op.batch_alter_table('snapshots', schema=None) as batch_op:
-        batch_op.drop_index('ix_snapshots_service_at')
-
-    op.drop_table('snapshots')
-    op.drop_table('service_state')
-    op.drop_table('services')
+    # 直接 drop 表，别先 drop 索引：MySQL 会拿 (service_id, at) 这种复合索引给外键用，
+    # 单独 drop 会报 "needed in a foreign key constraint"
+    op.drop_table("breaks")
+    op.drop_table("archives")
+    op.drop_table("snapshots")
+    op.drop_table("service_state")
+    op.drop_table("services")

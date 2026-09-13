@@ -24,6 +24,10 @@ def upgrade(url, revision="head"):
     command.upgrade(alembic_config(url), revision)
 
 
+def downgrade(url, revision="base"):
+    command.downgrade(alembic_config(url), revision)
+
+
 def current(url):
     """当前库的版本号（没建过表时为 None）。"""
     with db_engine.configure(url).connect() as conn:

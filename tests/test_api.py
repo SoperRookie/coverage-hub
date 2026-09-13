@@ -14,7 +14,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 @pytest.fixture
-def hub(tmp_path, monkeypatch):
+def hub(tmp_path, monkeypatch, db_url_for_app):
     data = tmp_path / "data"
     (data / "svc" / "current").mkdir(parents=True)
     (data / "svc" / "current" / "jacoco.xml").write_text("<report/>", encoding="utf-8")
@@ -22,7 +22,7 @@ def hub(tmp_path, monkeypatch):
         "jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
         "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
         "dataDir": str(data),
-        "database": {"url": "sqlite:///" + str(tmp_path / "t.db").replace("\\", "/")},
+        "database": {"url": db_url_for_app},
         "serve": {"token": "secret"},
     }
     cfg_path = tmp_path / "covhub.json"
