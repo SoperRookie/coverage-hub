@@ -1,0 +1,38 @@
+/* 不引任何外部字体 / CDN：hub 常在内网 */
+:root {
+  --ink: #1f2329;
+  --muted: #6b7280;
+  --line: #e5e7eb;
+  --bg: #f6f7f9;
+  --card: #ffffff;
+}
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  font-size: 14px;
+}
+.page { max-width: 1280px; margin: 0 auto; padding: 16px 20px 40px; }
+.topbar { display: flex; align-items: baseline; gap: 16px; margin-bottom: 16px; }
+.topbar h1 { font-size: 20px; margin: 0; }
+.topbar .sub { color: var(--muted); font-size: 12px; }
+.topbar .spacer { flex: 1; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-bottom: 14px; }
+.card h2 { font-size: 15px; margin: 0 0 10px; }
+.card h2 .hint { font-weight: normal; color: var(--muted); font-size: 12px; margin-left: 8px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+.metric { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; }
+.metric .label { color: var(--muted); font-size: 12px; }
+.metric .value { font-size: 26px; font-weight: 600; margin: 4px 0 2px; font-variant-numeric: tabular-nums; }
+.metric .denom { color: var(--muted); font-size: 12px; }
+.metric .bar { height: 4px; border-radius: 2px; background: var(--line); margin-top: 8px; overflow: hidden; }
+.metric .bar > i { display: block; height: 100%; }
+.muted { color: var(--muted); }
+.mono { font-family: Consolas, "Cascadia Mono", Menlo, monospace; font-size: 12px; }
+.num { font-variant-numeric: tabular-nums; }
+a.plain { color: #2f6fed; text-decoration: none; }
+a.plain:hover { text-decoration: underline; }
+.alert { padding: 8px 12px; border-radius: 6px; margin-bottom: 8px; background: #fff7e6; border: 1px solid #ffe1a8; }
+.legend { display: inline-flex; align-items: center; gap: 6px; margin-right: 14px; font-size: 12px; color: var(--muted); }
+.legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }

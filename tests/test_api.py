@@ -60,7 +60,8 @@ def test_status_keeps_grep_friendly_format(hub):
 
 
 def test_static_gate_and_cookie_grant(hub):
-    assert hub.get("/").status_code == 401
+    # 面板产物免令牌（配了 token 的 hub 首页得先能打开）；dataDir 照旧拦
+    assert hub.get("/").status_code in (200, 404)
     assert hub.get("/svc/current/jacoco.xml").status_code == 401
     r = hub.get("/?token=secret", follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"] == "/"
@@ -71,6 +72,10 @@ def test_static_gate_and_cookie_grant(hub):
     assert r.status_code == 200 and r.text == "<report/>"
     # /api/* 上带 ?token= 只放行，不跳转
     assert hub.get("/api/health?token=secret", follow_redirects=False).status_code == 200
+    # 带错令牌打开首页不报 401：让 SPA 自己去撞 401 再弹输入框
+    assert hub.get("/?token=wrong", follow_redirects=False).status_code in (200, 404)
+    # 产物文件不落到 dataDir 门禁；未知路径还是 404，不回落 index.html
+    assert hub.get("/nonexistent.png", headers=H).status_code == 404
 
 
 def test_static_rejects_traversal_and_unknown_api(hub):

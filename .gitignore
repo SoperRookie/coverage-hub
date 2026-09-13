@@ -34,3 +34,8 @@ covhub.db-*
 # Python
 __pycache__/
 *.py[cod]
+
+# 前端：只忽略依赖，构建产物 covhub/webui/ 进版本库（改前端后在开发机 npm run build 一起提交）
+web/node_modules/
+web/auto-imports.d.ts
+web/components.d.ts

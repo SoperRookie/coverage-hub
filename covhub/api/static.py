@@ -1,18 +1,23 @@
-"""dataDir 的静态服务 —— 看板首页、JaCoCo 原生报告、jacoco.xml 都从这里出。
+"""静态文件：Vue 面板的产物（covhub/webui）与 dataDir 里的报告。
 
-配了令牌就必须和 /api/ 一起拦：这底下不只有报告，artifacts/ 是线上跑的那份
-字节码（反编译即源码），exec/ 是不可再生的执行轨迹。只护住 /api/ 而把整棵树
-敞开，等于那道门白装。
+顺序是**产物优先、dataDir 其次**：产物是版本库里的有限集合（index.html、assets/*），
+被它遮住的 dataDir 路径可枚举；反过来一个叫 assets 的服务会把面板打瘸（ServiceSpec
+已把这些名字列为保留名）。
 
-不用 StaticFiles 挂载：它跑在依赖注入之外，拿不到「?token= 种 Cookie 再 302」
-那套逻辑。
+门禁：面板产物**免令牌** —— 否则配了 token 的 hub 首页就是一段 401 JSON，SPA 根本
+加载不出来，「收到 401 → 弹令牌输入 → 跳 ?token=」的流程无从开始；产物是公开的
+构建产物，不含秘密。dataDir 照旧拦：底下有线上跑的字节码和不可再生的 exec。
+`?token=` 种 Cookie 再 302 的逻辑两边都保留。
+
+不给未知路径回落到 index.html：push-runtime.sh、Jenkins 库用 curl -sSf 取
+/<svc>/versions/<v>/jacoco.xml，404 才是它们要的失败信号。
 """
 
 import html
 import os
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from ..config import load_config
@@ -21,10 +26,48 @@ from .responses import error
 
 router = APIRouter(include_in_schema=False)
 
+WEB_DIR = Path(__file__).resolve().parent.parent / "webui"
+
+NO_CACHE = {"Cache-Control": "no-cache"}
+IMMUTABLE = {"Cache-Control": "public, max-age=31536000, immutable"}
+
+MEDIA = {".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
+         ".xml": "application/xml; charset=utf-8", ".csv": "text/csv; charset=utf-8",
+         ".json": "application/json; charset=utf-8", ".css": "text/css; charset=utf-8",
+         ".js": "application/javascript; charset=utf-8", ".map": "application/json",
+         ".gif": "image/gif", ".png": "image/png", ".svg": "image/svg+xml", ".ico": "image/x-icon",
+         ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
+         ".webmanifest": "application/manifest+json", ".txt": "text/plain; charset=utf-8",
+         ".exec": "application/octet-stream", ".class": "application/java-vm",
+         ".diff": "text/plain; charset=utf-8"}
+
 
 def get_hub_cfg(request: Request):
     # 静态目录只要 dataDir 和令牌，不必查库
     return load_config(request.app.state.cfg_path)
+
+
+def web_dir(cfg):
+    return Path(cfg.get("webDir") or WEB_DIR)
+
+
+def _grant_if_token(request, cfg):
+    """面板产物免令牌，但 ?token= 带对了照样种 Cookie 并 302；带错了就当没带，让 SPA 自己去撞 401。"""
+    if "token" not in request.query_params:
+        return None
+    try:
+        granted = static_gate(request, cfg)
+    except HTTPException:
+        return None
+    return granted if isinstance(granted, RedirectResponse) else None
+
+
+def _inside(root, path):
+    """resolve 之后必须仍在 root 里（也挡住符号链接逃逸）；越界返回 None。"""
+    target = (root / path).resolve() if path else root
+    if target != root and root not in target.parents:
+        return None
+    return target
 
 
 @router.get("/{path:path}")
@@ -32,17 +75,33 @@ def get_hub_cfg(request: Request):
 def static(path: str, request: Request, cfg: dict = Depends(get_hub_cfg)):
     if path.startswith("api/") or path == "api":
         return error(404, "未知接口")
+
+    # 1. 面板产物（免令牌）。带对 ?token= 仍然种 Cookie 并跳回干净地址，
+    #    这样浏览器第一次打开 /?token=xxx 之后，SPA 的 /api/* 请求就有 Cookie 了
+    web = web_dir(cfg).resolve() if web_dir(cfg).is_dir() else None
+    if web is not None:
+        target = _inside(web, path)
+        if target is not None and target.is_file():
+            granted = _grant_if_token(request, cfg)
+            if granted is not None:
+                return granted
+            headers = IMMUTABLE if path.startswith("assets/") else NO_CACHE
+            return FileResponse(str(target), media_type=_media_type(target), headers=headers)
+        if not path:
+            index = web / "index.html"
+            if index.is_file():
+                granted = _grant_if_token(request, cfg)
+                if granted is not None:
+                    return granted
+                return FileResponse(str(index), media_type=MEDIA[".html"], headers=NO_CACHE)
+
+    # 2. dataDir（受令牌门禁）
     denied = static_gate(request, cfg)
     if denied is not None:
         return denied
-
     root = Path(cfg["dataDir"]).resolve()
-    target = (root / path).resolve() if path else root
-    # 防穿越：resolve 之后必须仍在 dataDir 里（也挡住符号链接逃逸）。拒绝统一 404，
-    # 别用 403 泄露目录结构
-    if target != root and root not in target.parents:
-        return error(404, "未知路径")
-    if not target.exists():
+    target = _inside(root, path)
+    if target is None or not target.exists():
         return error(404, "未知路径")
 
     if target.is_dir():
@@ -53,19 +112,15 @@ def static(path: str, request: Request, cfg: dict = Depends(get_hub_cfg)):
                                     status_code=301)
         index = target / "index.html"
         if index.is_file():
-            return FileResponse(str(index), media_type="text/html; charset=utf-8")
-        return HTMLResponse(_listing(target, request.url.path))
-    return FileResponse(str(target), media_type=_media_type(target))
+            return FileResponse(str(index), media_type=MEDIA[".html"], headers=NO_CACHE)
+        return HTMLResponse(_listing(target, request.url.path), headers=NO_CACHE)
+    # current/ 每次采集都会被重写，别让浏览器按启发式缓存拿到几分钟前的报告
+    headers = NO_CACHE if "/current/" in ("/" + path) or path.startswith("current/") else None
+    return FileResponse(str(target), media_type=_media_type(target), headers=headers)
 
 
 def _media_type(target):
-    ext = target.suffix.lower()
-    return {".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
-            ".xml": "application/xml; charset=utf-8", ".csv": "text/csv; charset=utf-8",
-            ".json": "application/json; charset=utf-8", ".css": "text/css",
-            ".js": "application/javascript", ".gif": "image/gif", ".png": "image/png",
-            ".exec": "application/octet-stream", ".class": "application/java-vm",
-            ".txt": "text/plain; charset=utf-8"}.get(ext)
+    return MEDIA.get(target.suffix.lower())
 
 
 def _listing(target, url_path):

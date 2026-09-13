@@ -25,7 +25,11 @@ dev = ["pytest>=8", "pyflakes", "httpx>=0.27"]
 covhub = "covhub.cli:main"
 
 [tool.setuptools]
-packages = ["covhub"]
+packages = ["covhub", "covhub.api", "covhub.db", "covhub.db.migrations", "covhub.db.migrations.versions"]
+
+[tool.setuptools.package-data]
+# 前端产物随包分发：hub 机器不装 node
+covhub = ["webui/**", "db/migrations/script.py.mako"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
