@@ -390,7 +390,9 @@ python covhub.py service show order-service
 
 想先看看板长什么样，`python tools/seed_demo.py` 会往当前 hub 里灌两个项目（商城购物、充值支付）各 10 个微服务、
 每个服务 3–5 个版本的完整数据（快照、归档、diff、单测报告，磁盘上带 jacoco.xml / 报告 / 源码片段），
-`--reset` 先清掉上次灌的。被测服务并不真的存在，看板上是离线 / 未知。
+`--reset` 先清掉上次灌的。再跑 `python tools/demo_services.py start`（要 JDK）会把这 20 个服务真的起成 20 个
+小 JVM（各 48 MB 堆，挂 JaCoCo agent，随机调自己的方法），hub 就能实时采到数据；`stop` 停掉、`status` 看谁在跑。
+不起 JVM 的话看板上是离线 / 未知。
 
 ## 七、从 1.x 升级
 
