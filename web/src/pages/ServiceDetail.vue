@@ -46,7 +46,7 @@ const metrics = computed<Metric[]>(() => d.value ? [
 
 <template>
   <div class="topbar">
-    <router-link class="plain" to="/">← 看板</router-link>
+    <router-link class="plain" :to="d?.project ? `/projects/${encodeURIComponent(d.project)}` : '/'">← {{ d?.project || "项目" }}</router-link>
     <h1>{{ name }}</h1>
     <span v-if="d" class="sub">
       <template v-if="d.project">项目 {{ d.project }} · </template>{{ d.channel }} · {{ d.endpoint }} · 版本 <span class="mono">{{ d.version || "—" }}</span>
