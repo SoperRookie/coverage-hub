@@ -95,7 +95,7 @@ function onError(err: unknown): boolean {
           </el-radio-group>
         </div>
         <div>covhub {{ version || "" }}</div>
-        <div><a href="docs" target="_blank">接口文档 (Swagger)</a> · <a href="api/openapi.json" target="_blank">openapi.json</a></div>
+        <div><a href="docs" target="_blank">接口文档 (Swagger)</a></div>
         <div>覆盖率不按阈值着色，颜色只表示运维状态</div>
       </div>
     </aside>

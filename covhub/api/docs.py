@@ -29,7 +29,6 @@ PAGE = """<!doctype html>
 <body>
   <div class="covhub-bar">
     <a href="./">← 回看板</a>
-    <a href="./api/openapi.json" target="_blank">openapi.json</a>
     带令牌的接口先点右侧 <b>Authorize</b> 填 <code>X-Covhub-Token</code>；写接口会真的执行（dump / predeploy 会改数据）。
   </div>
   <div id="swagger-ui"></div>
