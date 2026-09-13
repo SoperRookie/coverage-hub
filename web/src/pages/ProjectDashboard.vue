@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import "element-plus/es/components/message/style/css";
@@ -7,12 +7,15 @@ import "element-plus/es/components/message-box/style/css";
 import { api, type Overview, type Project, type ServiceRow } from "../api";
 import ProjectDialog from "../components/ProjectDialog.vue";
 import ServiceTable from "../components/ServiceTable.vue";
+import type { Nav } from "../App.vue";
 import { METRIC_COLORS } from "../ui/colors";
 
 // 一个项目的面板：它下面的服务，以及往里加 / 移出服务。name 为 __unassigned 时是未分组池。
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
 const router = useRouter();
 const UNASSIGNED = "__unassigned";
+const nav = inject<Nav>("nav")!;
+watch(() => props.name, (n) => { nav.project = n; }, { immediate: true });
 
 const data = ref<Overview | null>(null);
 const project = ref<Project | null>(null);

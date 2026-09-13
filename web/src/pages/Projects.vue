@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import { useRouter } from "vue-router";
+import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
 import { api, type Overview, type Project } from "../api";
-import ProjectDialog from "../components/ProjectDialog.vue";
+import type { Nav } from "../App.vue";
 import { METRIC_COLORS, pct } from "../ui/colors";
 
 // 首页：只有项目。项目是最上层的东西，服务在项目里面；点卡片进项目面板。
 const props = defineProps<{ onError: (err: unknown) => boolean }>();
-const router = useRouter();
+const nav = inject<Nav>("nav")!;
+nav.project = "";
 const data = ref<Overview | null>(null);
 const projects = ref<Project[]>([]);
 const loading = ref(true);
@@ -51,9 +51,6 @@ const cards = computed<Card[]>(() => {
     };
   });
 });
-
-const dialogOpen = ref(false);
-function onSaved(name: string) { router.push(`/projects/${encodeURIComponent(name)}`); }
 </script>
 
 <template>
@@ -62,13 +59,12 @@ function onSaved(name: string) { router.push(`/projects/${encodeURIComponent(nam
     <span v-if="data" class="sub">{{ projects.length }} 个项目 · {{ data.counts.services }} 个服务 · 在线 {{ data.counts.online }} · 离线 {{ data.counts.offline }}
       <template v-if="data.counts.attention"> · 需关注 {{ data.counts.attention }}</template></span>
     <span class="spacer"></span>
-    <el-button size="small" type="primary" @click="dialogOpen = true">新建项目</el-button>
     <el-button size="small" @click="load">刷新</el-button>
   </div>
 
   <div v-if="loading" class="muted">加载中…</div>
   <div v-else-if="!projects.length" class="card muted">
-    还没有项目。先「新建项目」，再把服务加进去（服务用 <code>covhub service add</code> 登记，或从「未分组」里添加）。
+    还没有项目。先用顶部的「新建项目」，再把服务加进去（服务用 <code>covhub service add</code> 登记，或从「未分组」里添加）。
   </div>
 
   <div class="cards">
@@ -103,8 +99,6 @@ function onSaved(name: string) { router.push(`/projects/${encodeURIComponent(nam
       <div class="pcard-counts"><span>{{ data.unassigned.length }} 个服务</span></div>
     </router-link>
   </div>
-
-  <ProjectDialog v-model="dialogOpen" :editing="null" :on-error="onError" @saved="onSaved" />
 </template>
 
 <style scoped>

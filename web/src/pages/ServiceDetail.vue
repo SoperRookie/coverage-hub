@@ -1,20 +1,23 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, inject, onMounted, ref, watch } from "vue";
 import { api, type Brief, type Detail } from "../api";
 import IncrementalTable from "../components/IncrementalTable.vue";
 import StatusTag from "../components/StatusTag.vue";
 import TrendChart from "../components/TrendChart.vue";
+import type { Nav } from "../App.vue";
 import { METRIC_COLORS, ago, pct, when } from "../ui/colors";
 
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
 const d = ref<Detail | null>(null);
 const loading = ref(true);
 const incTab = ref<"runtime" | "unit">("runtime");
+const nav = inject<Nav>("nav")!;
 
 async function load() {
   loading.value = true;
   try {
     d.value = await api.detail(props.name);
+    nav.project = d.value.project ?? "__unassigned";
   } catch (err) {
     props.onError(err);
   } finally {
