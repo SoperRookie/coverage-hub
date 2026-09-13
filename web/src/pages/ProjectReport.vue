@@ -11,6 +11,7 @@ import PageHeader from "../components/PageHeader.vue";
 import ServiceBars from "../components/ServiceBars.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { SERIES, ago, pct, when } from "../ui/colors";
+import { exportPdf } from "../ui/pdf";
 
 // 项目报表：一页看完项目下所有服务的现状，以及某段时间内结算过的版本和收到的单测报告。
 // 不算项目平均覆盖率 —— 各服务的百分比平均起来只会误导，这里给的是逐服务、逐版本的原始数字。
@@ -107,9 +108,24 @@ function exportCsv() {
   ElMessage.success("已导出 CSV");
 }
 const print = () => window.print();
+const root = ref<HTMLElement | null>(null);
+const exporting = ref(false);
+async function exportPdfFile() {
+  if (!root.value || !rep.value) return;
+  exporting.value = true;
+  try {
+    await exportPdf(root.value, `covhub-${rep.value.project}-${days.value ? days.value + "d" : "all"}.pdf`);
+    ElMessage.success("已导出 PDF");
+  } catch (err) {
+    ElMessage.error("导出失败：" + (err instanceof Error ? err.message : String(err)));
+  } finally {
+    exporting.value = false;
+  }
+}
 </script>
 
 <template>
+  <div ref="root">
   <PageHeader :title="`${title} · 报表`"
               :crumbs="[{ label: '项目总览', to: '/' }, { label: isPool ? '未分组' : title, to: isPool ? '/unassigned' : `/projects/${encodeURIComponent(name)}` }, { label: '报表' }]">
     <template #meta>
@@ -121,7 +137,8 @@ const print = () => window.print();
         <el-radio-button v-for="d in DAYS" :key="d.v" :value="d.v">{{ d.l }}</el-radio-button>
       </el-radio-group>
       <el-button size="small" class="no-print" :disabled="!rep" @click="exportCsv">导出 CSV</el-button>
-      <el-button size="small" class="no-print" :disabled="!rep" @click="print">打印 / PDF</el-button>
+      <el-button size="small" type="primary" plain class="no-print" :disabled="!rep" :loading="exporting" @click="exportPdfFile">导出 PDF</el-button>
+      <el-button size="small" class="no-print" :disabled="!rep" @click="print">打印</el-button>
     </template>
   </PageHeader>
 
@@ -217,4 +234,5 @@ const print = () => window.print();
       没有该版本 diff 时显示「—」。报表不给项目平均值 —— 各服务代码量差异很大，平均数没有意义。
     </p>
   </template>
+  </div>
 </template>

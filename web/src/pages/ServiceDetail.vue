@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, inject, onMounted, reactive, ref, watch } from "vue";
+import { computed, inject, nextTick, onMounted, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import "element-plus/es/components/message/style/css";
@@ -14,6 +14,7 @@ import PageHeader from "../components/PageHeader.vue";
 import StatusTag from "../components/StatusTag.vue";
 import TrendChart from "../components/TrendChart.vue";
 import { SERIES, ago, num, pct, when } from "../ui/colors";
+import { exportPdf } from "../ui/pdf";
 
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
 const route = useRoute();
@@ -92,9 +93,30 @@ async function sealNow() {
   } catch { return; }
   await run("predeploy", () => api.predeploy(props.name, v || undefined), "结算归档");
 }
+const root = ref<HTMLElement | null>(null);
+const exporting = ref(false);
+// 导出 PDF 时所有页签一起渲染：一份完整的服务报告（概览、新增代码、已结算版本、单测、配置）
+const printAll = ref(false);
+async function exportPdfFile() {
+  if (!root.value) return;
+  exporting.value = true;
+  printAll.value = true;
+  await nextTick();
+  await new Promise((r) => setTimeout(r, 300));
+  try {
+    await exportPdf(root.value, `covhub-${props.name}${version.value ? "-" + version.value : ""}.pdf`);
+    ElMessage.success("已导出 PDF");
+  } catch (err) {
+    ElMessage.error("导出失败：" + (err instanceof Error ? err.message : String(err)));
+  } finally {
+    exporting.value = false;
+    printAll.value = false;
+  }
+}
 function onMore(c: string) {
   if (c === "seal") sealNow();
   else if (c === "report") reportNow();
+  else if (c === "pdf") exportPdfFile();
   else load();
 }
 
@@ -126,6 +148,7 @@ const crumbs = computed(() => [
 </script>
 
 <template>
+  <div ref="root">
   <PageHeader :title="name" :crumbs="crumbs">
     <template #meta>
       <template v-if="d">
@@ -136,18 +159,19 @@ const crumbs = computed(() => [
       </template>
     </template>
     <template #actions>
-      <el-select v-if="d" :model-value="version ?? CURRENT" size="small" style="width: 250px" @change="switchVersion">
+      <el-select v-if="d" :model-value="version ?? CURRENT" size="small" style="width: 250px" class="no-print" @change="switchVersion">
         <el-option :value="CURRENT" label="当前周期" />
         <el-option v-for="a in d.runtime.archives" :key="a.dir" :value="a.dir" :label="archiveLabel(a)" />
       </el-select>
-      <a v-if="d?.runtime.reportUrl" :href="d.runtime.reportUrl" target="_blank"><el-button size="small">JaCoCo 报告</el-button></a>
-      <el-button size="small" type="primary" :loading="running === 'dump'" :disabled="!!running" @click="dumpNow">立即采集</el-button>
-      <el-dropdown trigger="click" @command="onMore">
-        <el-button size="small" :disabled="!!running">更多 ▾</el-button>
+      <a v-if="d?.runtime.reportUrl" :href="d.runtime.reportUrl" target="_blank" class="no-print"><el-button size="small">JaCoCo 报告</el-button></a>
+      <el-button size="small" type="primary" class="no-print" :loading="running === 'dump'" :disabled="!!running" @click="dumpNow">立即采集</el-button>
+      <el-dropdown trigger="click" class="no-print" @command="onMore">
+        <el-button size="small" :disabled="!!running" :loading="exporting">更多 ▾</el-button>
         <template #dropdown>
           <el-dropdown-menu>
             <el-dropdown-item command="seal">结算归档（predeploy）</el-dropdown-item>
             <el-dropdown-item command="report">重出报告</el-dropdown-item>
+            <el-dropdown-item command="pdf" divided>导出 PDF 报告</el-dropdown-item>
             <el-dropdown-item command="refresh" divided>刷新</el-dropdown-item>
           </el-dropdown-menu>
         </template>
@@ -176,7 +200,7 @@ const crumbs = computed(() => [
       <Donut v-for="m in metrics" :key="m.label" :label="m.label" :value="m.value" :sub="m.sub" :color="m.color" :ratio="m.ratio" :dim="m.dim" />
     </div>
 
-    <el-tabs v-model="tab" class="tabs">
+    <el-tabs v-model="tab" class="tabs no-print">
       <el-tab-pane label="概览" name="overview" />
       <el-tab-pane label="新增代码" name="inc" />
       <el-tab-pane label="已结算版本" name="versions" />
@@ -186,13 +210,13 @@ const crumbs = computed(() => [
     </el-tabs>
 
     <!-- 概览 -->
-    <template v-if="tab === 'overview'">
+    <template v-if="tab === 'overview' || printAll">
       <div class="card">
         <div class="card-head">
           <h2>运行时趋势</h2><span class="hint">最近 {{ d.runtime.history.length }} 次采集</span>
           <span class="spacer"></span>
           <span class="legend"><i :style="{ background: SERIES.total }"></i>总覆盖</span>
-          <span class="legend"><i class="dash" :style="{ color: SERIES.inc }"></i>新增代码</span>
+          <span class="legend"><i class="dash" :style="{ background: `repeating-linear-gradient(90deg, ${SERIES.inc} 0 3px, transparent 3px 5px)` }"></i>新增代码</span>
         </div>
         <div class="card-body">
           <TrendChart v-if="d.runtime.history.length" :history="d.runtime.history" />
@@ -211,7 +235,7 @@ const crumbs = computed(() => [
     </template>
 
     <!-- 新增代码 -->
-    <div v-if="tab === 'inc'" class="card">
+    <div v-if="tab === 'inc' || printAll" class="card">
       <div class="card-head">
         <h2>新增代码明细</h2>
         <el-radio-group v-model="incTab" size="small">
@@ -229,7 +253,7 @@ const crumbs = computed(() => [
     </div>
 
     <!-- 已结算版本 -->
-    <div v-if="tab === 'versions'" class="card">
+    <div v-if="tab === 'versions' || printAll" class="card">
       <div class="card-head"><h2>已结算版本</h2><span class="hint">predeploy 结算的归档；同名归档退让成 -2 时链接指向真实目录</span></div>
       <div class="card-body flush">
         <el-table v-if="d.runtime.versions.length" :data="[...d.runtime.versions].reverse()" size="default">
@@ -254,7 +278,7 @@ const crumbs = computed(() => [
     </div>
 
     <!-- 单测 -->
-    <div v-if="tab === 'unit'" class="card">
+    <div v-if="tab === 'unit' || printAll" class="card">
       <div class="card-head"><h2>单测覆盖率</h2><span class="hint">来自构建流水线，最近 {{ d.unit.history.length }} 个版本</span>
         <span class="spacer"></span><a v-if="d.unit.xmlUrl" :href="d.unit.xmlUrl" target="_blank" style="font-size: 12px">最新 jacoco.xml</a></div>
       <div class="card-body flush">
@@ -272,7 +296,7 @@ const crumbs = computed(() => [
     </div>
 
     <!-- 配置 -->
-    <div v-if="tab === 'config'" class="card">
+    <div v-if="tab === 'config' || printAll" class="card">
       <div class="card-head"><h2>采集配置</h2><span class="hint">改配置用 <code>covhub service update</code></span></div>
       <div class="card-body">
         <el-descriptions :column="1" size="small" border>
@@ -293,6 +317,8 @@ const crumbs = computed(() => [
       </div>
     </div>
   </template>
+
+  </div>
 
   <!-- 手动触发的结果：hub 把这次执行的日志原样回来，失败原因也在里面（409 时 ok=false） -->
   <el-dialog v-model="result.open" :title="result.title" width="640px">
