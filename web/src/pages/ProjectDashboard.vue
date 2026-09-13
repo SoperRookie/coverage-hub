@@ -52,18 +52,24 @@ const unassigned = computed(() => data.value?.unassigned ?? []);
 const allProjects = ref<Project[]>([]);
 watch(data, async () => { if (isPool.value) allProjects.value = (await api.projects()).projects; });
 
-// ---- 添加服务（从未分组池挑）----
+// ---- 添加服务：列出全部服务，勾上就归进来、取消就移出，立即生效，不用再点确认 ----
 const addOpen = ref(false);
-const picked = ref<string[]>([]);
-async function addPicked() {
+const allServices = computed<ServiceRow[]>(() => {
+  const o = data.value;
+  if (!o) return [];
+  return [...o.projects.flatMap((p) => p.services), ...o.unassigned].sort((a, b) => a.name.localeCompare(b.name));
+});
+const busy = ref<Set<string>>(new Set());
+async function toggle(row: ServiceRow, checked: boolean) {
+  busy.value.add(row.name);
   try {
-    for (const svc of picked.value) await api.assignService(svc, props.name);
-    ElMessage.success(`已加入 ${picked.value.length} 个服务`);
-    addOpen.value = false;
-    picked.value = [];
+    await api.assignService(row.name, checked ? props.name : null);
+    ElMessage.success(checked ? `${row.name} 已归入本项目` : `${row.name} 已移出`);
     await load();
   } catch (err) {
     if (!props.onError(err)) ElMessage.error(err instanceof Error ? err.message : String(err));
+  } finally {
+    busy.value.delete(row.name);
   }
 }
 
@@ -121,7 +127,7 @@ async function removeProject() {
     </span>
     <span class="spacer"></span>
     <template v-if="!isPool">
-      <el-button size="small" type="primary" plain :disabled="!unassigned.length" @click="addOpen = true">添加服务</el-button>
+      <el-button size="small" type="primary" plain @click="addOpen = true">添加服务</el-button>
       <el-button size="small" @click="editOpen = true">编辑</el-button>
       <el-button size="small" type="danger" plain @click="removeProject">删除项目</el-button>
     </template>
@@ -157,16 +163,20 @@ async function removeProject() {
     <ServiceTable v-else :rows="rows" mode="project" @remove="remove" />
   </div>
 
-  <el-dialog v-model="addOpen" title="添加服务" width="480px">
-    <p class="muted" style="margin-top: 0">从未分组的服务里挑（要登记新服务用 <code>covhub service add</code>）。</p>
-    <el-checkbox-group v-model="picked">
-      <div v-for="r in unassigned" :key="r.name" style="margin-bottom: 6px">
-        <el-checkbox :value="r.name"><span class="mono">{{ r.name }}</span> <span class="muted">{{ r.channel }} · {{ r.endpoint }}</span></el-checkbox>
-      </div>
-    </el-checkbox-group>
+  <el-dialog v-model="addOpen" title="本项目包含的服务" width="520px">
+    <p class="muted" style="margin-top: 0">勾上就归入本项目，取消就移出，立即生效。要登记新服务用 <code>covhub service add</code>。</p>
+    <div v-if="!allServices.length" class="muted">还没有登记任何服务。</div>
+    <div v-for="r in allServices" :key="r.name" style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px">
+      <el-checkbox :model-value="r.project === name" :disabled="busy.has(r.name)" @change="(v: boolean | string | number) => toggle(r, !!v)">
+        <span class="mono">{{ r.name }}</span>
+      </el-checkbox>
+      <span class="muted" style="font-size: 12px">{{ r.channel }} · {{ r.endpoint }}</span>
+      <span class="spacer" style="flex: 1"></span>
+      <el-tag v-if="r.project && r.project !== name" size="small" type="info" effect="plain">当前在 {{ r.project }}</el-tag>
+      <el-tag v-else-if="!r.project" size="small" type="info" effect="plain">未分组</el-tag>
+    </div>
     <template #footer>
-      <el-button @click="addOpen = false">取消</el-button>
-      <el-button type="primary" :disabled="!picked.length" @click="addPicked">加入</el-button>
+      <el-button @click="addOpen = false">关闭</el-button>
     </template>
   </el-dialog>
 
