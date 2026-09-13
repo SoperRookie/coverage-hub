@@ -15,7 +15,7 @@ java、不放配置文件 —— 它们只需要 `curl`，以及被测 JVM 里�
 >
 > **从 1.x 升级**：服务配置和覆盖率历史现在在数据库里，看板是独立前端。见 [§ 七 从 1.x 升级](#七从-1x-升级)。
 >
-> **架构图**在 [docs/diagrams/](docs/diagrams/README.md)（部署拓扑、一次采集、发版流程、周期状态、push 通道、
+> **建库建表 SQL**（MySQL 8，DBA 用）在 [docs/sql/](docs/sql/README.md)；**架构图**在 [docs/diagrams/](docs/diagrams/README.md)（部署拓扑、一次采集、发版流程、周期状态、push 通道、
 > 构建期数据、数据模型、看板导航，PlantUML）；各版本改动见 [CHANGELOG.md](CHANGELOG.md)。
 
 ---

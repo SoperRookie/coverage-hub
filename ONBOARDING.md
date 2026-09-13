@@ -182,10 +182,14 @@ python3 covhub.py init              # 生成 covhub.yaml 模板（--json 生成 
 建一个空库（MySQL 8 为例；PostgreSQL 同理，驱动 `pip3 install '.[postgres]'`）：
 
 ```sql
-CREATE DATABASE covhub CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+CREATE DATABASE covhub CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;
 CREATE USER 'covhub'@'%' IDENTIFIED BY '<密码>';
 GRANT ALL ON covhub.* TO 'covhub'@'%';
 ```
+
+现成的脚本在 `docs/sql/`：`mysql-01-建库建用户.sql` 就是上面这几条；表默认由 hub 首次启动时自动建
+（`database.autoUpgrade: true`）。公司里 DBA 不给应用账号 DDL 权限的话，用 `mysql-02-建表.sql` 手工建表、
+账号只给 DML、配置里 `autoUpgrade: false`，详见 `docs/sql/README.md`。
 
 `init` 生成的是带注释的模板，把 hub 级别的几项配好（**服务配置不在这个文件里**，它们在
 数据库里，§3 用 `service add` 登记）：
