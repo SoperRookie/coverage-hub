@@ -19,3 +19,4 @@ covhub/webui/** -diff -text linguist-generated=true
 *.woff2 binary
 *.woff binary
 *.md text eol=lf
+*.png binary
