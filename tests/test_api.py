@@ -146,19 +146,18 @@ def test_docs_page_is_open_and_self_hosted(hub):
         assert r.status_code == 503
     else:
         assert r.status_code == 200 and "http://" not in r.text and "https://" not in r.text
-        assert "./swagger/swagger-ui-bundle.js" in r.text and "./api/openapi.json" in r.text
+        assert "./swagger/swagger-ui-bundle.js" in r.text and "spec: {" in r.text
+        assert "/api/predeploy" in r.text and "</script>" in r.text
         assert hub.get("/swagger/swagger-ui.css").status_code == 200        # 免令牌
-    # 令牌三来源已经是 spec 里的 securitySchemes，Swagger UI 的 Authorize 能直接用
-    spec = hub.get("/api/openapi.json").json()
+    # spec 只内嵌在 /docs 里，不再单独暴露；令牌三来源是 spec 里的 securitySchemes，Authorize 能直接用
+    assert hub.get("/api/openapi.json").status_code == 404
+    spec = hub.app.openapi()
     assert spec["components"]["securitySchemes"]["tokenHeader"]["name"] == "X-Covhub-Token"
     assert {"tokenHeader": []} in spec["paths"]["/api/dump"]["post"]["security"]
     assert "security" not in spec["paths"]["/api/health"]["get"]
 
 
-def test_cors_only_on_openapi(hub):
-    r = hub.get("/api/openapi.json")
-    assert r.status_code == 200 and r.headers["access-control-allow-origin"] == "*"
-    assert "/api/predeploy" in r.json()["paths"]
+def test_no_cors_anywhere(hub):
     assert "access-control-allow-origin" not in hub.get("/api/health").headers
     assert "access-control-allow-origin" not in hub.get("/api/status", headers=H).headers
 

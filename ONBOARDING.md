@@ -1083,7 +1083,7 @@ sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregat
 | agent 自己的错误 | 被测 JVM 的 stderr。agent 启动失败（jar 路径错、class 版本不支持）会在 `Picked up` 那行之后紧跟一段异常 |
 | 看板的状态徽章 | 离线 / 采集停了（超过 3 个轮询周期没新数据）/ 有断代 / 混版本 / 未知。在线状态由采集线程每轮写入，没带 `--with-watch` 的 hub 上永远是「未知」 |
 
-`/api/health` 和 `/api/openapi.json` 的请求不进日志（它们会被反复轮询）。
+`/api/health` 的请求不进日志（它会被反复轮询）。
 
 ### 8.2 磁盘：`data/` 会长多大
 

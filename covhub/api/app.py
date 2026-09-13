@@ -19,7 +19,7 @@ from ..watch import watch_loop
 from . import docs, routes_build, routes_control, routes_projects, routes_services, routes_view, static
 from .responses import PrettyJSONResponse, install_handlers
 
-OPEN_ROUTES = ("/api/health", "/api/openapi.json")
+OPEN_ROUTES = ("/api/health",)
 
 DESCRIPTION = (
     "JaCoCo 运行期覆盖率的采集与看板。整套方案只有 hub 这一个服务端，"
@@ -97,7 +97,8 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
         title="covhub 控制 API", version=__version__, description=DESCRIPTION,
         openapi_tags=TAGS, lifespan=lifespan,
         # 内置的 /docs 从 CDN 拉 Swagger UI，内网起不来，也违背看板不引 CDN 的约定；
-        # 关掉它，/docs 由 api/docs.py 用包里自带的 swagger-ui-dist 托管，spec 走 /api/openapi.json
+        # 关掉它，/docs 由 api/docs.py 用包里自带的 swagger-ui-dist 托管，spec 直接内嵌在页面里
+        # （不单独暴露 /api/openapi.json；仓库里的 docs/openapi.json 由 covhub openapi 导出）
         docs_url=None, redoc_url=None, openapi_url=None,
         default_response_class=PrettyJSONResponse,
     )
@@ -108,7 +109,7 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
     @app.middleware("http")
     async def access_log(request, call_next):
         response = await call_next(request)
-        # 静态目录不记；health / openapi.json 会被反复轮询，也不记
+        # 静态目录不记；health 会被反复轮询，也不记
         path = request.url.path
         if path.startswith("/api/") and path not in OPEN_ROUTES:
             shown = path + ("?" + request.url.query if request.url.query else "")

@@ -221,7 +221,7 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 | 接口 | 方法 | 用途 |
 |---|---|---|
 | `/api/health` | GET | 存活探测，不需要令牌 |
-| `/api/openapi.json` | GET | 这些接口的 OpenAPI 描述，不需要令牌 |
+| `/docs` | GET | 在线接口文档（Swagger UI，hub 自己托管），不需要令牌 |
 | `/api/status[?service=X]` | GET | 连通性与最新覆盖率（JSON） |
 | `/api/agent-opts?service=X` | GET | 该服务应注入的 `-javaagent` 参数串（加 `&format=text` 出纯文本） |
 | `/api/agent.jar` | GET | 下载 `jacocoagent.jar` |
@@ -268,21 +268,16 @@ covhub-client.sh wait-online    order-service            # 4. 确认新实例采
 带令牌的接口先点右上角 **Authorize** 填 `X-Covhub-Token`，之后 Try it out 每个请求都带上 ——
 注意写接口会真的执行（`dump` / `predeploy` 会改数据）。
 
-`GET /api/openapi.json` 是由 FastAPI 从路由和模型生成的 OpenAPI 描述（仓库里的 `docs/openapi.json`
-是同一份，`python covhub.py openapi` 导出）。它和 `/api/health` 一样**不需要令牌**，并且带
-`Access-Control-Allow-Origin: *` —— Apifox / 网关 / 别处的 Swagger UI 也能直接拉：
+OpenAPI 描述内嵌在这个页面里，hub 不单独暴露 JSON 接口。要给 Apifox / 网关喂文件的话用仓库里的
+`docs/openapi.json`（`python covhub.py openapi` 从接口定义导出，`--check` 校验是否过期）。
 
-```bash
-docker run --rm -p 8080:8080 -e SWAGGER_JSON_URL=http://covhub.internal:8900/api/openapi.json swaggerapi/swagger-ui
-```
-
-带令牌的接口一律不发 CORS 头 —— 鉴权认 Cookie，给它们开跨域等于让任意页面替已登录的浏览器去调写接口。
+所有接口都不发 CORS 头 —— 鉴权认 Cookie，开跨域等于让任意页面替已登录的浏览器去调写接口。
 
 ### 访问控制
 
 配了 `serve.token`（或给 hub 进程设了环境变量 `COVHUB_TOKEN`）之后，`/api/*` 和 `data/` 静态目录
 （报告、jacoco.xml、`artifacts/` 里线上跑的字节码、`exec/` 里不可再生的执行轨迹）都要令牌；
-只有 `/api/health`、`/api/openapi.json` 和**看板前端本身**（`/`、`/assets/*`，公开的构建产物，
+只有 `/api/health`、`/docs` 和**看板前端本身**（`/`、`/assets/*`，公开的构建产物，
 不含秘密）例外 —— 前端加载出来后会因为 API 401 弹出令牌输入框。
 
 | 场景 | 怎么带 |

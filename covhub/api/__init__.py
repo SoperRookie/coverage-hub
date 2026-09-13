@@ -5,7 +5,7 @@
 
 两条硬约束：
 - 收集端、采集线程和 HTTP 必须在**同一个进程**里（uvicorn 单 worker）；
-- 令牌门禁覆盖 /api/* **和** dataDir 静态目录，只有 health 与 openapi.json 例外。
+- 令牌门禁覆盖 /api/* **和** dataDir 静态目录，只有 health、看板产物与 /docs 例外。
 """
 
 from .app import create_app

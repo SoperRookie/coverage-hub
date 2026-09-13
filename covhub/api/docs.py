@@ -1,9 +1,12 @@
 """在线接口文档：hub 自己托管 Swagger UI（/docs），资源在包里（webui/swagger/），不引 CDN。
 
-页面不要令牌（spec 本身也是公开的），但「Try it out」打带令牌的接口时要填一次 X-Covhub-Token
-—— 右上角 Authorize 里填，Swagger UI 会替每个请求带上头。
+OpenAPI 描述直接内嵌在页面里，不再单独开 /api/openapi.json —— 只有这一个入口看文档。
+页面不要令牌，但「Try it out」打带令牌的接口时要填一次 X-Covhub-Token（右上角 Authorize），
+Swagger UI 会替每个请求带上头。
 """
-from fastapi import APIRouter
+import json
+
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from .static import NO_CACHE, WEB_DIR
@@ -36,7 +39,7 @@ PAGE = """<!doctype html>
   <script src="./swagger/swagger-ui-standalone-preset.js"></script>
   <script>
     window.ui = SwaggerUIBundle({
-      url: "./api/openapi.json",
+      spec: __SPEC__,
       dom_id: "#swagger-ui",
       presets: [SwaggerUIBundle.presets.apis, SwaggerUIStandalonePreset],
       layout: "BaseLayout",
@@ -53,9 +56,11 @@ PAGE = """<!doctype html>
 
 
 @router.get("/docs")
-def docs_page():
+def docs_page(request: Request):
     if not (WEB_DIR / "swagger" / "swagger-ui-bundle.js").is_file():
         return HTMLResponse("<p>还没构建前端（cd web && npm run build），Swagger UI 的资源不在包里。"
-                            "接口描述仍可从 <a href='./api/openapi.json'>api/openapi.json</a> 取。</p>",
+                            "接口描述可用 <code>covhub openapi</code> 导出成文件。</p>",
                             status_code=503, headers=NO_CACHE)
-    return HTMLResponse(PAGE, headers=NO_CACHE)
+    # 内嵌进 <script>：把 </ 断开，免得 spec 里的字符串提前关掉标签
+    spec = json.dumps(request.app.openapi(), ensure_ascii=False).replace("</", "<\\/")
+    return HTMLResponse(PAGE.replace("__SPEC__", spec), headers=NO_CACHE)

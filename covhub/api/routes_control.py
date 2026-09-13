@@ -63,11 +63,11 @@ def command_response(fn, cfg, name, **kw):
     return PrettyJSONResponse(body, status_code=code)
 
 
-# ---- 不要令牌的两条 ----
+# ---- 不要令牌的一条 ----
 
 @open_router.get("/api/health", summary="存活探测", response_model=schemas.Health)
 async def health(request: Request):
-    """唯一不需要令牌的接口（另一条是本文档）。返回 hub 版本和已登记的服务名列表。
+    """唯一不需要令牌的接口。返回 hub 版本和已登记的服务名列表。
 
     故意不进线程池：写接口把线程池占满时它仍然要能答话。"""
     try:
@@ -75,19 +75,6 @@ async def health(request: Request):
     except Exception:                        # 库连不上也得报活着，服务名给空
         names = []
     return PrettyJSONResponse({"ok": True, "version": __version__, "services": names})
-
-
-@open_router.get("/api/openapi.json", summary="本文档",
-                 responses={200: {"description": "OpenAPI 文档",
-                                  "content": {"application/json": {"schema": {"type": "object"}}}}})
-async def openapi_json(request: Request):
-    """这份 OpenAPI 描述自身。同样不需要令牌 —— 它是静态结构，不含任何部署信息，
-    方便网关和 Swagger UI 直接拉取。
-
-    **只给这一条开 CORS。** 带令牌的接口不能开 —— 鉴权认 Cookie，给它们加
-    CORS 等于让任意页面替已登录的浏览器调写接口。"""
-    return PrettyJSONResponse(request.app.openapi(),
-                              headers={"Access-Control-Allow-Origin": "*"})
 
 
 # ---- 查询 ----

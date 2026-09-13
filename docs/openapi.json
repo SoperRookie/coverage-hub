@@ -12,7 +12,7 @@
           "探活"
         ],
         "summary": "存活探测",
-        "description": "唯一不需要令牌的接口（另一条是本文档）。返回 hub 版本和已登记的服务名列表。\n\n故意不进线程池：写接口把线程池占满时它仍然要能答话。",
+        "description": "唯一不需要令牌的接口。返回 hub 版本和已登记的服务名列表。\n\n故意不进线程池：写接口把线程池占满时它仍然要能答话。",
         "operationId": "health_api_health_get",
         "responses": {
           "200": {
@@ -21,28 +21,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Health"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/openapi.json": {
-      "get": {
-        "tags": [
-          "探活"
-        ],
-        "summary": "本文档",
-        "description": "这份 OpenAPI 描述自身。同样不需要令牌 —— 它是静态结构，不含任何部署信息，\n方便网关和 Swagger UI 直接拉取。\n\n**只给这一条开 CORS。** 带令牌的接口不能开 —— 鉴权认 Cookie，给它们加\nCORS 等于让任意页面替已登录的浏览器调写接口。",
-        "operationId": "openapi_json_api_openapi_json_get",
-        "responses": {
-          "200": {
-            "description": "OpenAPI 文档",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object"
                 }
               }
             }
