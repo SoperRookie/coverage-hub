@@ -19,12 +19,12 @@ covhub **当前实现**的 PlantUML 图（跟随 v1.2 起的架构）。五张�
 | 代码 | 影响的图 |
 |---|---|
 | `agent_opts()` / `reachable()` / `do_dump()` | 01、02 |
-| `_snapshot()` / `make_report()` / `record()` | 02 |
+| `cycle.snapshot()` / `make_report()` / `record()` / `build.incremental_for_report()` | 02 |
 | `PushCollector` / `remote_dump()` / `write_exec_file()` | 01、05 |
 | `check_data_health()` / `diagnose()` | 03 |
-| `dashboard_rows()` / `build_dashboard_html()` | 看板，图里没画 |
+| `views.overview()` / `views.service_detail()` + `web/` | 看板，图里没画 |
 | `cmd_predeploy()` / `store_classes()` / `pack_classes()` / `cmd_retarget()` | 03、04 |
-| `api_dispatch()` 的路由表 | 01、03 |
+| `api/routes_*.py` 的路由 | 01、03 |
 | `integration/covhub-client.sh`、`Jenkinsfile.deploy` 的阶段划分 | 03 |
 
 ## 渲染

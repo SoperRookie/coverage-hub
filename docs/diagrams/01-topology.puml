@@ -23,7 +23,7 @@ node "covhub 服务端（全局唯一）" as hub {
   component "push 收集端  :6400\nPushCollector" as collector
   component "jacococli\njava -jar 子进程" as cli
   database "data/\nexec · 报告 · 版本归档" as data
-  artifact "targets.yaml" as cfg
+  database "数据库\n(服务配置 / 历史)" as cfg
   artifact "lib/jacocoagent.jar\nlib/jacococli.jar" as libs
 }
 

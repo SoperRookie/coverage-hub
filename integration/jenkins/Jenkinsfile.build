@@ -1,11 +1,15 @@
 #!groovy
+@Library('covhub') _
+
 /**
  * 构建期覆盖率流水线（通用模板）
  *
- * 做三件事：
+ * 做四件事：
  *   1. 跑测试并产出各模块 jacoco.exec
  *   2. 由聚合模块产出 jacoco-aggregate/jacoco.xml
- *   3. 推 SonarQube，并归档 class 产物（可选，见下）
+ *   3. 把 jacoco.xml 和 git diff 推给 hub —— 看板上「单测覆盖率」与「新增代码
+ *      覆盖率」两列就来自这里（hub 停机时只警告，不卡构建）
+ *   4. 推 SonarQube，并归档 class 产物（可选，见下）
  *
  * 【前置】被测项目已加入 integration/maven-aggregate-module 那个聚合模块 ——
  * 这要改研发的 pom。不能改的话这整条流水线都用不上，运行期覆盖率不依赖它，
@@ -26,6 +30,14 @@ pipeline {
         // 的项目必须设这个；注意属性名是 api.version，不是 docker CLI 的 DOCKER_API_VERSION。
         API_VERSION   = '1.44'
         AGGREGATE_XML = 'coverage-report/target/site/jacoco-aggregate/jacoco.xml'
+
+        // hub 地址与 hub 上登记的服务名；令牌存 Secret text 凭据，ID 填 COVHUB_TOKEN_ID
+        COVHUB_URL      = 'http://covhub.internal:8900'
+        COVHUB_SERVICE  = 'my-service'
+        COVHUB_TOKEN_ID = 'covhub-token'
+        // 算「新增代码」的基线。留空则问 hub 上一次结算的版本对应的 commit，
+        // 没有就退回 origin/main。浅克隆要先 fetch --unshallow --tags，否则 rev-parse 找不到基线
+        DIFF_BASE       = ''
 
         // 单测覆盖率的 project。运行期覆盖率用 "${SONAR_PROJECT_KEY}-runtime"
         SONAR_PROJECT_KEY  = 'my-service'
@@ -84,6 +96,45 @@ pipeline {
                        classPattern: '**/target/classes',
                        sourcePattern: '**/src/main/java',
                        exclusionPattern: '**/dto/**,**/mapper/**,**/domain/**'
+            }
+        }
+
+        stage('Push to covhub') {
+            // 单测报告 + git diff 送给 hub。版本串必须和发版时 predeploy / retarget 用的
+            // 一致（这里都是 REVISION），否则 hub 找不到对应的快照，新增覆盖永远算不出来。
+            steps {
+                script {
+                    covhub.pushUnitCoverage(service: env.COVHUB_SERVICE, version: env.REVISION,
+                                            xml: env.AGGREGATE_XML, tokenCredentialsId: env.COVHUB_TOKEN_ID)
+
+                    String base = env.DIFF_BASE
+                    if (!base) {
+                        def last = covhub.lastVersion(service: env.COVHUB_SERVICE,
+                                                      tokenCredentialsId: env.COVHUB_TOKEN_ID)
+                        base = last?.latest?.head ?: 'origin/main'
+                    }
+                    // -M 识别重命名（挪代码不算新代码）；-U0 少传上下文；pathspec 在源头砍掉
+                    // yaml / lockfile 的噪音；core.quotepath=false 让中文路径不被转义
+                    sh """
+                        set -e
+                        git fetch --tags --quiet || true
+                        BASE_SHA=\$(git rev-parse --verify '${base}^{commit}' 2>/dev/null || echo '')
+                        if [ -z "\$BASE_SHA" ]; then
+                            echo "[covhub] 找不到基线 ${base}，跳过新增代码覆盖（浅克隆？先 git fetch --unshallow --tags）"
+                            : > covhub.diff
+                        else
+                            git -c core.quotepath=false diff --no-color --no-ext-diff --no-textconv -M --unified=0 \\
+                                --diff-filter=AMR "\$BASE_SHA"..HEAD -- '*.java' '*.kt' > covhub.diff
+                            echo "\$BASE_SHA" > covhub.base
+                        fi
+                    """
+                    if (fileExists('covhub.base')) {
+                        covhub.pushDiff(service: env.COVHUB_SERVICE, version: env.REVISION,
+                                        base: readFile('covhub.base').trim(),
+                                        head: sh(script: 'git rev-parse HEAD', returnStdout: true).trim(),
+                                        file: 'covhub.diff', tokenCredentialsId: env.COVHUB_TOKEN_ID)
+                    }
+                }
             }
         }
 
