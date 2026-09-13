@@ -139,3 +139,38 @@ def test_cors_only_on_openapi(hub):
     assert "/api/predeploy" in r.json()["paths"]
     assert "access-control-allow-origin" not in hub.get("/api/health").headers
     assert "access-control-allow-origin" not in hub.get("/api/status", headers=H).headers
+
+
+DIFF = ("--- a/src/main/java/probe/Main.java\n+++ b/src/main/java/probe/Main.java\n"
+        "@@ -4,0 +5,1 @@\n+    static void tick() { }\n")
+XML = ('<?xml version="1.0"?><report name="u"><package name="probe"><sourcefile name="Main.java">'
+       '<line nr="5" mi="0" ci="2" mb="0" cb="0"/><line nr="9" mi="1" ci="0" mb="0" cb="0"/></sourcefile>'
+       '<counter type="INSTRUCTION" missed="1" covered="2"/><counter type="LINE" missed="1" covered="1"/>'
+       '<counter type="CLASS" missed="0" covered="1"/></package>'
+       '<counter type="INSTRUCTION" missed="1" covered="2"/><counter type="LINE" missed="1" covered="1"/>'
+       '<counter type="CLASS" missed="0" covered="1"/></report>')
+
+
+def test_build_inputs_diff_then_unit_xml(hub):
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0"))
+    # 正文用 --data-binary 的形态：form 类型的 Content-Type，不能被当表单解析
+    r = hub.post("/api/diff?service=svc&version=2.0&base=v1",
+                 headers={**H, "Content-Type": "application/x-www-form-urlencoded"}, content=DIFF.encode())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["diff"]["addedLines"] == 1 and body["matchesCurrentVersion"] is True
+    assert body["runtime"] is None                       # 还没有快照
+
+    r = hub.post("/api/unit-coverage?service=svc&version=2.0",
+                 headers={**H, "Content-Type": "application/x-www-form-urlencoded"}, content=XML.encode())
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["report"]["line"] == 50.0
+    assert body["incremental"] == {"covered": 1, "total": 1, "pct": 100.0, "unmatched": 0, "ambiguous": 0}
+
+    assert hub.post("/api/unit-coverage?service=svc&version=2.0", headers=H, content=b"<html/>").status_code == 400
+    assert hub.post("/api/diff?service=svc&version=2.0&base=v1", headers=H, content=b"garbage").status_code == 400
+    assert hub.post("/api/diff?service=svc&version=../x&base=v1", headers=H, content=DIFF.encode()).status_code == 400
+    assert hub.post("/api/diff?service=svc&version=2.0&base=v1", headers=H).status_code == 400   # 空正文
+    r = hub.post("/api/recompute?service=svc&version=2.0", headers=H)
+    assert r.status_code == 200 and r.json()["unit"]["pct"] == 100.0

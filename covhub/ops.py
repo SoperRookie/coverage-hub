@@ -10,6 +10,7 @@ import os
 
 from pydantic import ValidationError
 
+from . import build
 from .agent import agent_opts as _agent_opts, endpoint_label, reachable, service_channel
 from .collector import get_collector, collector_instances
 from .config import find_service
@@ -183,6 +184,43 @@ def service_update(cfg, name, fields):
 def service_remove(cfg, name):
     repo.remove_service(name)
     log("已删除服务 %s 的配置（data/%s/ 里的采集数据未动，需要的话手工处理）" % (name, name))
+
+
+# ---- 构建期：单测报告、diff、新增代码覆盖 ----
+
+def unit_coverage(cfg, name, version, xml_path, group=None):
+    """收一份单测 jacoco.xml。version 缺省取服务当前 version。"""
+    svc = find_service(cfg, name)
+    version = version or svc.get("version")
+    if not version:
+        raise CovhubError("没给 version，服务 %s 也没配 version" % name)
+    row, summary, result = build.store_unit_report(cfg, svc, version, xml_path, group=group)
+    return {"report": row, "incremental": build._brief(result) if result else None}
+
+
+def push_diff(cfg, name, version, base, text, head=None):
+    """收一份 git diff，并把该版本已有的运行时快照与单测报告的新增覆盖重算一遍。"""
+    svc = find_service(cfg, name)
+    version = version or svc.get("version")
+    if not version:
+        raise CovhubError("没给 version，服务 %s 也没配 version" % name)
+    if not base:
+        raise CovhubError("需要 base（基线的 commit / tag / 分支）")
+    row, lines = build.store_diff(cfg, svc, version, base, head, text)
+    recomputed = build.recompute(cfg, svc, version)
+    return {"diff": row, "matchesCurrentVersion": svc.get("version") == version,
+            "currentVersion": svc.get("version"), "runtime": recomputed["runtime"],
+            "unit": recomputed["unit"]}
+
+
+def recompute_incremental(cfg, name, version=None):
+    svc = find_service(cfg, name)
+    version = version or svc.get("version")
+    if not version:
+        raise CovhubError("没给 version，服务 %s 也没配 version" % name)
+    if build.load_diff_lines(cfg, svc, version) is None:
+        raise CovhubError("版本 %s 没有 diff，先把 git diff 传上来" % version)
+    return build.recompute(cfg, svc, version)
 
 
 # ---- 项目 ----

@@ -5,6 +5,7 @@ import threading
 from .agent import reachable
 from .runtime import load_runtime
 from .cycle import snapshot
+from .db import repo
 from .dashboard import render_dashboard
 from .locks import LOCK
 from .logbuf import log
@@ -12,7 +13,10 @@ from .logbuf import log
 def watch_once(cfg):
     for svc in cfg["services"]:
         try:
-            if not reachable(svc):
+            online = reachable(svc)
+            # 看板读这里的在线状态：请求路径上不做 TCP 探活，离线服务一个 2 秒会把页面卡住
+            repo.set_online(svc["name"], online)
+            if not online:
                 log("%s：离线，跳过" % svc["name"])
                 continue
             with LOCK:

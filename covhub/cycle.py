@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 
+from . import build
 from .agent import service_channel
 from .collector import get_collector, collector_instances
 from .db import repo
@@ -15,11 +16,16 @@ from .logbuf import log
 
 
 def record(cfg, svc, summary, kind, version=None, extra=None):
-    """把一次报告的统计结果记成一条快照，返回带 id 的 entry。"""
+    """把一次报告的统计结果记成一条快照，返回带 id 的 entry。
+
+    报告此时已在 current/ 里，顺手按这一版的 diff 算新增代码的覆盖 —— 每次快照都算，
+    历史里就有新增覆盖率的趋势；没有 diff 就是 NULL，不回填。
+    """
+    version = version or svc.get("version")
     entry = {
         "at": datetime.now().isoformat(timespec="seconds"),
         "kind": kind,
-        "version": version or svc.get("version"),
+        "version": version,
         "instruction": round(summary["INSTRUCTION"]["pct"], 2),
         "branch": round(summary["BRANCH"]["pct"], 2),
         "covered": summary["INSTRUCTION"]["covered"],
@@ -29,6 +35,9 @@ def record(cfg, svc, summary, kind, version=None, extra=None):
     }
     if extra:
         entry.update(extra)
+    result = build.incremental_for_report(cfg, svc, version, os.path.join(svc_dir(cfg, svc), "current"))
+    if result is not None:
+        entry.update(incCovered=result["covered"], incTotal=result["total"], incPct=result["pct"])
     return repo.add_snapshot(svc["name"], entry)
 
 # --------------------------------------------------------------------------

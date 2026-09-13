@@ -167,3 +167,60 @@ class ProjectResponse(BaseModel):
 class ProjectListResponse(BaseModel):
     ok: bool = True
     projects: list[ProjectOut]
+
+
+class IncrementalBrief(BaseModel):
+    covered: int = Field(description="新增行里被执行到的行数")
+    total: int = Field(description="新增行里 JaCoCo 有探针记录的行数（分母）")
+    pct: float | None = Field(default=None, description="百分比；分母为 0 时为 null")
+    unmatched: int = Field(description="diff 里有、报告里找不到的源码文件数")
+    ambiguous: int = Field(description="多条 diff 路径落到同一个报告文件的次数")
+
+
+class UnitReportOut(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    id: int
+    version: str
+    at: str
+    instruction: float
+    branch: float
+    line: float
+    covered: int
+    total: int
+    linesCovered: int
+    linesTotal: int
+    classesHit: int
+    classesTotal: int
+    xmlPath: str
+    incCovered: int | None = None
+    incTotal: int | None = None
+    incPct: float | None = None
+
+
+class UnitCoverageResult(BaseModel):
+    ok: bool = True
+    service: str
+    report: UnitReportOut
+    incremental: IncrementalBrief | None = None
+    log: str
+
+
+class DiffOut(BaseModel):
+    id: int
+    version: str
+    base: str
+    head: str | None = None
+    at: str
+    files: int
+    addedLines: int
+
+
+class DiffResult(BaseModel):
+    ok: bool = True
+    service: str
+    diff: DiffOut
+    matchesCurrentVersion: bool = Field(description="diff 的版本与服务当前 version 是否一致；不一致时运行时快照算不出新增覆盖")
+    currentVersion: str | None = None
+    runtime: IncrementalBrief | None = Field(default=None, description="重算后的运行时新增覆盖（该版本还没有快照时为 null）")
+    unit: IncrementalBrief | None = None
+    log: str

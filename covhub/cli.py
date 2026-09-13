@@ -240,6 +240,21 @@ def cmd_project(cfg, args):
         return ops.project_remove(cfg, args.name)
 
 
+def cmd_unit_coverage(cfg, args):
+    out = ops.unit_coverage(cfg, args.service, args.version, args.xml, group=args.group)
+    _print_service(out)
+
+
+def cmd_diff(cfg, args):
+    with open(args.file, encoding="utf-8", errors="replace") as f:
+        text = f.read()
+    _print_service(ops.push_diff(cfg, args.service, args.version, args.base, text, head=args.head))
+
+
+def cmd_recompute(cfg, args):
+    _print_service(ops.recompute_incremental(cfg, args.service, args.version))
+
+
 def cmd_import(cfg, args):
     ops.import_legacy(cfg, args.source or cfg["configPath"],
                       dry_run=args.dry_run, overwrite=args.overwrite)
@@ -345,6 +360,23 @@ def main():
     q.add_argument("--yes", action="store_true")
     sp.add_parser("template", help="打印 --from-file 用的 YAML 模板")
 
+    p = sub.add_parser("unit-coverage", help="收一份构建流水线产出的单测 jacoco.xml")
+    p.add_argument("service")
+    p.add_argument("version", nargs="?", help="版本标识，缺省取服务当前 version")
+    p.add_argument("xml", help="jacoco.xml 路径（jacoco-aggregate 的也行）")
+    p.add_argument("--group", help="聚合报告里只取这个模块（<group name=artifactId>）")
+
+    p = sub.add_parser("diff", help="收一份 git diff，用于算新增代码的覆盖率")
+    p.add_argument("service")
+    p.add_argument("version", nargs="?", help="版本标识，缺省取服务当前 version")
+    p.add_argument("file", help="git diff 输出文件")
+    p.add_argument("--base", required=True, help="基线（上一版的 commit / tag）")
+    p.add_argument("--head", help="本次的 commit")
+
+    p = sub.add_parser("recompute", help="按已有 diff 重算某版本的新增代码覆盖")
+    p.add_argument("service")
+    p.add_argument("--version")
+
     p = sub.add_parser("project", help="项目的增删改查（服务的分组）")
     sp = p.add_subparsers(dest="action", required=True)
     q = sp.add_parser("list", help="列出全部项目")
@@ -405,7 +437,8 @@ def main():
     except CovhubError as exc:
         die(str(exc))
     needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": (), "service": (),
-             "project": (), "import": (), "db": (), "openapi": ()}.get(
+             "project": (), "import": (), "db": (), "openapi": (), "unit-coverage": (),
+             "diff": (), "recompute": ()}.get(
         args.cmd, ("jacocoCli", "jacocoAgent"))
     for key in needs:
         if not os.path.isfile(cfg.get(key, "")):
@@ -416,7 +449,8 @@ def main():
         "agent-opts": cmd_agent_opts, "status": cmd_status, "dump": cmd_dump,
         "predeploy": cmd_predeploy, "report": cmd_report, "retarget": cmd_retarget,
         "diagnose": cmd_diagnose, "service": cmd_service, "project": cmd_project,
-        "import": cmd_import, "db": cmd_db,
+        "import": cmd_import, "db": cmd_db, "unit-coverage": cmd_unit_coverage,
+        "diff": cmd_diff, "recompute": cmd_recompute,
         "openapi": cmd_openapi, "watch": cmd_watch, "serve": cmd_serve,
     }
     try:

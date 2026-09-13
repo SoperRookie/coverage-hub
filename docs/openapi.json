@@ -2194,6 +2194,456 @@
           }
         }
       }
+    },
+    "/api/unit-coverage": {
+      "post": {
+        "tags": [
+          "构建期"
+        ],
+        "summary": "收一份单测覆盖率报告（jacoco.xml）",
+        "description": "构建流水线在 `mvn verify` 之后把聚合报告 POST 过来。hub 解析计数器入库，XML 原文留在\n`data/<svc>/unit/<version>/`；该版本已有 diff 时顺手算出**单测的新增代码覆盖率**。\n同版本重传覆盖。",
+        "operationId": "unit_coverage_api_unit_coverage_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
+          },
+          {
+            "name": "services",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "一份报告落多个服务，逗号分隔（一个仓库多个服务时用）",
+              "title": "Services"
+            },
+            "description": "一份报告落多个服务，逗号分隔（一个仓库多个服务时用）"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取服务当前 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取服务当前 version"
+          },
+          {
+            "name": "group",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "聚合报告里只取这个模块（<group name=artifactId>）",
+              "title": "Group"
+            },
+            "description": "聚合报告里只取这个模块（<group name=artifactId>）"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UnitCoverageResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "正文为空、不是 JaCoCo XML / git diff、或版本串不能作目录名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/xml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "mvn verify 产出的 jacoco.xml（jacoco-aggregate 的也行）。curl 用 --data-binary @file"
+        }
+      }
+    },
+    "/api/diff": {
+      "post": {
+        "tags": [
+          "构建期"
+        ],
+        "summary": "收一份 git diff，用于新增代码覆盖率",
+        "description": "推荐的生成命令：\n`git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt'`。\n\nhub 记下每个源码文件的新增行号，之后每次快照都按它算**新增代码的运行时覆盖率**；\n该版本已有的快照与单测报告立刻重算一遍。分母是新增行里 JaCoCo 有探针的行。\n返回体里的 `matchesCurrentVersion` 为 false 说明版本串对不上服务当前 version ——\n运行时快照按 version 找 diff，对不上就永远算不出新增覆盖。",
+        "operationId": "push_diff_api_diff_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
+          },
+          {
+            "name": "services",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "一份 diff 落多个服务，逗号分隔",
+              "title": "Services"
+            },
+            "description": "一份 diff 落多个服务，逗号分隔"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取服务当前 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取服务当前 version"
+          },
+          {
+            "name": "base",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "基线：上一版的 commit / tag（建议传 rev-parse 后的 SHA）",
+              "title": "Base"
+            },
+            "description": "基线：上一版的 commit / tag（建议传 rev-parse 后的 SHA）"
+          },
+          {
+            "name": "head",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "本次的 commit",
+              "title": "Head"
+            },
+            "description": "本次的 commit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiffResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "正文为空、不是 JaCoCo XML / git diff、或版本串不能作目录名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
+            },
+            "application/xml": {
+              "schema": {
+                "type": "string"
+              }
+            }
+          },
+          "description": "`git diff <基线>..<本次>` 的输出。curl 用 --data-binary @file"
+        }
+      }
+    },
+    "/api/recompute": {
+      "post": {
+        "tags": [
+          "构建期"
+        ],
+        "summary": "按已有 diff 重算某版本的新增代码覆盖",
+        "operationId": "recompute_api_recompute_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取服务当前 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取服务当前 version"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "400": {
+            "description": "正文为空、不是 JaCoCo XML / git diff、或版本串不能作目录名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2448,6 +2898,120 @@
         ],
         "title": "DiagnoseResponse"
       },
+      "DiffOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "base": {
+            "type": "string",
+            "title": "Base"
+          },
+          "head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Head"
+          },
+          "at": {
+            "type": "string",
+            "title": "At"
+          },
+          "files": {
+            "type": "integer",
+            "title": "Files"
+          },
+          "addedLines": {
+            "type": "integer",
+            "title": "Addedlines"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "version",
+          "base",
+          "at",
+          "files",
+          "addedLines"
+        ],
+        "title": "DiffOut"
+      },
+      "DiffResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "diff": {
+            "$ref": "#/components/schemas/DiffOut"
+          },
+          "matchesCurrentVersion": {
+            "type": "boolean",
+            "title": "Matchescurrentversion",
+            "description": "diff 的版本与服务当前 version 是否一致；不一致时运行时快照算不出新增覆盖"
+          },
+          "currentVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currentversion"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "重算后的运行时新增覆盖（该版本还没有快照时为 null）"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "log": {
+            "type": "string",
+            "title": "Log"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "diff",
+          "matchesCurrentVersion",
+          "log"
+        ],
+        "title": "DiffResult"
+      },
       "Error": {
         "properties": {
           "ok": {
@@ -2560,6 +3124,50 @@
           "state"
         ],
         "title": "ImportResult"
+      },
+      "IncrementalBrief": {
+        "properties": {
+          "covered": {
+            "type": "integer",
+            "title": "Covered",
+            "description": "新增行里被执行到的行数"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total",
+            "description": "新增行里 JaCoCo 有探针记录的行数（分母）"
+          },
+          "pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct",
+            "description": "百分比；分母为 0 时为 null"
+          },
+          "unmatched": {
+            "type": "integer",
+            "title": "Unmatched",
+            "description": "diff 里有、报告里找不到的源码文件数"
+          },
+          "ambiguous": {
+            "type": "integer",
+            "title": "Ambiguous",
+            "description": "多条 diff 路径落到同一个报告文件的次数"
+          }
+        },
+        "type": "object",
+        "required": [
+          "covered",
+          "total",
+          "unmatched",
+          "ambiguous"
+        ],
+        "title": "IncrementalBrief"
       },
       "Instance": {
         "properties": {
@@ -3690,6 +4298,150 @@
         "title": "Summary",
         "description": "一次采集的结果摘要。"
       },
+      "UnitCoverageResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "report": {
+            "$ref": "#/components/schemas/UnitReportOut"
+          },
+          "incremental": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "log": {
+            "type": "string",
+            "title": "Log"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "report",
+          "log"
+        ],
+        "title": "UnitCoverageResult"
+      },
+      "UnitReportOut": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "at": {
+            "type": "string",
+            "title": "At"
+          },
+          "instruction": {
+            "type": "number",
+            "title": "Instruction"
+          },
+          "branch": {
+            "type": "number",
+            "title": "Branch"
+          },
+          "line": {
+            "type": "number",
+            "title": "Line"
+          },
+          "covered": {
+            "type": "integer",
+            "title": "Covered"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "linesCovered": {
+            "type": "integer",
+            "title": "Linescovered"
+          },
+          "linesTotal": {
+            "type": "integer",
+            "title": "Linestotal"
+          },
+          "classesHit": {
+            "type": "integer",
+            "title": "Classeshit"
+          },
+          "classesTotal": {
+            "type": "integer",
+            "title": "Classestotal"
+          },
+          "xmlPath": {
+            "type": "string",
+            "title": "Xmlpath"
+          },
+          "incCovered": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inccovered"
+          },
+          "incTotal": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inctotal"
+          },
+          "incPct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incpct"
+          }
+        },
+        "additionalProperties": true,
+        "type": "object",
+        "required": [
+          "id",
+          "version",
+          "at",
+          "instruction",
+          "branch",
+          "line",
+          "covered",
+          "total",
+          "linesCovered",
+          "linesTotal",
+          "classesHit",
+          "classesTotal",
+          "xmlPath"
+        ],
+        "title": "UnitReportOut"
+      },
       "UploadResult": {
         "properties": {
           "ok": {
@@ -3827,6 +4579,10 @@
     {
       "name": "项目",
       "description": "服务的分组"
+    },
+    {
+      "name": "构建期",
+      "description": "构建流水线送进来的单测报告与 git diff，用于单测覆盖率和新增代码覆盖率"
     }
   ]
 }
