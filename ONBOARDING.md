@@ -32,6 +32,9 @@
 和这一版的 git diff。有了它们，看板上每个服务就有四个数：运行时总覆盖、运行时**新增代码**
 覆盖、单测总覆盖、单测新增代码覆盖。
 
+想先看看整体长什么样：`docs/diagrams/` 里有八张架构图（部署拓扑、一次采集、发版流程……），
+接口在 hub 的 `/docs`（自带 Swagger UI），本机试玩可用 `tools/seed_demo.py` 灌一套演示数据。
+
 ### 谁装什么
 
 **服务端全公司只有一个。** 每接一个服务，被测机器上多出来的东西只有一个
@@ -409,7 +412,8 @@ diff <service> <version> <diff文件> --base <基线> [--head <本次>] 构建�
 ### Step 3 · 在 hub 上登记这个服务
 
 服务配置在数据库里，用 CLI 登记（在 hub 本机；也可以用 `POST /api/services`，字段名一样）。
-先建项目（可选，看板按它分组），再登记服务：
+先建项目（可选，看板按它分组），再登记服务。项目也可以在看板「项目总览 → 新建项目」里建，
+服务归入哪个项目可以事后在项目面板「添加服务」里勾选 —— 登记时不给 `--project` 的服务会进「未分组」：
 
 ```bash
 python3 covhub.py project add shop --title "商城"
@@ -765,6 +769,10 @@ cd order-service && git checkout v1.4.2        # 版本要和线上的一致，�
 `retarget` 也能改这一项（`--sourcefiles`），发版流水线里可以在 checkout 新版本源码后
 一并更新。源码是 Lombok 生成的 getter/setter 这类，报告里会标在 `@Data` 那一行，属正常。
 
+`sourcefiles` 同时喂给看板的「新增代码 → 看源码」视图。结算归档时 hub 会把新增行附近的源码
+片段一起存进归档，所以**历史版本**的源码视图不要求这个目录还停在旧版本 —— 只要当前周期
+的 `sourcefiles` 指向的就是当前版本即可。
+
 ### Step 9 · 验证接入
 
 在任意一台能访问 hub 的机器上（不需要是 hub 本机）：
@@ -788,7 +796,7 @@ covhub-client.sh diagnose order-service
 # {"ok": true, "matchRate": 100.0, "verdict": "正常", ...}
 
 # 4. 看板
-#   打开 http://<hub>:8900/?token=<令牌> 应看到 order-service 的卡片
+#   打开 http://<hub>:8900/?token=<令牌>，在所属项目的卡片里（没配 project 就在「未分组」）应看到 order-service
 ```
 
 刚启动的服务覆盖率通常在 1% 左右、触达类却有六七成 —— 这是正常的：Spring 把 Bean
@@ -887,9 +895,9 @@ classfiles  /opt/coverage-hub/data/order-service/artifacts/1.4.2
 判定        正常
 ```
 
-浏览器打开 `http://10.0.0.5:8900/?token=xxxx`，看到 `order-service` 卡片，点进去是
-JaCoCo 原生报告。再去页面上点几个功能，等一个轮询周期（或再 `dump` 一次），覆盖率
-应该涨。**到这里接入完成**，接下来把 §5 排进发版流程。
+浏览器打开 `http://10.0.0.5:8900/?token=xxxx`，在项目 `shop` 的卡片里看到 `order-service`，
+点进去是服务详情（四个环形指标、趋势图），右上角「JaCoCo 报告」是原生报告。再去页面上点几个
+功能，点「立即采集」（或等一个轮询周期），覆盖率应该涨。**到这里接入完成**，接下来把 §5 排进发版流程。
 
 ---
 
@@ -1058,7 +1066,7 @@ sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregat
 - [ ] `covhub-client.sh dump <service>` 能出数字，触达类不为 0
 - [ ] 手工操作几个页面后再 dump，覆盖率**有明显上涨**
 - [ ] `covhub-client.sh diagnose <service>` 指纹匹配接近 100%、判定为「正常」
-- [ ] 看板上能看到该服务卡片；配了 `sourcefiles` 的话点进去能看到绿色行标记
+- [ ] 看板上所属项目（或「未分组」）里能看到该服务；配了 `sourcefiles` 的话 JaCoCo 报告里能看到绿色行标记
 - [ ] class 产物已传到 hub，配置里 `classfiles` 指向 `data/<service>/artifacts/<版本>/`
 - [ ] 被测端的 `classDumpDir` 传完已清理
 - [ ] 发版流水线里 `predeploy` 排在停服之前，`upload-classes --retarget` 排在起服之后
@@ -1067,7 +1075,7 @@ sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregat
 - [ ] hub 配了 `serve.token`，且 8900 也没有暴露到公网
 - [ ] 不带令牌访问 `http://<hub>:8900/<service>/current/jacoco.xml` 返回 401
 - [ ] 运维知道 stderr 会多一行 `Picked up JAVA_TOOL_OPTIONS`，不会当成告警
-- [ ] 看板首页能看到该服务，点进去详情页四个数字里至少「运行时 · 总」有值
+- [ ] 看板上能找到该服务，详情页四个环形指标里至少「运行时 · 总覆盖」有值
 - [ ] （要单测 / 新增代码覆盖率的话）构建流水线已加 `unit-coverage` 与 `diff` 两步，详情页「新增代码明细」有文件列表
 
 ---

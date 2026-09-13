@@ -1,7 +1,8 @@
-@startuml 03-release
-' coverage-hub —— 发版全流程数据流
-' 对应 integration/covhub-client.sh 与 integration/jenkins/Jenkinsfile.deploy 的六个阶段。
+@startuml 03-发版流程
+' covhub 2.1 —— 发版全流程数据流
+' 对应 integration/covhub-client.sh 与 integration/jenkins/Jenkinsfile.deploy 的阶段。
 ' 顺序是这套方案的核心，不能调整：第 1 步必须在停服之前。
+' 看板上的「结算归档」按钮 = 第 1 步；「立即采集」= 第 5 步末尾的 dump。
 
 title 发版全流程数据流 · 六个阶段
 
@@ -19,7 +20,7 @@ box "covhub 服务端（唯一）" #F4F6F5
   participant "控制 API\n:8900" as API
   participant "jacococli" as CLI
   database "data/" as D
-  database "数据库" as CFG
+  database "数据库" as DB
 end box
 
 participant "旧实例 agent" as OLD
@@ -37,13 +38,14 @@ note right of API
   匹配率低只告警、**不阻断结算** ——
   服务马上要停，exec 不可再生，
   因为对不上就拒绝归档只会两头落空。
-  结论写进 manifest，日后能追。
+  结论写进 manifest 与 archives 表。
 end note
-API -> D : 出终版报告 → 归档 versions/1.4.2/\n{html, jacoco.xml, exec/, merged.exec, manifest.json}
+API -> D : 终版报告 + 新增覆盖明细 → 归档 versions/1.4.2/\n{html, jacoco.xml, incremental.json, exec/, merged.exec, manifest.json}
+API -> DB : snapshots 记 predeploy 快照 · archives 记归档\n会话基线清空
 note right of D
-  manifest.json 记下这批 exec
-  对应哪份 class 产物 ——
-  日后重新出报告的唯一依据。
+  incremental.json 里带着新增行附近的
+  源码片段 —— 日后看历史版本的源码
+  不依赖源码目录还在。
 end note
 API --> C : 200 + 执行日志
 alt 目标已离线（服务已停）
@@ -58,11 +60,16 @@ end
 
 == 2 · 取新版本 class 产物 ==
 J -> J : copyArtifacts 取构建期归档的\ncoverage-classes-1.4.3.tar.gz
+note right of J
+  构建期已经把这一版的 jacoco.xml 与
+  git diff 推给了 hub（见 06）——
+  新周期第一次采集就能算出新增代码覆盖。
+end note
 
 == 3 · 部署新版本 ==
 J -> C : agent-opts order-service
 C -> API : GET /api/agent-opts?...&format=text
-API --> C : -javaagent:...=output=tcpserver,port=6300,...
+API --> C : -javaagent:...=output=tcpserver,port=6300,classdumpdir=...,sessionid=1.4.3
 opt 本机没有 agent jar
   C -> API : GET /api/agent.jar
   API --> C : jacocoagent.jar
@@ -77,11 +84,12 @@ end note
 J -> C : upload-classes order-service 1.4.3 *.tar.gz ""--retarget""
 C -> API : POST /api/upload-classes（正文为二进制）
 API -> D : 解包到 artifacts/1.4.3/\n（拒绝绝对路径与 .. 跳出）
-API -> CFG : cmd_retarget()\n改写 version 与 classfiles
-note right of CFG
+API -> DB : services 表改 version 与 classfiles
+note right of DB
   最容易漏的一步。class 产物没跟着换，
   新周期的 exec 会和旧 class 对不上，
   报告全是「未覆盖」且**不会报错**。
+  version 对不上，diff 也找不到。
 end note
 
 == 5 · 确认采集恢复 ==
@@ -93,7 +101,7 @@ end
 C -> API : POST /api/dump（打基线快照，新周期从这里开始）
 
 == 6 · 推旧版本覆盖率到 Sonar ==
-C -> API : GET /order-service/versions/1.4.2/jacoco.xml\n（看板的静态文件服务）
+C -> API : GET /order-service/versions/1.4.2/jacoco.xml\n（静态文件服务，受令牌门禁）
 API --> C : jacoco.xml
 C -> API : GET /api/classes?service&version=1.4.2
 API -> D : pack_classes()\n优先 artifacts/1.4.2/，回退 manifest 记的路径
