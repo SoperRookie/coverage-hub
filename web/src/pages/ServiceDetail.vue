@@ -6,6 +6,7 @@ import "element-plus/es/components/message/style/css";
 import "element-plus/es/components/message-box/style/css";
 import { api, type Brief, type CommandResult, type Detail } from "../api";
 import type { Nav } from "../App.vue";
+import CompareView from "../components/CompareView.vue";
 import CovCell from "../components/CovCell.vue";
 import IncrementalTable from "../components/IncrementalTable.vue";
 import Donut from "../components/Donut.vue";
@@ -19,7 +20,11 @@ const route = useRoute();
 const router = useRouter();
 const d = ref<Detail | null>(null);
 const loading = ref(true);
-const tab = ref<"overview" | "inc" | "versions" | "unit" | "config">("overview");
+type Tab = "overview" | "inc" | "versions" | "compare" | "unit" | "config";
+const TABS: Tab[] = ["overview", "inc", "versions", "compare", "unit", "config"];
+// 页签也进 URL（?tab=compare），对比页能直接贴给别人
+const tab = ref<Tab>(TABS.includes(route.query.tab as Tab) ? (route.query.tab as Tab) : "overview");
+watch(tab, (t) => router.replace({ query: { ...route.query, tab: t === "overview" ? undefined : t } }));
 const incTab = ref<"runtime" | "unit">("runtime");
 const nav = inject<Nav>("nav")!;
 
@@ -175,6 +180,7 @@ const crumbs = computed(() => [
       <el-tab-pane label="概览" name="overview" />
       <el-tab-pane label="新增代码" name="inc" />
       <el-tab-pane label="已结算版本" name="versions" />
+      <el-tab-pane label="历史对比" name="compare" />
       <el-tab-pane label="单测覆盖率" name="unit" />
       <el-tab-pane label="配置" name="config" />
     </el-tabs>
@@ -236,6 +242,14 @@ const crumbs = computed(() => [
           <el-table-column label="报告"><template #default="{ row }"><a href="#" @click.prevent="switchVersion(row.dir)">在看板里看</a> · <a :href="row.reportUrl" target="_blank">HTML</a> · <a :href="row.xmlUrl" target="_blank">jacoco.xml</a></template></el-table-column>
         </el-table>
         <div v-else class="empty">还没有结算过的版本</div>
+      </div>
+    </div>
+
+    <!-- 历史对比 -->
+    <div v-if="tab === 'compare'" class="card">
+      <div class="card-head"><h2>历史对比</h2><span class="hint">任意两个版本（当前周期或已归档）之间总量与按文件的指令覆盖差</span></div>
+      <div class="card-body">
+        <CompareView :key="name" :service="name" :archives="d.runtime.archives" :on-error="onError" />
       </div>
     </div>
 

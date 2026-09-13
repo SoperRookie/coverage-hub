@@ -30,6 +30,15 @@ def service_detail(name: str,
     return PrettyJSONResponse({"ok": True, **views.service_detail(cfg, name, version)})
 
 
+@router.get("/api/services/{name}/compare", summary="两个版本的覆盖率对比", responses=ERR)
+def compare(name: str,
+            a: str = Query("current", description="基准：current 或归档目录名"),
+            b: str = Query("current", description="对比：current 或归档目录名"),
+            cfg: dict = Depends(get_cfg)):
+    """总量（指令 / 分支 / 触达类 / 新增代码）的差，以及按源码文件的指令覆盖差（含只在一侧出现的文件）。"""
+    return PrettyJSONResponse({"ok": True, **views.compare(cfg, name, a, b)})
+
+
 @router.get("/api/projects/{name}/report", summary="项目报表：各服务的数字与时间范围内的已结算版本", responses=ERR)
 def project_report(name: str,
                    days: int = Query(30, ge=0, le=3650, description="只看最近多少天的结算版本与单测报告；0 表示不限"),

@@ -371,3 +371,80 @@ def project_report(cfg, project, days=30):
         "services": services,
         "counts": _counts([service_row(cfg, by_name[n], stale_after) for n in names if n in by_name]),
     }
+
+
+# ---- 历史对比 ----
+
+def _side(cfg, svc, ref):
+    """对比的一侧：ref 是 "current" 或归档目录名。返回摘要 + 按源码文件的指令 / 行计数。"""
+    from . import incremental as inc
+    name = svc["name"]
+    root = svc_dir(cfg, svc)
+    if ref in (None, "", "current"):
+        summary = repo.latest(name)
+        where, label = "current", "当前周期"
+        meta = {"ref": "current", "label": label, "version": svc.get("version"), "dir": None,
+                "at": summary["at"] if summary else None, "sealedAt": None}
+    else:
+        archived = repo.archive_by_dir(name, "versions/%s" % safe_segment(ref))
+        if archived is None:
+            raise CovhubError("没有归档 %s" % ref)
+        summary = archived
+        where = "versions/%s" % archived["dir"]
+        meta = {"ref": archived["dir"], "label": archived["version"], "version": archived["version"],
+                "dir": archived["dir"], "at": archived["at"], "sealedAt": archived["sealedAt"]}
+    xml = os.path.join(root, where, "jacoco.xml")
+    files = {}
+    if os.path.isfile(xml):
+        for (group, path), lines in inc.parse_jacoco(xml)["files"].items():
+            ins_c = sum(ci for _, ci in lines.values())
+            ins_t = sum(mi + ci for mi, ci in lines.values())
+            key = "%s:%s" % (group, path) if group else path
+            files[key] = {"covered": ins_c, "total": ins_t,
+                          "pct": round(ins_c * 100.0 / ins_t, 1) if ins_t else None,
+                          "linesCovered": sum(1 for _, ci in lines.values() if ci > 0), "linesTotal": len(lines)}
+    meta["summary"] = _brief(summary)
+    meta["hasReport"] = os.path.isfile(xml)
+    return meta, files
+
+
+def compare(cfg, name, a, b):
+    """两个版本（当前周期或任一归档）的对比：总量差 + 按源码文件的指令覆盖差。
+
+    文件级用 jacoco.xml 里 <sourcefile> 的行数据现算，不入库 —— 对比是偶尔看一次的东西，
+    两份 XML 各解析一遍几十毫秒，比给每个归档多存一张文件表划算。
+    """
+    svc = find_service(cfg, name)
+    ma, fa = _side(cfg, svc, a)
+    mb, fb = _side(cfg, svc, b)
+
+    def delta(key, sub=None):
+        sa, sb = ma["summary"], mb["summary"]
+        va = (sa.get(sub) or {}).get(key) if sub else (sa or {}).get(key)
+        vb = (sb.get(sub) or {}).get(key) if sub else (sb or {}).get(key)
+        if sa is None or sb is None or va is None or vb is None:
+            return None
+        return round(vb - va, 2)
+
+    rows = []
+    for key in sorted(set(fa) | set(fb)):
+        ea, eb = fa.get(key), fb.get(key)
+        if ea and eb:
+            status = "changed" if (ea["covered"], ea["total"]) != (eb["covered"], eb["total"]) else "same"
+            d = (eb["pct"] or 0) - (ea["pct"] or 0) if (ea["pct"] is not None and eb["pct"] is not None) else None
+        else:
+            status = "added" if eb else "removed"
+            d = None
+        rows.append({"path": key, "a": ea, "b": eb, "status": status,
+                     "delta": round(d, 1) if d is not None else None})
+    # 变化最大的排前面；新出现 / 消失的文件按路径排在后面
+    rows.sort(key=lambda r: (r["delta"] is None, -abs(r["delta"] or 0), r["path"]))
+    counts = {k: sum(1 for r in rows if r["status"] == k) for k in ("changed", "same", "added", "removed")}
+    return {
+        "service": name, "a": ma, "b": mb,
+        "delta": {"instruction": delta("instruction"), "branch": delta("branch"),
+                  "covered": delta("covered"), "total": delta("total"),
+                  "classesHit": delta("classesHit"), "classesTotal": delta("classesTotal"),
+                  "incremental": delta("pct", "incremental")},
+        "files": rows, "counts": counts,
+    }

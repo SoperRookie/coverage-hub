@@ -76,9 +76,11 @@ function onError(err: unknown): boolean {
       <nav>
         <router-link to="/" :class="{ active: route.path === '/' }">项目总览<span class="count">{{ projects.length }}</span></router-link>
         <router-link v-if="current" :to="`/projects/${encodeURIComponent(current.name)}`"
-                     :class="{ active: route.path.startsWith('/projects/') || route.path.startsWith('/services/') }">
+                     :class="{ active: (route.path.startsWith('/projects/') && !route.path.endsWith('/report')) || route.path.startsWith('/services/') }">
           {{ current.title || current.name }} 的服务<span class="count">{{ current.services.length }}</span>
         </router-link>
+        <router-link v-if="current" :to="`/projects/${encodeURIComponent(current.name)}/report`"
+                     :class="{ active: route.path.endsWith('/report') }">项目报表</router-link>
         <router-link v-if="unassignedCount" to="/unassigned" :class="{ active: route.path === '/unassigned' }">未分组服务<span class="count">{{ unassignedCount }}</span></router-link>
       </nav>
 

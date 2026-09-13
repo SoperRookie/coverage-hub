@@ -237,6 +237,43 @@ export interface ReportService {
   unitReports: Brief[];
 }
 
+export interface CompareSide {
+  ref: string;
+  label: string;
+  version: string | null;
+  dir: string | null;
+  at: string | null;
+  sealedAt: string | null;
+  summary: Brief | null;
+  hasReport: boolean;
+}
+
+export interface CompareFileSide {
+  covered: number;
+  total: number;
+  pct: number | null;
+  linesCovered: number;
+  linesTotal: number;
+}
+
+export interface CompareFile {
+  path: string;
+  a: CompareFileSide | null;
+  b: CompareFileSide | null;
+  status: "changed" | "same" | "added" | "removed";
+  delta: number | null;
+}
+
+export interface Compare {
+  service: string;
+  a: CompareSide;
+  b: CompareSide;
+  delta: { instruction: number | null; branch: number | null; covered: number | null; total: number | null;
+           classesHit: number | null; classesTotal: number | null; incremental: number | null };
+  files: CompareFile[];
+  counts: { changed: number; same: number; added: number; removed: number };
+}
+
 export interface ProjectReport {
   project: string;
   title: string;
@@ -263,6 +300,8 @@ export const api = {
     command(`api/predeploy?service=${enc(name)}${version ? `&version=${enc(version)}` : ""}`),
   /** 手动触发：用已有 exec 重出报告 */
   report: (name: string) => command(`api/report?service=${enc(name)}`),
+  compare: (name: string, a: string, b: string) =>
+    request<Compare>(`api/services/${enc(name)}/compare?a=${enc(a)}&b=${enc(b)}`),
   projectReport: (name: string, days: number) => request<ProjectReport>(`api/projects/${enc(name)}/report?days=${days}`),
   projects: () => request<{ projects: Project[] }>("api/projects"),
   createProject: (body: { name: string; title?: string | null; description?: string | null }) =>

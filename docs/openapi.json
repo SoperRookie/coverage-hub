@@ -2786,6 +2786,102 @@
         }
       }
     },
+    "/api/services/{name}/compare": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "两个版本的覆盖率对比",
+        "description": "总量（指令 / 分支 / 触达类 / 新增代码）的差，以及按源码文件的指令覆盖差（含只在一侧出现的文件）。",
+        "operationId": "compare_api_services__name__compare_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "a",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "基准：current 或归档目录名",
+              "default": "current",
+              "title": "A"
+            },
+            "description": "基准：current 或归档目录名"
+          },
+          {
+            "name": "b",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "对比：current 或归档目录名",
+              "default": "current",
+              "title": "B"
+            },
+            "description": "对比：current 或归档目录名"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/projects/{name}/report": {
       "get": {
         "tags": [

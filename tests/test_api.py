@@ -291,6 +291,41 @@ def test_detail_and_source_can_view_archived_version(hub, tmp_path):
     assert s["reportUrl"].startswith("/svc/versions/2.0/html/")
 
 
+def test_compare_versions(hub, tmp_path):
+    """历史对比：归档 vs 当前周期，总量差与按文件差。"""
+    from covhub.db import repo
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0"))
+    data = tmp_path / "data" / "svc"
+    arch = data / "versions" / "1.0"
+    arch.mkdir(parents=True)
+    old_xml = XML.replace('<line nr="5" mi="0" ci="2"', '<line nr="5" mi="2" ci="0"')   # 旧版这一行没跑到
+    (arch / "jacoco.xml").write_text(old_xml, encoding="utf-8")
+    (data / "current" / "jacoco.xml").write_text(XML, encoding="utf-8")
+    old = repo.add_snapshot("svc", {"at": "2026-09-13T09:00:00", "kind": "predeploy", "version": "1.0",
+                                    "instruction": 0.0, "branch": 0.0, "covered": 0, "total": 3,
+                                    "classesHit": 0, "classesTotal": 1})
+    repo.finish_archive("svc", snapshot_id=old["id"], version="1.0", archive_dir="versions/1.0",
+                        sealed_by="predeploy", sealed_at=old["at"])
+    repo.add_snapshot("svc", {"at": "2026-09-13T10:00:00", "kind": "dump", "version": "2.0",
+                              "instruction": 66.7, "branch": 0.0, "covered": 2, "total": 3,
+                              "classesHit": 1, "classesTotal": 1})
+
+    r = hub.get("/api/services/svc/compare?a=1.0&b=current", headers=H)
+    assert r.status_code == 200, r.text
+    c = r.json()
+    assert c["a"]["label"] == "1.0" and c["b"]["label"] == "当前周期"
+    assert c["delta"]["instruction"] == 66.7 and c["delta"]["covered"] == 2 and c["delta"]["classesHit"] == 1
+    assert c["delta"]["incremental"] is None                     # 两边都没有新增覆盖
+    f = c["files"][0]
+    assert f["path"] == "probe/Main.java" and f["status"] == "changed"
+    assert f["a"]["covered"] == 0 and f["b"]["covered"] == 2 and f["delta"] == 66.7
+    assert c["counts"] == {"changed": 1, "same": 0, "added": 0, "removed": 0}
+    assert hub.get("/api/services/svc/compare?a=9.9", headers=H).status_code == 409
+    # 同一侧比自己：全部 same、差为 0
+    c = hub.get("/api/services/svc/compare?a=current&b=current", headers=H).json()
+    assert c["delta"]["instruction"] == 0 and c["files"][0]["status"] == "same"
+
+
 def test_project_report(hub, tmp_path):
     from covhub.db import repo
     hub.post("/api/projects", headers=H, json={"name": "shop", "title": "商城"})
