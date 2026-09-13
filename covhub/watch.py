@@ -6,7 +6,6 @@ from .agent import reachable
 from .runtime import load_runtime
 from .cycle import snapshot
 from .db import repo
-from .dashboard import render_dashboard
 from .locks import LOCK
 from .logbuf import log
 
@@ -26,7 +25,6 @@ def watch_once(cfg):
             # 采集线程静默杀死 —— 守护进程无声停摆是最坏的失败模式。
             # KeyboardInterrupt 不在此列，Ctrl+C 仍然能正常退出。
             log("%s：采集失败 —— %s" % (svc["name"], exc))
-    render_dashboard(cfg)
 
 
 def watch_loop(cfg_path, interval, stop=None):

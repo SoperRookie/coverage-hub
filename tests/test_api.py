@@ -18,7 +18,6 @@ def hub(tmp_path, monkeypatch):
     data = tmp_path / "data"
     (data / "svc" / "current").mkdir(parents=True)
     (data / "svc" / "current" / "jacoco.xml").write_text("<report/>", encoding="utf-8")
-    (data / "index.html").write_text("<h1>看板</h1>", encoding="utf-8")
     cfg = {
         "jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
         "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
@@ -67,7 +66,7 @@ def test_static_gate_and_cookie_grant(hub):
     assert r.status_code == 302 and r.headers["location"] == "/"
     assert "covhub_token=secret" in r.headers["set-cookie"]
     assert "HttpOnly" in r.headers["set-cookie"]
-    assert hub.get("/", cookies={"covhub_token": "secret"}).status_code == 200
+    assert hub.get("/svc/current/", cookies={"covhub_token": "secret"}).status_code == 200
     r = hub.get("/svc/current/jacoco.xml", headers=H)
     assert r.status_code == 200 and r.text == "<report/>"
     # /api/* 上带 ?token= 只放行，不跳转
@@ -174,3 +173,33 @@ def test_build_inputs_diff_then_unit_xml(hub):
     assert hub.post("/api/diff?service=svc&version=2.0&base=v1", headers=H).status_code == 400   # 空正文
     r = hub.post("/api/recompute?service=svc&version=2.0", headers=H)
     assert r.status_code == 200 and r.json()["unit"]["pct"] == 100.0
+
+
+def test_overview_and_detail_shapes(hub):
+    hub.post("/api/projects", headers=H, json={"name": "shop"})
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0", project="shop"))
+    hub.post("/api/services", headers=H, json={"name": "lonely", "channel": "push"})
+    hub.post("/api/diff?service=svc&version=2.0&base=v1", headers=H, content=DIFF.encode())
+    hub.post("/api/unit-coverage?service=svc&version=2.0", headers=H, content=XML.encode())
+
+    r = hub.get("/api/overview", headers=H)
+    assert r.status_code == 200
+    o = r.json()
+    assert [p["name"] for p in o["projects"]] == ["shop"]
+    row = o["projects"][0]["services"][0]
+    assert row["name"] == "svc" and row["unknown"] is True and row["online"] is None   # 还没轮询过
+    assert row["runtime"] is None and row["unit"]["incremental"]["pct"] == 100.0
+    assert row["diff"]["addedLines"] == 1
+    assert [s["name"] for s in o["unassigned"]] == ["lonely"]
+    assert o["counts"]["services"] == 2 and "averageInstruction" not in o["projects"][0]["counts"]
+
+    r = hub.get("/api/services/svc/detail", headers=H)
+    assert r.status_code == 200
+    d = r.json()
+    assert d["unit"]["latest"]["line"] == 50.0
+    assert d["unit"]["incremental"]["files"][0]["path"] == "src/main/java/probe/Main.java"
+    assert d["runtime"]["latest"] is None and d["runtime"]["xmlUrl"] == "/svc/current/jacoco.xml"
+    assert d["config"]["includes"] == ["a.*"]
+    assert hub.get("/api/services/nosuch/detail", headers=H).status_code == 404
+    r = hub.get("/api/services/svc/versions", headers=H)
+    assert r.status_code == 200 and r.json()["latest"] is None

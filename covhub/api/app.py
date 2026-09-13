@@ -12,12 +12,11 @@ from fastapi import FastAPI
 
 from .. import __version__, config
 from ..collector import PushCollector, get_collector, set_collector
-from ..dashboard import render_dashboard
 from ..db import engine
 from ..logbuf import log
 from ..runtime import load_runtime, prepare_database
 from ..watch import watch_loop
-from . import routes_build, routes_control, routes_projects, routes_services, static
+from . import routes_build, routes_control, routes_projects, routes_services, routes_view, static
 from .responses import PrettyJSONResponse, install_handlers
 
 OPEN_ROUTES = ("/api/health", "/api/openapi.json")
@@ -40,7 +39,20 @@ TAGS = [
     {"name": "服务配置", "description": "服务的登记与修改（存数据库，改完立即生效）"},
     {"name": "项目", "description": "服务的分组"},
     {"name": "构建期", "description": "构建流水线送进来的单测报告与 git diff，用于单测覆盖率和新增代码覆盖率"},
+    {"name": "看板", "description": "前端面板用的只读视图"},
 ]
+
+
+def _retire_legacy_dashboard(data_dir):
+    """1.x 把看板渲染成 data/index.html。它不会再刷新了，留着只会在 / 上给出一份过期页面。"""
+    import os
+    legacy = os.path.join(data_dir, "index.html")
+    if os.path.isfile(legacy):
+        try:
+            os.replace(legacy, legacy + ".legacy")
+            log("旧看板 data/index.html 已改名为 index.html.legacy（2.x 的看板是独立前端）")
+        except OSError as exc:
+            log("! 旧看板 data/index.html 改名失败：%s" % exc)
 
 
 def create_app(cfg_path, *, with_watch=False, interval=None):
@@ -49,7 +61,7 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
         cfg = config.load_config(cfg_path)
         url = prepare_database(cfg)
         log("数据库：%s" % config.describe_database_url(url))
-        render_dashboard(load_runtime(cfg_path))
+        _retire_legacy_dashboard(cfg["dataDir"])
 
         collect = cfg.get("collect") or {}
         if collect.get("port"):
@@ -109,6 +121,7 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
     app.include_router(routes_services.import_router)
     app.include_router(routes_projects.router)
     app.include_router(routes_build.router)
+    app.include_router(routes_view.router)
     app.include_router(static.router)        # 兜底，必须最后挂
     return app
 

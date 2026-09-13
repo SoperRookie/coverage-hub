@@ -15,7 +15,6 @@ from .agent import agent_opts as _agent_opts, endpoint_label, reachable, service
 from .collector import get_collector, collector_instances
 from .config import find_service
 from .cycle import archive_cycle, check_data_health, record, snapshot
-from .dashboard import render_dashboard
 from .db import importer, repo
 from .diagnose import diagnose as _diagnose
 from .errors import CovhubError
@@ -67,7 +66,6 @@ def dump(cfg, name):
         raise CovhubError("连不上 %s —— 确认服务在跑，且 agent 用的是 output=tcpserver"
                           % endpoint_label(svc))
     entry, _, _ = snapshot(cfg, svc, reset=False, kind="dump")
-    render_dashboard(cfg)
     return entry
 
 
@@ -95,7 +93,6 @@ def predeploy(cfg, name, version=None, allow_missing=False):
     health = check_data_health(cfg, svc)
     archive = archive_cycle(cfg, svc, version, entry, out_dir, execs, "predeploy", health)
     log("  Sonar 可读取：%s" % os.path.join(archive, "jacoco.xml"))
-    render_dashboard(cfg)
     return entry
 
 
@@ -111,7 +108,6 @@ def report(cfg, name):
     summary = make_report(cfg, svc, execs, os.path.join(root, "current"), svc["name"])
     entry = record(cfg, svc, summary, "report")
     log("指令 %.1f%%  分支 %.1f%%" % (summary["INSTRUCTION"]["pct"], summary["BRANCH"]["pct"]))
-    render_dashboard(cfg)
     return entry
 
 
