@@ -1,5 +1,14 @@
 # 更新日志
 
+## v2.1.1（2026-09-14）
+
+- `covhub-client.sh`：统一请求函数；连接超时 10s / 单请求总超时 600s（`COVHUB_CONNECT_TIMEOUT` / `COVHUB_TIMEOUT`）；
+  只读 GET 自动重试，`dump` / `predeploy` 不重试；401 / 404 / 409 分类提示，退出码 0 / 1 / 2；`fetch-classes` 拒绝清空
+  `/`、`.`、`$HOME`；新增 `last-version <svc> --plain`（构建节点定 diff 基线不再需要 python3）与 `recompute`。
+- `docs/sql/`：MySQL 8 建库建用户、建表脚本（与 Alembic 迁移逐项比对一致，DBA 不给 DDL 权限时用）。
+- README 加效果图；看板左上角品牌改为 coverage-hub。
+- `docs/diagrams/` 不再进版本库。
+
 ## v2.1.0（2026-09-13）
 
 从单文件脚本升级为「包 + 数据库 + FastAPI + Vue 看板」的完整形态，新增项目维度、单测 / 新增代码覆盖率、历史版本与对比、报表导出、深色主题与内置接口文档。上一版 v1.2.2 之后的 37 个提交（含未单独打标签的 v1.3.0「配置支持 YAML」）全部并入本版。
