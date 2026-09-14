@@ -1080,6 +1080,28 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 - [ ] 看板上能找到该服务，详情页四个环形指标里至少「运行时 · 总覆盖」有值
 - [ ] （要单测 / 新增代码覆盖率的话）构建流水线已加 `unit-coverage` 与 `diff` 两步，详情页「新增代码明细」有文件列表
 
+### 看板每一块数据从哪来
+
+只做完 §3 的话，看板上只有「运行时 · 总覆盖」一个数。要把详情页、报表上的每一块都填满，对照这张表补：
+
+| 看板上的东西 | 数据来源 | 要做到的事 |
+|---|---|---|
+| 运行时 · 总覆盖、趋势图、在线状态 | hub 轮询 agent | §3 接入 + hub 带 `--with-watch` 起 |
+| 运行时 · 新增代码、「新增代码」页签 | 运行时报告 ∩ 这一版的 git diff | 构建流水线推 `diff`（§5.6），**版本串与服务的 `version` 一致** |
+| 「新增代码」里点开看源码 | `sourcefiles` 指向的源码目录 | Step 8 配 `sourcefiles`（当前版本的源码；历史版本用结算时存下的片段） |
+| 单测 · 总覆盖、「单测覆盖率」页签 | 构建流水线推的 jacoco.xml | §6 加聚合模块 + §5.6 推 `unit-coverage` |
+| 单测 · 新增代码 | 单测 XML ∩ git diff | 上面两条都做 |
+| 已结算版本、版本下拉（历史版本） | 每次 `predeploy` 的归档 | 发版流程排进 `predeploy`（§5），每发一版多一条 |
+| 历史对比 | 两个归档 / 当前周期的 jacoco.xml | 至少结算过一版；比对的是运行时指令覆盖 |
+| 触达类、指纹匹配率、`diagnose` | exec 与 class 指纹 | Step 7 `upload-classes --retarget`（或 `classDumpDir`） |
+| JaCoCo 原生报告下钻到行 | `sourcefiles` | Step 8 |
+| 项目卡片、项目报表、侧栏项目 | 服务归属项目 | Step 3 `--project` 或看板里「添加服务」 |
+| 报表里的「期间结算版本 / 单测报告」 | archives / unit_reports 表 | 同上两行：有 `predeploy`、有 `unit-coverage` |
+| 断代记录 | hub 自动检测 | 不用做，pull 通道自动；push 只告警混版本 |
+
+一句话：**运行时靠接入，新增代码靠 diff，单测靠 XML，历史靠 predeploy，源码靠 sourcefiles，分组靠 project**。
+前三样以外都是可选的，缺哪块看板就在哪块显示「—」，不会报错。
+
 ---
 
 ## 8. 日常运维（Day-2）
