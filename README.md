@@ -1,4 +1,4 @@
-# coverage-hub v2.1.1
+# coverage-hub v2.2.0
 
 通用 JaCoCo 覆盖率方案：**运行期**随服务启动自动采集、发版前自动结算；**构建期**的单测
 覆盖率与 git diff 由流水线送进来；一个 Vue 看板按项目 → 服务展示**总覆盖率**与**本版本新增
@@ -236,19 +236,14 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 **diff 里有、报告里没有的源码文件**（被 agent 的 `excludes` 排掉，或不在 `classfiles` 里）会单独列在
 `unmatched` 里，看板上有中性提示 —— 它们从分母里消失比算错更糟。
 
-### 3. 推 SonarQube
-
-单测报告推 Sonar 的做法不变（`Jenkinsfile.build` 的 `SonarQube` 阶段）；运行期那份 XML 也能推，
-**建议用独立的 project key**（如 `myapp-runtime`），见 `integration/sonar/README.md`。
-
 ---
 
 ## 三、Jenkins 接入
 
 见 `integration/jenkins/`：一个 Shared Library（`vars/covhub.groovy`）加两条流水线模板。
 
-- `Jenkinsfile.build` —— 构建期：跑测试 → 聚合报告 → **推单测报告与 diff 给 hub** → 推 Sonar → 归档 class 产物（可选）
-- `Jenkinsfile.deploy` —— 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复 → 推 Sonar
+- `Jenkinsfile.build` —— 构建期：跑测试 → 聚合报告 → **推单测报告与 diff 给 hub** → 归档 class 产物（可选）
+- `Jenkinsfile.deploy` —— 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复
 
 安装步骤、节点前置条件与各步骤的注意事项见 `integration/jenkins/README.md`。
 

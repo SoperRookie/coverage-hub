@@ -11,7 +11,6 @@
  *   3. deploy          —— 停旧实例、部署新版本、起新实例
  *   4. upload-classes  —— 产物传给 hub，并把配置指过去（retarget）
  *   5. verify          —— 确认 agent 就绪，并校验 class 指纹确实对得上
- *   6. sonar           —— 推旧版本的运行期覆盖率
  *
  * 第 1 步一旦跑到停服之后，那段运行期覆盖率数据永久丢失 —— agent 随进程消失，
  * tcpserver 端口关闭，没有任何补救手段。
@@ -21,7 +20,7 @@
  *
  * 本流水线走远程模式：所有动作由 COVHUB_URL 指向的那一个 hub 完成，
  * 发版节点只需要 curl —— 不装 Python、不装 java、不放配置文件，
- * 也不囤 class 产物：新产物传给 hub，旧产物推 Sonar 时再从 hub 取回。
+ * 也不囤 class 产物：新产物传给 hub，要用时再从 hub 取回（fetchClasses）。
  */
 
 pipeline {
@@ -209,40 +208,6 @@ pipeline {
                                             service: params.SERVICE,
                                             min: minMatch)
                     }
-                }
-            }
-        }
-
-        stage('6 · 推送旧版本覆盖率到 Sonar') {
-            steps {
-                script {
-                    def old = params.OLD_VERSION
-                    if (!old) {
-                        echo '未指定 OLD_VERSION，跳过推送（归档报告仍可在看板查看）'
-                        return
-                    }
-                    // 报告和 class 都在 hub 上，取回本节点再推。
-                    // binaries 必须是采集时运行的那份 class —— hub 上存的正是它。
-                    def xml = covhub.fetchReport(
-                        hub:     env.COVHUB_URL,
-                        service: params.SERVICE,
-                        version: old,
-                        dest:    "${WORKSPACE}/jacoco-runtime-${old}.xml"
-                    )
-                    def binaries = covhub.fetchClasses(
-                        hub:     env.COVHUB_URL,
-                        tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
-                        service: params.SERVICE,
-                        version: old,
-                        dest:    "${WORKSPACE}/.covhub-classes/${old}"
-                    )
-                    covhub.pushSonar(
-                        projectKey:  "${params.SERVICE}-runtime",
-                        projectName: "${params.SERVICE} (runtime coverage)",
-                        xmlReport:   xml,
-                        binaries:    binaries,
-                        sources:     "src/main/java"
-                    )
                 }
             }
         }

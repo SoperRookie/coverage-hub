@@ -1,5 +1,13 @@
 # 更新日志
 
+## v2.2.0（2026-09-14）
+
+- **移除 SonarQube 集成**：删掉 `integration/sonar/`（`push-runtime.sh`、runtime project 说明与属性文件）、
+  Jenkins 共享库的 `covhub.pushSonar`、`Jenkinsfile.build` 的 SonarQube 阶段与 `SONAR_*` 变量、
+  `Jenkinsfile.deploy` 的第 6 步「推旧版本覆盖率到 Sonar」；README / ONBOARDING / 部署片段里相关章节一并删除。
+  `fetchReport` / `fetchClasses` / `fetch-classes` 保留（取回某版本的 jacoco.xml 与 class 产物仍有用）。
+  覆盖率的展示与门禁以 hub 看板和报表为准。
+
 ## v2.1.1（2026-09-14）
 
 - `covhub-client.sh`：统一请求函数；连接超时 10s / 单请求总超时 600s（`COVHUB_CONNECT_TIMEOUT` / `COVHUB_TIMEOUT`）；

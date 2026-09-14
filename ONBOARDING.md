@@ -750,7 +750,7 @@ Step 3 里 `classfiles` 随便填的那个值到这里被自动纠正。两台�
 > `upload-classes` 传上来即可（`Jenkinsfile.build` 里有现成的一步）。两者都有时优先
 > 用 classdumpdir 那份 —— 它才是运行时真相。
 
-日后推 Sonar 需要某个版本的 class 时，从 hub 取回来即可，本机不必囤：
+日后要在别处用某个版本的 class（重出报告、比对）时，从 hub 取回来即可，本机不必囤：
 
 ```bash
 covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
@@ -921,7 +921,6 @@ classfiles  /opt/coverage-hub/data/order-service/artifacts/1.4.2
 3. wait-online     确认新实例 agent 就绪
 4. upload-classes  把新版本的 class 传给 hub 并指过去（--retarget）
 5. diagnose        体检：确认这一版的 class 真的对得上
-6. sonar           推旧版本的 jacoco.xml（可选）
 ```
 
 全是发给 hub 的 HTTP 请求，**发版节点只要有 curl**。
@@ -1028,7 +1027,7 @@ covhub-client.sh diff order-service "$VERSION" covhub.diff --base "$(git rev-par
   服务配置里的 `version` 得是同一个字符串，hub 才能把 diff 和运行时快照对上。
   `diff` 命令的返回体里 `matchesCurrentVersion: false` 就是在提醒这件事。
 - **分母只算 JaCoCo 有探针的行。** 空行、注释、import、纯声明不参与；一次全文件格式化会让
-  整个文件算成新增（和 Sonar 一样）。没有可覆盖的新增行时看板显示「无新增」。
+  整个文件算成新增。没有可覆盖的新增行时看板显示「无新增」。
 - **顺序不限。** diff、单测 XML、运行时快照哪个先到都行，晚到的会把已有的重算一遍，已归档
   的版本也会回写。
 
@@ -1058,14 +1057,7 @@ mvn clean verify                      # 不能加 -DskipTests，否则没有 exe
 ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 ```
 
-Sonar 配置：
-
-```properties
-sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregate/jacoco.xml
-```
-
-运行期那份建议推到**独立的 project key**（`order-service-runtime`），和单测的并列，
-原因与做法见 `integration/sonar/README.md`。
+这份 XML 就是 §5.6 里 `unit-coverage` 推给 hub 的那个文件。
 
 ---
 

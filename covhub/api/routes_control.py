@@ -276,7 +276,7 @@ def _store_locked(cfg, svc, version, path):
 def classes(service: str = Query(..., description="服务名"),
             version: str = Query(..., description="版本标识"),
             cfg: dict = Depends(get_cfg)):
-    """打成 tar.gz 回传。推 Sonar 时 -Dsonar.java.binaries 要的就是**采集时运行的那份 class**
+    """打成 tar.gz 回传。在别处重出报告时要的就是**采集时运行的那份 class**
     —— 有了它，发版节点不必自己囤历史产物。
 
     两个来源按可信度排序：先找 upload-classes 传上来的 artifacts/<版本>/，

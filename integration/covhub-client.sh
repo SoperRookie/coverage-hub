@@ -241,8 +241,8 @@ last-version)
     ;;
 
 fetch-classes)
-    # 取回某个版本的 class 产物解到目标目录。推 Sonar 时
-    # -Dsonar.java.binaries 要的就是它 —— 本机不必囤历史产物。
+    # 取回某个版本的 class 产物解到目标目录（要在别处重出报告或比对时用）——
+    # 本机不必囤历史产物。
     need "${3:-}" "用法：$0 fetch-classes <service> <version> <目标目录>"
     DEST=$3
     # 目标目录会被清空重建：拦住显然不该清的路径

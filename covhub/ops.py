@@ -92,7 +92,7 @@ def predeploy(cfg, name, version=None, allow_missing=False):
     # 体检要赶在归档之前 —— archive_cycle 会把 exec 移走
     health = check_data_health(cfg, svc)
     archive = archive_cycle(cfg, svc, version, entry, out_dir, execs, "predeploy", health)
-    log("  Sonar 可读取：%s" % os.path.join(archive, "jacoco.xml"))
+    log("  归档报告：%s" % os.path.join(archive, "jacoco.xml"))
     return entry
 
 

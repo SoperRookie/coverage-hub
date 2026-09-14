@@ -186,7 +186,7 @@ def do_dump(cfg, svc, dest, reset=False):
 
 
 def make_report(cfg, svc, execfiles, out_dir, name):
-    """生成 HTML + XML + CSV。XML 就是推 SonarQube 用的那份。"""
+    """生成 HTML + XML + CSV。XML 是看板与新增覆盖计算读的那份。"""
     classfiles = prepare_classfiles(cfg, svc)
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir, exist_ok=True)

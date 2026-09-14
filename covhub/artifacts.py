@@ -107,7 +107,7 @@ def classes_sources(cfg, svc, version):
 def pack_classes(cfg, svc, version, dest):
     """把该版本的 class 产物打成 tar.gz 写到 dest，返回 (class 数, 字节数)。
 
-    发版节点因此不必自己留一份 class 产物：推 Sonar 时从 hub 取回即可。
+    发版节点因此不必自己留一份 class 产物：要用时从 hub 取回即可。
     """
     sources = classes_sources(cfg, svc, version)
     if not sources:

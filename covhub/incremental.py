@@ -1,6 +1,6 @@
 """新增代码的覆盖率：git diff 的新增行 × JaCoCo 报告的行级数据。
 
-分母口径与 SonarQube 的「New Lines to Cover」一致：diff 新增行里**JaCoCo 有探针记录
+分母口径：diff 新增行里**JaCoCo 有探针记录
 的行**才算（空行、注释、import、纯声明没有探针，本来就不参与覆盖率）；分子是其中
 `ci > 0` 的行（含部分覆盖，和 LINE 计数器同口径）。删除的行、只改不增的行不参与。
 `total == 0` 时 pct 是 None —— 空 diff（只改了 yaml）是合法的，前端显示「—」。
