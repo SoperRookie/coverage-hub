@@ -225,9 +225,9 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 就不参与覆盖率），分子是其中被执行到的行（含部分覆盖，和 LINE 计数器同口径）。删除的行、只改
 不增的行不参与。没有可覆盖的新增行时显示「无新增」而不是 0% 或 100%。
 
-**基线怎么定**：`$BASE` 是上一版的 commit / tag，由流水线决定。`GET /api/services/<svc>/versions`
-（groovy 的 `covhub.lastVersion`）返回最近结算版本对应的 `head`，流水线可以先问 hub 再 diff；
-问不到就退回 `origin/main`。浅克隆要先 `git fetch --unshallow --tags`。
+**基线怎么定**：`$BASE` 是上一版的 commit / tag，由流水线决定。先问 hub 上一次结算的版本对应的 `head`
+（`covhub-client.sh last-version <svc> --plain | cut -f2`，groovy 里是 `covhub.lastVersion`，接口是
+`GET /api/services/<svc>/versions`），问不到（第一次接入）就退回 `origin/main`。浅克隆要先 `git fetch --unshallow --tags`。
 
 **版本串必须一致**：构建时给的 `version`、发版时 `predeploy` / `retarget` 用的 `version`、快照里记的
 `version` 三处要是同一个字符串，hub 才能把 diff 和快照对上。`POST /api/diff` 的返回体里

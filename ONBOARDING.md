@@ -374,7 +374,14 @@ fetch-classes <service> <version> <目标目录>     取回某版本的 class �
 wait-online <service> [超时秒数，默认 120]       等新实例的 agent 就绪
 unit-coverage <service> <version> <jacoco.xml> [--group 模块]   构建流水线：送单测报告
 diff <service> <version> <diff文件> --base <基线> [--head <本次>] 构建流水线：送 git diff
+last-version <service> [--plain]               上一次结算的版本与其 diff 的 head（定 diff 基线）
+recompute <service> [version]                  按已有 diff 重算新增代码覆盖
 ```
+
+环境变量除 `COVHUB_URL` / `COVHUB_TOKEN` 外还有 `COVHUB_TIMEOUT`（单次请求最长秒数，默认 600，
+predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。退出码：0 成功、1 hub 返回非 2xx
+（业务失败，响应体的 `log` 里有原因）、2 连不上 hub 或参数错。只有 GET 会自动重试，`dump` / `predeploy`
+这类会改状态的不重试。
 
 ---
 
@@ -1003,9 +1010,9 @@ push 通道下滚动发版中途新旧副本同时在线，hub 会检出「混�
 covhub-client.sh unit-coverage order-service "$VERSION" \
     coverage-report/target/site/jacoco-aggregate/jacoco.xml
 
-# 2. 这一版的 git diff。基线是上一版的 commit / tag：可以先问 hub 上一次结算的版本对应的 commit
-BASE=$(curl -s -H "X-Covhub-Token: $COVHUB_TOKEN" "$COVHUB_URL/api/services/order-service/versions" \
-       | python3 -c 'import json,sys;print((json.load(sys.stdin).get("latest") or {}).get("head") or "origin/main")')
+# 2. 这一版的 git diff。基线是上一版的 commit / tag：先问 hub 上一次结算的版本对应的 commit
+BASE=$(covhub-client.sh last-version order-service --plain | cut -f2)   # 第一次接入时为空
+BASE=${BASE:-origin/main}
 git fetch --unshallow --tags 2>/dev/null || git fetch --tags
 git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR \
     "$BASE"..HEAD -- '*.java' '*.kt' > covhub.diff
