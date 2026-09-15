@@ -1,5 +1,11 @@
 # 更新日志
 
+## 未发布
+
+- 修复：一个版本周期攒下几百个 exec 后，`report` / `merge` / `execinfo` 把全部文件塞进一条命令行，
+  Windows 上撞 CreateProcess 的 32767 字符上限（`WinError 206 文件名或扩展名太长`），采集与 dump 全部失败。
+  现在超长时自动分批：execinfo 分批拼接输出，merge 滚动合并，report 先合并成临时 exec 再出报告（结果一致）。
+
 ## v2.2.0（2026-09-14）
 
 - **移除 SonarQube 集成**：删掉 `integration/sonar/`（`push-runtime.sh`、runtime project 说明与属性文件）、

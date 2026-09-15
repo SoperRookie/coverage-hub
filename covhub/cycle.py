@@ -10,7 +10,7 @@ from .agent import service_channel
 from .collector import get_collector, collector_instances
 from .db import repo
 from .diagnose import diagnose
-from .jacoco import do_dump, exec_sessions, fingerprint, make_report, run_cli
+from .jacoco import do_dump, exec_sessions, fingerprint, make_report, merge_execs
 from .layout import ensure_dirs, safe_segment, svc_dir
 from .logbuf import log
 
@@ -134,7 +134,7 @@ def archive_cycle(cfg, svc, version, entry, out_dir, execs, reason, health=None)
     if moved:
         try:
             merged = os.path.join(archive, "merged.exec")
-            run_cli(cfg, ["merge"] + moved + ["--destfile", merged])
+            merge_execs(cfg, moved, merged)
         except RuntimeError as exc:
             log("  ! merge 失败，跳过（原始快照不受影响）：%s" % exc)
             merged = None

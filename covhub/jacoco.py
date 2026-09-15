@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 
 from .layout import svc_dir
 from .logbuf import log
@@ -73,6 +74,12 @@ def prepare_classfiles(cfg, svc):
         results.append(dest)
     log("  class 过滤：保留 %d，按 reportExcludes 剔除 %d" % (kept, dropped))
     return results
+# 一个版本周期里每 5 分钟一份快照，跑上两天就是五六百个 exec，全部塞进一条命令行
+# 在 Windows 上会撞 CreateProcess 的 32767 字符上限（WinError 206）。Linux 的上限
+# 高得多，但同样有限，所以统一按这个阈值分批，不区分平台。
+MAX_CMDLINE = 30000
+
+
 def run_cli(cfg, args, quiet=True):
     cmd = ["java", "-jar", cfg["jacocoCli"]] + args
     if quiet:
@@ -81,6 +88,47 @@ def run_cli(cfg, args, quiet=True):
     if proc.returncode != 0:
         raise RuntimeError((proc.stderr or proc.stdout or "").strip()[:600])
     return proc.stdout
+
+
+def _cmdline_len(cfg, args):
+    return len(subprocess.list2cmdline(["java", "-jar", cfg["jacocoCli"]] + list(args) + ["--quiet"]))
+
+
+def _batches(cfg, head, files, tail=()):
+    """把 files 切成若干批，保证 head + 批 + tail 拼成的命令行不超长。"""
+    files = list(files)
+    if not files:
+        return
+    batch = []
+    for path in files:
+        if batch and _cmdline_len(cfg, list(head) + batch + [path] + list(tail)) > MAX_CMDLINE:
+            yield batch
+            batch = []
+        batch.append(path)
+    yield batch
+
+
+def merge_execs(cfg, execfiles, dest):
+    """把多个 exec 合并成 dest。文件多到一条命令放不下时分批滚动合并。"""
+    execfiles = list(execfiles)
+    tmp = dest + ".part"
+    first = True
+    # 每批都带上前一轮的结果：merge 的输入和输出不能是同一个文件，所以经 .part 中转
+    try:
+        for batch in _batches(cfg, ["merge", dest], execfiles, ["--destfile", tmp]):
+            inputs = batch if first else [dest] + batch
+            run_cli(cfg, ["merge"] + inputs + ["--destfile", tmp])
+            os.replace(tmp, dest)
+            first = False
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+    return dest
+
+
+def _execinfo(cfg, execfiles):
+    return "".join(run_cli(cfg, ["execinfo"] + batch, quiet=False)
+                   for batch in _batches(cfg, ["execinfo"], execfiles))
 # --------------------------------------------------------------------------
 # jacococli 输出解析
 #
@@ -107,7 +155,7 @@ def exec_sessions(cfg, execfiles):
     """读出 exec 里的会话信息，返回 [{id, start, dump}]。"""
     if not execfiles:
         return []
-    out = run_cli(cfg, ["execinfo"] + list(execfiles), quiet=False)
+    out = _execinfo(cfg, execfiles)
     sessions = []
     for line in out.splitlines():
         m = RE_SESSION.match(line.strip())
@@ -121,7 +169,7 @@ def exec_class_ids(cfg, execfiles):
     """读出 exec 里记录了哪些 class id，返回 {指纹: (命中, 探针, 类名)}。"""
     if not execfiles:
         return {}
-    out = run_cli(cfg, ["execinfo"] + list(execfiles), quiet=False)
+    out = _execinfo(cfg, execfiles)
     found = {}
     for line in out.splitlines():
         m = RE_EXEC_CLASS.match(line.strip())
@@ -191,19 +239,36 @@ def make_report(cfg, svc, execfiles, out_dir, name):
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir, exist_ok=True)
 
-    args = ["report"] + list(execfiles)
+    tail = []
     for path in classfiles:
-        args += ["--classfiles", path]
+        tail += ["--classfiles", path]
     for path in svc.get("sourcefiles", []):
-        args += ["--sourcefiles", path]
-    args += [
+        tail += ["--sourcefiles", path]
+    tail += [
         "--html", os.path.join(out_dir, "html"),
         "--xml", os.path.join(out_dir, "jacoco.xml"),
         "--csv", os.path.join(out_dir, "jacoco.csv"),
         "--name", name,
         "--encoding", svc.get("sourceEncoding", "UTF-8"),
     ]
-    run_cli(cfg, args)
+    execfiles = list(execfiles)
+    merged = None
+    try:
+        # report 内部就是把所有 exec 先加载合并再统计，所以先 merge 成一个临时文件
+        # 再出报告结果完全一样；只在命令行放不下时才这么绕一圈
+        if len(execfiles) > 1 and _cmdline_len(cfg, ["report"] + execfiles + tail) > MAX_CMDLINE:
+            fd, merged = tempfile.mkstemp(suffix=".exec", prefix="covhub-report-")
+            os.close(fd)
+            log("  exec 有 %d 份，先合并再出报告" % len(execfiles))
+            merge_execs(cfg, execfiles, merged)
+            execfiles = [merged]
+        run_cli(cfg, ["report"] + execfiles + tail)
+    finally:
+        if merged:
+            try:
+                os.remove(merged)
+            except OSError:
+                pass
     return summarize(os.path.join(out_dir, "jacoco.csv"))
 
 
