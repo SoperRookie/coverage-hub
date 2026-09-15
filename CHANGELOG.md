@@ -1,6 +1,6 @@
 # 更新日志
 
-## 未发布
+## v2.2.1（2026-09-15）
 
 - 修复：一个版本周期攒下几百个 exec 后，`report` / `merge` / `execinfo` 把全部文件塞进一条命令行，
   Windows 上撞 CreateProcess 的 32767 字符上限（`WinError 206 文件名或扩展名太长`），采集与 dump 全部失败。

@@ -3,7 +3,7 @@
   "info": {
     "title": "covhub 控制 API",
     "description": "JaCoCo 运行期覆盖率的采集与看板。整套方案只有 hub 这一个服务端，被测机器和发版节点不装 Python、不装 java、不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。\n\n**写接口在 hub 内部串行执行**，返回体里带着这次执行的日志。**非 2xx 一律表示失败**，调用方应据此让部署流程停下来。\n\n发版节点上更省事的做法是用 integration/covhub-client.sh 包一层。",
-    "version": "2.1.1"
+    "version": "2.2.1"
   },
   "paths": {
     "/api/health": {
@@ -3567,7 +3567,7 @@
             "title": "Version",
             "description": "hub 版本",
             "examples": [
-              "2.1.1"
+              "2.2.1"
             ]
           },
           "services": {
