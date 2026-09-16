@@ -190,7 +190,8 @@ exec 不可再生，因为对不上就拒绝归档只会两头落空。）
 ## 前后端分离部署（nginx）
 
 2.3 起看板是独立交付物：产物在版本库的 `web/dist`，不再随 Python 包分发。**前端由 nginx 发，
-`/api/*`、`/docs` 与报告目录反代给 hub**，完整模板见 `integration/nginx/covhub.conf`。
+`/api/*`、`/docs` 与报告目录反代给 hub**，完整模板见 `integration/nginx/covhub.conf`，
+一步步的部署步骤与排障对照表见 **ONBOARDING §2.5 / §2.6**。
 
 ```sh
 scp -r web/dist/* nginx机器:/opt/covhub-web/     # 换版本就是覆盖一遍，不用重启 hub

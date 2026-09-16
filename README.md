@@ -302,6 +302,8 @@ covhub-client.sh wait-online    order-service            # 4. 确认新实例采
 
 前后端是两个交付物：Python 包（API + 采集 + 报告目录）和前端产物（`web/dist`，进版本库）。
 两种部署方式，接口和数据完全一样，区别只在谁来发那几个静态文件。
+**照着做的完整步骤（含 nginx 配置、验证命令、对照排障表）在 [ONBOARDING §2](ONBOARDING.md#2-搭建-hub-与看板一次性)**，
+这里只讲形态。
 
 **一、前后端分离（默认）。** 前端产物交给 nginx，`/api/*`、`/docs`、报告目录反代给 hub：
 
