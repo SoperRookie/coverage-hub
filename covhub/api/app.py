@@ -56,6 +56,23 @@ def _retire_legacy_dashboard(data_dir):
             log("! 旧看板 data/index.html 改名失败：%s" % exc)
 
 
+def _log_web_mode(cfg, port):
+    """启动时说清看板由谁托管。
+
+    2.3 起前端是独立交付物，运维最容易困惑的就是「打开 8900 怎么是一页说明」——
+    与其让人去翻文档，不如启动时一行说明白。`webDir` 配了却指向空目录是更隐蔽的
+    一种坏法（拷贝漏了目录、路径写错），那时看板 404 而 API 一切正常，所以单独告警。
+    """
+    web = static.web_dir(cfg)
+    if web is None:
+        log("看板： 由外部托管（未配 serve.webDir，本进程只发 API 与报告目录）")
+    elif not (web / "index.html").is_file():
+        log("  ! serve.webDir 指向 %s，但那里没有 index.html —— 看板打不开，"
+            "API 和报告目录不受影响" % web)
+    else:
+        log("看板： http://127.0.0.1:%d/  （serve.webDir=%s）" % (port, web))
+
+
 def create_app(cfg_path, *, with_watch=False, interval=None):
     @contextlib.asynccontextmanager
     async def lifespan(app):
@@ -85,6 +102,7 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
         log("控制 API： http://127.0.0.1:%d/api/health%s"
             % (port, "" if config.token(cfg) else
                "    [未设置 serve.token：写接口与 data/ 整个目录都对外敞开]"))
+        _log_web_mode(cfg, port)
         try:
             yield
         finally:

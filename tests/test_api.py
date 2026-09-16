@@ -80,6 +80,37 @@ def test_static_gate_and_cookie_grant(hub):
     assert hub.get("/nonexistent.png", headers=H).status_code == 404
 
 
+def test_startup_log_says_who_serves_the_dashboard(tmp_path, monkeypatch, db_url_for_app, capsys):
+    """启动日志要说清看板由谁托管 —— 三种形态各有一行，配歪了要告警。
+
+    「打开 8900 怎么是一页说明」是分离部署后最常见的困惑，日志里说明白比让人翻文档强。
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    web = tmp_path / "dist"
+    web.mkdir()
+
+    def boot(web_dir):
+        cfg = {"jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
+               "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
+               "dataDir": str(data), "database": {"url": db_url_for_app},
+               "serve": {"token": "secret", "webDir": web_dir}}
+        cfg_path = tmp_path / ("covhub-%s.json" % abs(hash(web_dir)))
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        with TestClient(create_app(str(cfg_path)), base_url="http://hub"):
+            pass
+        return capsys.readouterr().err
+
+    monkeypatch.delenv("COVHUB_TOKEN", raising=False)
+    monkeypatch.delenv("COVHUB_DATABASE_URL", raising=False)
+
+    assert "由外部托管" in boot("")                      # 分离部署：本进程不发前端
+    assert "没有 index.html" in boot(str(web))           # 配了却是空目录：拷贝漏了，告警
+    (web / "index.html").write_text("<title>x</title>", encoding="utf-8")
+    out = boot(str(web))
+    assert "看板：" in out and "serve.webDir=" in out     # 自托管：直接给出地址
+
+
 def test_self_hosted_web_dir(tmp_path, monkeypatch, db_url_for_app):
     """serve.webDir 配上了就照旧托管看板：产物免令牌，dataDir 仍要令牌。"""
     web = tmp_path / "dist"

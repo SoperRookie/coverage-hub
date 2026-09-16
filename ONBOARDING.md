@@ -297,9 +297,15 @@ nohup python3 covhub.py serve --with-watch --port 8900 > covhub.log 2>&1 &
 [10:00:01] 数据库：mysql+pymysql://covhub:***@10.0.0.6:3306/covhub?charset=utf8mb4
 [10:00:01] push 收集端已监听 0.0.0.0:6400（等待 output=tcpclient 的 agent 连入）   ← 配了 collect.port 才有
 [10:00:01] 采集线程已启动，每 300 秒轮询一次
-[10:00:01] covhub 2.3.0 已启动： http://127.0.0.1:8900/  （根目录 /opt/coverage-hub/data）
+[10:00:01] covhub 2.3.1 已启动： http://127.0.0.1:8900/  （根目录 /opt/coverage-hub/data）
 [10:00:01] 控制 API： http://127.0.0.1:8900/api/health
+[10:00:01] 看板： 由外部托管（未配 serve.webDir，本进程只发 API 与报告目录）
 ```
+
+**最后一行说的就是看板归谁**（§2.5 那两种形态）：配了 `serve.webDir` 时它会变成
+`看板： http://127.0.0.1:8900/  （serve.webDir=/opt/covhub/web）`；如果配了却指向一个
+没有 `index.html` 的目录（拷贝漏了、路径写错），这里会是一行 `!` 开头的告警 ——
+那种坏法很隐蔽：API 一切正常，只有看板 404。
 
 第一行如果是 `sqlite:///…`，说明 `database.url` 没生效 —— 生产上忘配环境变量静默跑在
 SQLite 上是常见事故。最后一行末尾如果多了 `[未设置 serve.token：……]`，回 §2.3。
