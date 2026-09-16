@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, provide, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
-import { ApiError, api, gotoWithToken, type Project } from "./api";
+import { ApiError, api, login, type Project } from "./api";
 import { theme } from "./ui/theme";
 
 // 壳：左侧栏（品牌、项目选择、导航）+ 内容区。层级是项目 → 服务，所以项目选择固定在侧栏。
@@ -42,7 +42,23 @@ function onSelect(value: string) {
 
 const needToken = ref(false);
 const token = ref("");
+const tokenError = ref("");
+const loggingIn = ref(false);
 const message = ref("");
+
+/** 令牌换 Cookie，成功后 login() 自己会刷新页面。 */
+async function submitToken() {
+  if (!token.value || loggingIn.value) return;
+  loggingIn.value = true;
+  tokenError.value = "";
+  try {
+    await login(token.value);
+  } catch (err) {
+    tokenError.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    loggingIn.value = false;
+  }
+}
 
 function onError(err: unknown): boolean {
   if (err instanceof ApiError && err.status === 401) {
@@ -95,7 +111,7 @@ function onError(err: unknown): boolean {
           </el-radio-group>
         </div>
         <div>coverage-hub {{ version || "" }}</div>
-        <div><a href="docs" target="_blank">接口文档 (Swagger)</a></div>
+        <div><a href="/docs" target="_blank">接口文档 (Swagger)</a></div>
         <div>覆盖率不按阈值着色，颜色只表示运维状态</div>
       </div>
     </aside>
@@ -111,9 +127,10 @@ function onError(err: unknown): boolean {
 
   <el-dialog v-model="needToken" title="需要访问令牌" width="420px" :close-on-click-modal="false">
     <p class="muted">这个 hub 配了 serve.token。填一次，之后靠 Cookie 放行。</p>
-    <el-input v-model="token" placeholder="serve.token" show-password @keyup.enter="gotoWithToken(token)" />
+    <el-input v-model="token" placeholder="serve.token" show-password @keyup.enter="submitToken" />
+    <p v-if="tokenError" class="muted" style="color: var(--el-color-danger)">{{ tokenError }}</p>
     <template #footer>
-      <el-button type="primary" :disabled="!token" @click="gotoWithToken(token)">进入</el-button>
+      <el-button type="primary" :disabled="!token" :loading="loggingIn" @click="submitToken">进入</el-button>
     </template>
   </el-dialog>
 
