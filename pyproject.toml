@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "covhub"
-version = "2.2.1"
+version = "2.3.1"
 description = "JaCoCo 运行期覆盖率的采集与看板"
 requires-python = ">=3.12"
 dependencies = [
@@ -28,8 +28,9 @@ covhub = "covhub.cli:main"
 packages = ["covhub", "covhub.api", "covhub.db", "covhub.db.migrations", "covhub.db.migrations.versions"]
 
 [tool.setuptools.package-data]
-# 前端产物随包分发：hub 机器不装 node
-covhub = ["webui/**", "db/migrations/script.py.mako"]
+# 只有后端自己的资源（/docs 用的 swagger-ui）。前端产物 2.3 起不随包分发 ——
+# 它是独立交付物，在 web/dist，给 nginx 解包或用 serve.webDir 指过去
+covhub = ["static/**", "db/migrations/script.py.mako"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

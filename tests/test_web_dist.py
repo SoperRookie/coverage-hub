@@ -1,10 +1,15 @@
-"""前端产物：必须在包里、只引相对资源、不引任何 CDN（hub 常在内网）。"""
+"""前端产物：只引相对资源、不引任何 CDN（hub 常在内网）。
+
+2.3 起产物是独立交付物，在 web/dist（进版本库，但不再随 Python 包分发）——
+部署时解包给 nginx，或者用 serve.webDir 让 hub 自己托管。
+"""
 import os
 import re
+from pathlib import Path
 
 import pytest
 
-from covhub.api.static import WEB_DIR
+WEB_DIR = Path(__file__).resolve().parent.parent / "web" / "dist"
 
 INDEX = WEB_DIR / "index.html"
 

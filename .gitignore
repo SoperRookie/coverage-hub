@@ -35,7 +35,8 @@ covhub.db-*
 __pycache__/
 *.py[cod]
 
-# 前端：只忽略依赖，构建产物 covhub/webui/ 进版本库（改前端后在开发机 npm run build 一起提交）
+# 前端：只忽略依赖。构建产物 web/dist/ 进版本库（改前端后在开发机 npm run build 一起提交）——
+# 它不再随 Python 包分发，但 hub / nginx 那边的机器不装 node，克隆下来就得能直接部署
 web/node_modules/
 web/auto-imports.d.ts
 web/components.d.ts

@@ -1,4 +1,7 @@
-"""在线接口文档：hub 自己托管 Swagger UI（/docs），资源在包里（webui/swagger/），不引 CDN。
+"""在线接口文档：hub 自己托管 Swagger UI（/docs），资源在包里（covhub/static/swagger/），不引 CDN。
+
+资源由本模块自己的 /swagger/<文件> 路由发出，**不经过兜底静态路由** —— 2.3 起前端产物
+是独立交付物，前后端分离部署时 hub 根本没有 webDir，接口文档不能跟着一起失效。
 
 OpenAPI 描述直接内嵌在页面里，不再单独开 /api/openapi.json —— 只有这一个入口看文档。
 页面不要令牌，但「Try it out」打带令牌的接口时要填一次 X-Covhub-Token（右上角 Authorize），
@@ -6,12 +9,18 @@ Swagger UI 会替每个请求带上头。
 """
 import json
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import FileResponse, HTMLResponse
 
-from .static import NO_CACHE, WEB_DIR
+from .static import MEDIA, NO_CACHE, STATIC_DIR, get_hub_cfg, web_dir
+from .responses import error
 
 router = APIRouter(include_in_schema=False)
+
+SWAGGER_DIR = STATIC_DIR / "swagger"
+# 白名单：这个目录只该发这四个文件，不做通配（它和 dataDir 不一样，没有令牌门禁）
+SWAGGER_FILES = ("swagger-ui.css", "swagger-ui-bundle.js",
+                 "swagger-ui-standalone-preset.js", "favicon-32x32.png")
 
 PAGE = """<!doctype html>
 <html lang="zh-CN">
@@ -31,8 +40,7 @@ PAGE = """<!doctype html>
 </head>
 <body>
   <div class="covhub-bar">
-    <a href="./">← 回看板</a>
-    带令牌的接口先点右侧 <b>Authorize</b> 填 <code>X-Covhub-Token</code>；写接口会真的执行（dump / predeploy 会改数据）。
+    __HOME__带令牌的接口先点右侧 <b>Authorize</b> 填 <code>X-Covhub-Token</code>；写接口会真的执行（dump / predeploy 会改数据）。
   </div>
   <div id="swagger-ui"></div>
   <script src="./swagger/swagger-ui-bundle.js"></script>
@@ -56,11 +64,24 @@ PAGE = """<!doctype html>
 
 
 @router.get("/docs")
-def docs_page(request: Request):
-    if not (WEB_DIR / "swagger" / "swagger-ui-bundle.js").is_file():
-        return HTMLResponse("<p>还没构建前端（cd web && npm run build），Swagger UI 的资源不在包里。"
+def docs_page(request: Request, cfg: dict = Depends(get_hub_cfg)):
+    if not (SWAGGER_DIR / "swagger-ui-bundle.js").is_file():
+        return HTMLResponse("<p>Swagger UI 的资源不在包里（covhub/static/swagger/）。"
                             "接口描述可用 <code>covhub openapi</code> 导出成文件。</p>",
                             status_code=503, headers=NO_CACHE)
     # 内嵌进 <script>：把 </ 断开，免得 spec 里的字符串提前关掉标签
     spec = json.dumps(request.app.openapi(), ensure_ascii=False).replace("</", "<\\/")
-    return HTMLResponse(PAGE.replace("__SPEC__", spec), headers=NO_CACHE)
+    # 分离部署时 hub 的根不是看板，这个链接只在自托管（配了 webDir）时才给
+    home = '<a href="/">← 回看板</a> ' if web_dir(cfg) is not None else ""
+    return HTMLResponse(PAGE.replace("__SPEC__", spec).replace("__HOME__", home), headers=NO_CACHE)
+
+
+@router.get("/swagger/{name}")
+def swagger_asset(name: str):
+    """Swagger UI 的静态资源。和 /docs 一样不要令牌 —— 它们是公开的第三方构建产物。"""
+    if name not in SWAGGER_FILES:
+        return error(404, "未知路径")
+    target = SWAGGER_DIR / name
+    if not target.is_file():
+        return error(404, "未知路径")
+    return FileResponse(str(target), media_type=MEDIA.get(target.suffix.lower()), headers=NO_CACHE)

@@ -1,11 +1,12 @@
 {
   "name": "covhub-web",
   "private": true,
-  "version": "2.2.1",
+  "version": "2.3.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build && node scripts/copy-swagger.mjs",
+    "build": "vue-tsc --noEmit && vite build",
+    "swagger": "node scripts/copy-swagger.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

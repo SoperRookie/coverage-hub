@@ -6,25 +6,29 @@
 
 import os
 import tempfile
+import urllib.parse
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Security
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, PlainTextResponse
 from starlette.background import BackgroundTask
 
 from .. import __version__, ops
 from ..artifacts import pack_classes, store_classes
-from ..config import find_service
+from ..config import find_service, load_config
+from ..config import token as config_token
 from ..db import repo
 from ..errors import CovhubError
 from ..locks import LOCK
 from ..logbuf import capture_logs, log
 from . import schemas
-from .auth import get_cfg, require_token
+from .auth import TOKEN_COOKIE, get_cfg, require_token, token_header, token_ok
 from .params import as_list, merged_params, truthy
 from .responses import PrettyJSONResponse, error
 
 open_router = APIRouter(tags=["探活"])
+# 登录也不要令牌（它就是来验令牌的），但和探活不是一类，单独挂一个
+session_router = APIRouter(tags=["会话"])
 router = APIRouter(dependencies=[Depends(require_token)])
 
 ERR = {401: {"model": schemas.Error, "description": "令牌无效或缺失"},
@@ -75,6 +79,30 @@ async def health(request: Request):
     except Exception:                        # 库连不上也得报活着，服务名给空
         names = []
     return PrettyJSONResponse({"ok": True, "version": __version__, "services": names})
+
+
+@session_router.post("/api/login", summary="用令牌换一个 Cookie",
+                  response_model=schemas.LoginResult,
+                  responses={401: {"model": schemas.Error, "description": "令牌无效或缺失"}})
+async def login(request: Request, hdr: str | None = Security(token_header)):
+    """看板的登录入口：令牌走 X-Covhub-Token 头，对了就种下 Cookie。
+
+    前后端分离部署时看板的首页由 nginx 发，hub 收不到它 —— 靠静态目录 `?token=` 种
+    Cookie 的老路走不通了。令牌只出现在这一个请求的头里，不进地址栏、浏览器历史和
+    Referer，比原先跳 /?token= 更稳妥。
+
+    报告链接直接分享出去的场景仍然走 `?token=`（见 api/static.py）。
+    """
+    expected = config_token(load_config(request.app.state.cfg_path))
+    if not expected:
+        # 没配令牌的 hub 本来就人人可用，种 Cookie 没有意义
+        return PrettyJSONResponse({"ok": True, "tokenRequired": False})
+    if not token_ok(hdr, expected):
+        raise HTTPException(401, "令牌无效或缺失")
+    resp = PrettyJSONResponse({"ok": True, "tokenRequired": True})
+    resp.set_cookie(TOKEN_COOKIE, urllib.parse.quote(expected), path="/",
+                    httponly=True, samesite="strict")
+    return resp
 
 
 # ---- 查询 ----

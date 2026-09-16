@@ -21,6 +21,11 @@ class Health(BaseModel):
     services: list[str] = Field(description="已登记的服务名")
 
 
+class LoginResult(BaseModel):
+    ok: bool = True
+    tokenRequired: bool = Field(description="这个 hub 配了 serve.token 吗。false 时不种 Cookie，也不用登录")
+
+
 class Summary(BaseModel):
     """一次采集的结果摘要。"""
     model_config = ConfigDict(extra="allow")

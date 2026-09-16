@@ -13,8 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # 项目名只是显示与 URL 参数（会编码），允许中文：\w 在 Python 里含 CJK；仍不能以 . 或 - 开头
 PROJECT_RE = re.compile(r"^[\w][\w.-]*$")
-# 这些名字在 hub 的 URL 根下另有含义（前端产物、控制 API），服务不能叫这些
-RESERVED_NAMES = {"api", "assets", "index.html", "favicon.ico", "agent.jar"}
+# 这些名字在 hub 的 URL 根下另有含义（控制 API、接口文档、自托管时的前端产物），
+# 服务不能叫这些 —— 路由先匹配，重名的服务报告目录会被静默遮住
+RESERVED_NAMES = {"api", "assets", "index.html", "favicon.ico", "agent.jar",
+                  "docs", "swagger"}
 
 
 def _as_str_list(value):

@@ -15,6 +15,8 @@ database:
 serve:
   port: 8900
   token: ""                  # 控制 API 的令牌，不配则任何人都能调写接口
+  webDir: ""                 # 看板前端产物目录。留空 = 前后端分离部署，看板由 nginx 之类
+                             # 托管，hub 只做 API + 报告目录；填上则由 hub 一起托管（单机够用）
 
 watch:
   intervalSeconds: 300       # 轮询间隔，同时是断代时数据丢失的上界

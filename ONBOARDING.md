@@ -7,7 +7,7 @@
 |---|---|---|
 | [§0 先读这一页](#0-先读这一页) | 所有人 | —— |
 | [§1 接入前的准备](#1-接入前的准备一次性) | 平台 / 运维 | 一次 |
-| [§2 搭建 hub](#2-搭建-hub一次性) | 平台 / 运维 | 一次 |
+| [§2 搭建 hub 与看板](#2-搭建-hub-与看板一次性) | 平台 / 运维 | 一次 |
 | [§3 接入一个服务](#3-接入一个服务每个服务各做一遍) | 服务负责人 + 发版同学 | 每个服务一次 |
 | [§4 完整实操记录](#4-一次完整的实操记录) | 第一次接入的人 | 照着敲一遍 |
 | [§5 接发版流水线](#5-接发版流水线) | 发版同学 | 每个服务一次 |
@@ -41,7 +41,8 @@
 
 | 机器 | 需要什么 | 不需要什么 |
 |---|---|---|
-| **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里） |
+| **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里，`web/dist`） |
+| **看板那一台**（可以就是 hub 那台） | nginx 之类的静态服务器 + `web/dist` 的内容（模板见 `integration/nginx/covhub.conf`）。不想单独部署就配 `serve.webDir`，让 hub 一起托管 | Node、Python |
 | **被测服务所在机器** | `jacocoagent.jar`（`covhub-client.sh fetch-agent` 下载）；pull 通道要能被 hub 连上 agent 端口 | Python、covhub、配置文件 |
 | **发版节点 / 流水线** | `curl`（用 `integration/covhub-client.sh` 包一层） | Python、java、配置文件、历史 class 产物 |
 | **被测项目本身** | **什么都不用改** | 代码、pom、Dockerfile、启动脚本 |
@@ -150,27 +151,47 @@ order-service-uat
 
 ---
 
-## 2. 搭建 hub（一次性）
+## 2. 搭建 hub 与看板（一次性）
 
 ### 2.1 选一台机器
 
 **只需要一台**，整个团队共用。要求：
 
 - 能连到所有 pull 通道服务的 agent 端口；push 通道的被测端能连到它
-- 装有 Python 3.7+ 和 java 8+
+- 装有 Python 3.12 和 java 8+
 - 磁盘留出余量：`data/` 会持续增长（§8.2 有估算）
 
 通常放测试环境的一台管理机。被测服务和发版节点都不在这台机器上跑任何 covhub
 进程 —— 它们通过 HTTP 让这台机器干活。
 
-### 2.2 部署
+**要部署的是两样东西**（2.3 起看板是独立交付物）：
+
+| 交付物 | 是什么 | 装在哪 |
+|---|---|---|
+| **hub** | Python 包：控制 API + 定时采集 + push 收集端 + 报告目录 | 上面选的这台机器 |
+| **看板前端** | 一堆静态文件（`web/dist`，已在版本库里，不用装 node） | nginx 之类的静态服务器；单机场景也可以让 hub 自己托管 |
+
+两种摆法，步骤在 §2.5：
+
+```
+① 分离部署（默认）                      ② hub 自托管（单机够用）
+
+  浏览器 → nginx ┬─ /            静态       浏览器 → hub:8900 ┬─ /        看板
+                 └─ /api、/docs、报告 → hub                    └─ /api、报告
+```
+
+**不管哪种，浏览器看到的必须是同一个源。** 控制面的鉴权认 Cookie，hub 一个 CORS 头都不发 ——
+把前端单独放到另一个域名下、让它跨域调 hub 的 API 是**不支持的**（浏览器会直接拦掉）。
+要分域名就得把 hub 也反代到同一个域名下，nginx 模板就是这么写的。
+
+### 2.2 部署 hub
 
 ```bash
 sudo mkdir -p /opt/coverage-hub
 sudo chown "$USER" /opt/coverage-hub
 cd /opt/coverage-hub
 
-git clone <本仓库> .                # covhub.py、covhub/、integration/、lib/ 下两个 jar、前端产物都在版本库里
+git clone <本仓库> .                # covhub.py、covhub/、integration/、lib/ 下两个 jar、前端产物 web/dist 都在版本库里
 python3 --version                   # 3.12
 java -version                       # ≥ 8
 pip3 install .                      # 依赖：FastAPI、uvicorn、SQLAlchemy、Alembic、pydantic、PyYAML、PyMySQL
@@ -253,7 +274,8 @@ python3 -c "import secrets; print(secrets.token_urlsafe(24))"
 
 | 场景 | 怎么带 |
 |---|---|
-| 浏览器看看板 | 第一次打开 `http://<hub>:8900/?token=<令牌>`。hub 种一个 `HttpOnly` Cookie 再 302 跳回干净地址，之后点报告、翻历史版本都不必再带 |
+| 浏览器看看板 | 打开看板，在弹出的输入框里填一次。前端拿它调 `POST /api/login` 换一个 `HttpOnly` Cookie，之后点报告、翻历史版本都不必再带 |
+| 直接分享报告链接 | 在地址后加 `?token=<令牌>`，hub 种下 Cookie 再 302 跳回干净地址（给没打开过看板的人发 `jacoco.xml` 链接时用） |
 | `curl` / 流水线 | `-H "X-Covhub-Token: <令牌>"` |
 | `covhub-client.sh` | 设环境变量 `COVHUB_TOKEN`，脚本自己加头 |
 
@@ -275,9 +297,15 @@ nohup python3 covhub.py serve --with-watch --port 8900 > covhub.log 2>&1 &
 [10:00:01] 数据库：mysql+pymysql://covhub:***@10.0.0.6:3306/covhub?charset=utf8mb4
 [10:00:01] push 收集端已监听 0.0.0.0:6400（等待 output=tcpclient 的 agent 连入）   ← 配了 collect.port 才有
 [10:00:01] 采集线程已启动，每 300 秒轮询一次
-[10:00:01] covhub 2.1.0 已启动： http://127.0.0.1:8900/  （根目录 /opt/coverage-hub/data）
+[10:00:01] covhub 2.3.1 已启动： http://127.0.0.1:8900/  （根目录 /opt/coverage-hub/data）
 [10:00:01] 控制 API： http://127.0.0.1:8900/api/health
+[10:00:01] 看板： 由外部托管（未配 serve.webDir，本进程只发 API 与报告目录）
 ```
+
+**最后一行说的就是看板归谁**（§2.5 那两种形态）：配了 `serve.webDir` 时它会变成
+`看板： http://127.0.0.1:8900/  （serve.webDir=/opt/covhub/web）`；如果配了却指向一个
+没有 `index.html` 的目录（拷贝漏了、路径写错），这里会是一行 `!` 开头的告警 ——
+那种坏法很隐蔽：API 一切正常，只有看板 404。
 
 第一行如果是 `sqlite:///…`，说明 `database.url` 没生效 —— 生产上忘配环境变量静默跑在
 SQLite 上是常见事故。最后一行末尾如果多了 `[未设置 serve.token：……]`，回 §2.3。
@@ -317,11 +345,94 @@ sudo journalctl -u covhub -f          # 看日志
 > 进程手上，`watch` 进程够不着）。只在你确定不用 push、且采集耗时确实拖慢了 API 时
 > 才这么拆。
 
-### 2.5 验证 hub
+### 2.5 部署看板前端
+
+前端产物**已经在版本库里**（`web/dist`，改前端的人在开发机构建好一起提交），所以这一步
+不需要 node、不需要联网装依赖 —— 就是把一个目录放到能被 HTTP 服务到的地方。
+
+#### 方式一：nginx（默认，推荐）
+
+```bash
+# 在 nginx 那台机器上
+sudo mkdir -p /opt/covhub-web
+sudo cp -r /opt/coverage-hub/web/dist/* /opt/covhub-web/      # 或者从别处 scp 过来
+sudo cp /opt/coverage-hub/integration/nginx/covhub.conf /etc/nginx/conf.d/
+```
+
+模板里**只有两处要改**：
+
+```nginx
+server_name covhub.internal;          # ① 改成你的域名 / IP
+...
+proxy_pass http://127.0.0.1:8900;     # ② hub 不在同一台机器就改成 http://<hub 的内网地址>:8900
+```
+
+第 ② 处在模板里出现了四次（`/api/`、`/docs`、`/swagger/`、报告目录各一次），一起改。
+
+```bash
+sudo nginx -t && sudo systemctl reload nginx
+```
+
+模板里已经配好的四类路径，改的时候别漏（少一条看板就是半瘫）：
+
+| 路径 | 归谁 | 说明 |
+|---|---|---|
+| `/`、`/assets/*` | nginx | 看板本身。`assets/` 带 hash，长缓存；`index.html` 不缓存 |
+| `/api/*` | hub | 控制 API。`client_max_body_size 200m`（上传接口走原始正文）、`proxy_read_timeout 300s`（predeploy 要跑 jacococli） |
+| `/docs`、`/swagger/*` | hub | 内置接口文档 |
+| `/<服务>/(current\|versions\|unit\|artifacts\|diff)/` | hub | JaCoCo 报告、`jacoco.xml`、class 产物、diff |
+
+三个**容易踩的坑**：
+
+- **别在 nginx 层再加一套 basic auth。** hub 的令牌 Cookie 流程会被打断。访问控制统一用
+  `serve.token`（§2.3）。
+- **`location /` 不要回落 `index.html`。** 模板用的是 `try_files $uri $uri/ =404`：看板走
+  hash 路由（`#/projects/xxx`），服务端只会收到 `/`，根本不需要 history 回落；而一旦回落，
+  `covhub-client.sh`、Jenkins 库那些 `curl -sSf` 取报告的请求就会拿到 200 的 HTML 而不是失败信号。
+- **hub 的 8900 不必对浏览器开放**，但**必须对发版节点和流水线开放** —— 它们直接打
+  `/api/*`（`COVHUB_URL`），不经过 nginx。
+
+#### 方式二：hub 自己托管（单机、懒得装 nginx）
+
+把产物拷到 hub 机器上，配置里指过去，一个端口全包：
+
+```bash
+sudo mkdir -p /opt/covhub/web
+sudo cp -r /opt/coverage-hub/web/dist/* /opt/covhub/web/
+```
+
+```yaml
+serve:
+  port: 8900
+  token: "<令牌>"
+  webDir: /opt/covhub/web      # 相对路径按 covhub.yaml 所在目录解析
+```
+
+**不用重启** —— 静态路由每个请求都重读配置文件，改完刷新浏览器就生效（`serve.port` 那种
+才需要重启）。这就回到 covhub 2.2 及以前的形态：`http://<hub>:8900/` 就是看板，报告、API
+全在同一个端口下。
+
+> 留空 `webDir` 就是纯后端形态 —— 打开 `http://<hub>:8900/` 会看到一页说明（告诉你 API 和
+> 文档在哪），**那是对的，不是部署坏了**。
+
+#### 以后怎么换版本
+
+前端是纯静态文件，**换版本就是覆盖一遍目录，不用重启 hub**：
+
+```bash
+cd /opt/coverage-hub && git pull
+sudo cp -r web/dist/* /opt/covhub-web/        # 或 /opt/covhub/web
+```
+
+文件名带 hash，浏览器不会拿到半新半旧的缓存；`index.html` 本身配的是不缓存。
+
+### 2.6 验证
+
+**第一步：hub 本身**（在 hub 那台机器上，直连 8900，不经过 nginx）
 
 ```bash
 curl -s http://127.0.0.1:8900/api/health
-# {"ok": true, "version": "2.1.0", ...}
+# {"ok": true, "version": "2.3.0", ...}
 
 curl -s http://127.0.0.1:8900/order-service/current/jacoco.xml
 # {"ok": false, "error": "..."}  ← 401，说明令牌生效了；返回 404 或文件内容都说明没生效
@@ -329,15 +440,46 @@ curl -s http://127.0.0.1:8900/order-service/current/jacoco.xml
 curl -s -H "X-Covhub-Token: <令牌>" http://127.0.0.1:8900/api/status
 # {"ok": true, "services": []}
 
+curl -s -o /dev/null -w '%{http_code}
+' http://127.0.0.1:8900/docs
+# 200 —— 接口文档不要令牌，资源在 Python 包里，不依赖前端
+
 python3 covhub.py status
 # 服务                   连通     指令%     分支%     版本       最后更新
 # ------------------------------------------------------------------------------
 ```
 
-浏览器打开 `http://<hub>:8900/?token=<令牌>` 应能看到空看板（也可以直接打开 `/`，前端
-本身不要令牌，它拿到 API 的 401 后会弹出令牌输入框）。
+**第二步：看板**（从浏览器能到的地址打，分离部署就是 nginx 的地址）
 
-### 2.6 把客户端脚本发给各团队
+```bash
+HUB=http://covhub.internal        # 自托管形态就写 http://<hub>:8900
+
+curl -s $HUB/ | grep -o '<title>.*</title>'
+# <title>coverage-hub 覆盖率看板</title>   ← 出现「covhub」说明页 = 前端没部署好（见下表）
+
+curl -s -o /dev/null -w '%{http_code}
+' $HUB/api/health
+# 200 —— 反代通了。404 说明 nginx 少了 /api/ 那条 location
+
+curl -si -X POST -H "X-Covhub-Token: <令牌>" $HUB/api/login | grep -i set-cookie
+# set-cookie: covhub_token=...; HttpOnly; Path=/; SameSite=strict
+```
+
+**第三步：浏览器**。打开看板应能看到一个空面板；配了令牌的话会弹输入框，填一次
+（前端拿它调 `POST /api/login`）换到 Cookie，之后 API 和报告链接都放行。
+
+对不上时照这张表查：
+
+| 现象 | 多半是 |
+|---|---|
+| 打开是一页写着「covhub」的说明 | 你打的是 hub 的 8900，而它没配 `webDir`（纯后端形态）。看板在 nginx 那边 |
+| 404 / 白屏 | `web/dist` 没拷到 nginx 的 `root` 目录，或 `root` 写错 |
+| 看板出来了，但每块数据都报错 | nginx 少了 `/api/` 的 location，或 `proxy_pass` 的 hub 地址不通 |
+| 数据正常，点「JaCoCo 报告」404 | 少了报告目录那条 `location ~ ^/[^/]+/(current\|versions\|unit\|artifacts\|diff)/` |
+| 填了令牌还是一直弹输入框 | Cookie 没种上：检查是不是跨域访问的（前端和 hub 不同源），或 nginx 吞了 `Set-Cookie` |
+| 上传单测 XML 报 413 | nginx 的 `client_max_body_size` 没调大（模板里是 200m） |
+
+### 2.7 把客户端脚本发给各团队
 
 ```bash
 # 发版节点 / 被测机器上，只要这一个脚本 + curl
@@ -1151,23 +1293,33 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 | `reportExcludes` / `sourcefiles` / `sourceEncoding` | 不用重启任何东西，`covhub-client.sh report <svc>` 重出报告 |
 | `includes` / `excludes` / `classDumpDir` / `bindAddress` / `port` | 重新取 `agent-opts`，**重启被测服务**。改了 `includes` 之后 class 集合变了，记得重传 class |
 | `address` / `version` / `classfiles` / `project` | 不用重启，下一轮采集 / 下一次刷新看板生效 |
-| `watch.intervalSeconds` / `serve.*` / `collect.*` / `database.*` | **重启 hub** |
+| `serve.token` / `serve.webDir` | 不用重启，下一次请求就生效（配置文件每个请求重读）。令牌走环境变量 `COVHUB_TOKEN` 的话要重启进程 |
+| `serve.port` / `watch.intervalSeconds` / `collect.*` / `database.*` | **重启 hub**（这几项在启动时读一次） |
 | 加 / 删一条 service | 不用重启 hub。删的话先跑一次 `predeploy` 把数据结算掉；`service remove` 只删配置，`data/<service>/` 和库里的历史不动 |
 
 ### 8.5 换令牌
 
-改 `serve.token` → 重启 hub → 更新发版节点的 `COVHUB_TOKEN` 与 Jenkins 凭据 →
-浏览器重新用 `?token=` 打开一次看板。K8s 用 initContainer 下载 agent 的话，Secret 也要换。
+改 `serve.token` → **不用重启**（下一个请求就换过来，旧令牌当场失效）→ 更新发版节点的
+`COVHUB_TOKEN` 与 Jenkins 凭据 → 浏览器里重新填一次令牌。K8s 用 initContainer 下载 agent
+的话，Secret 也要换。
+
+令牌是给 hub 进程设的环境变量 `COVHUB_TOKEN` 时例外 —— 那个改了要重启进程。
+换令牌是个**断流的操作**：所有还没更新凭据的流水线会立刻 401，安排在没有发版的窗口做。
 
 ### 8.6 升级 covhub
 
 ```bash
 cd /opt/coverage-hub && git pull && sudo systemctl restart covhub
+sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同步过去（§2.5）
 ```
+
+**两个交付物要一起更新**：只重启 hub 不换前端，看板可能调到一个还不存在的新接口；
+只换前端不重启 hub 同理。升级窗口里两步连着做。
 
 配置文件、数据库、`data/` 都不在版本库里，`git pull` 不会碰它们。依赖有变化时重跑
 `pip3 install .`；表结构有变化时 `serve` 启动会自动升级（`autoUpgrade: true`），或手工
-`python3 covhub.py db upgrade`。前端产物随仓库更新，hub 机器不需要 Node。
+`python3 covhub.py db upgrade`。前端产物随仓库更新（`web/dist`），hub 机器不需要 Node；
+分离部署时记得把新产物同步到 nginx 那台：`scp -r web/dist/* nginx机器:/opt/covhub-web/`。
 
 ### 8.7 升级 JaCoCo
 
@@ -1241,8 +1393,10 @@ cd /opt/coverage-hub && git pull && sudo systemctl restart covhub
 | 上传单测 XML 返回 413 | nginx 日志 | 反代的 `client_max_body_size` 默认 1m，聚合 XML 有几十 MB，调大 |
 | hub 启动日志第一行是 `sqlite:///…` | —— | `database.url` 没配或环境变量没传到进程，跑在了单机试用的 SQLite 上 |
 | 看板卡片提示「采集可能已经停了」 | hub 日志 | 超过 3 个轮询周期没新数据：hub 进程挂了、`--with-watch` 没带、或服务下线了 |
-| 浏览器打开看板弹「需要访问令牌」 | —— | 配了 `serve.token`。填一次，hub 种 Cookie 后不再问；或直接用 `?token=` 打开 |
-| 浏览器打开 `/` 是一段 401 JSON 或目录列表 | hub 日志第一行的版本号 | 跑的还是 1.x，或前端产物 `covhub/webui/` 缺失（`pip install .` 没带上 / 手工拷贝漏了目录） |
+| 浏览器打开看板弹「需要访问令牌」 | —— | 配了 `serve.token`。填一次换到 Cookie，之后不再问 |
+| 打开 hub 的 `/` 看到一页说明而不是看板 | —— | 正常：前后端分离时看板在 nginx 那边。要让 hub 自己托管就配 `serve.webDir` |
+| 打开看板是 404 / 白屏 | nginx 日志 | `web/dist` 没同步到 nginx 的 root 目录，或 root 配错；产物换版本后要整个目录覆盖 |
+| 看板能开但所有数据都报错 | 浏览器控制台 | nginx 没把 `/api/` 反代给 hub（照 `integration/nginx/covhub.conf` 补齐 `/api/`、`/docs`、报告目录三条 location） |
 | 看板本来能开，某天开始要令牌 | —— | hub 加了 `serve.token`。令牌同时管着静态目录 |
 | 日志采集把 `Picked up JAVA_TOOL_OPTIONS` 当错误告警 | —— | 那是 JVM 打到 stderr 的正常提示，加个过滤规则 |
 | APM agent 与 JaCoCo 同时挂，匹配率异常 | 调整 `-javaagent` 顺序 | JaCoCo 要放在会改字节码的 agent **前面** |

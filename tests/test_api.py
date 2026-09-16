@@ -61,8 +61,9 @@ def test_status_keeps_grep_friendly_format(hub):
 
 
 def test_static_gate_and_cookie_grant(hub):
-    # 面板产物免令牌（配了 token 的 hub 首页得先能打开）；dataDir 照旧拦
-    assert hub.get("/").status_code in (200, 404)
+    # 没配 webDir（前后端分离的默认形态）：根路径是说明页，不是 401 JSON 也不是目录列表
+    r = hub.get("/")
+    assert r.status_code == 200 and "covhub" in r.text and "/docs" in r.text
     assert hub.get("/svc/current/jacoco.xml").status_code == 401
     r = hub.get("/?token=secret", follow_redirects=False)
     assert r.status_code == 302 and r.headers["location"] == "/"
@@ -74,9 +75,67 @@ def test_static_gate_and_cookie_grant(hub):
     # /api/* 上带 ?token= 只放行，不跳转
     assert hub.get("/api/health?token=secret", follow_redirects=False).status_code == 200
     # 带错令牌打开首页不报 401：让 SPA 自己去撞 401 再弹输入框
-    assert hub.get("/?token=wrong", follow_redirects=False).status_code in (200, 404)
-    # 产物文件不落到 dataDir 门禁；未知路径还是 404，不回落 index.html
+    assert hub.get("/?token=wrong", follow_redirects=False).status_code == 200
+    # 未知路径还是 404，不回落 index.html（脚本靠 404 判失败）
     assert hub.get("/nonexistent.png", headers=H).status_code == 404
+
+
+def test_startup_log_says_who_serves_the_dashboard(tmp_path, monkeypatch, db_url_for_app, capsys):
+    """启动日志要说清看板由谁托管 —— 三种形态各有一行，配歪了要告警。
+
+    「打开 8900 怎么是一页说明」是分离部署后最常见的困惑，日志里说明白比让人翻文档强。
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    web = tmp_path / "dist"
+    web.mkdir()
+
+    def boot(web_dir):
+        cfg = {"jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
+               "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
+               "dataDir": str(data), "database": {"url": db_url_for_app},
+               "serve": {"token": "secret", "webDir": web_dir}}
+        cfg_path = tmp_path / ("covhub-%s.json" % abs(hash(web_dir)))
+        cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+        with TestClient(create_app(str(cfg_path)), base_url="http://hub"):
+            pass
+        return capsys.readouterr().err
+
+    monkeypatch.delenv("COVHUB_TOKEN", raising=False)
+    monkeypatch.delenv("COVHUB_DATABASE_URL", raising=False)
+
+    assert "由外部托管" in boot("")                      # 分离部署：本进程不发前端
+    assert "没有 index.html" in boot(str(web))           # 配了却是空目录：拷贝漏了，告警
+    (web / "index.html").write_text("<title>x</title>", encoding="utf-8")
+    out = boot(str(web))
+    assert "看板：" in out and "serve.webDir=" in out     # 自托管：直接给出地址
+
+
+def test_self_hosted_web_dir(tmp_path, monkeypatch, db_url_for_app):
+    """serve.webDir 配上了就照旧托管看板：产物免令牌，dataDir 仍要令牌。"""
+    web = tmp_path / "dist"
+    (web / "assets").mkdir(parents=True)
+    (web / "index.html").write_text("<!doctype html><title>covhub 看板</title>", encoding="utf-8")
+    (web / "assets" / "index-abc.js").write_text("console.log(1)", encoding="utf-8")
+    data = tmp_path / "data"
+    (data / "svc" / "current").mkdir(parents=True)
+    cfg = {"jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
+           "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
+           "dataDir": str(data), "database": {"url": db_url_for_app},
+           "serve": {"token": "secret", "webDir": str(web)}}
+    cfg_path = tmp_path / "covhub.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.delenv("COVHUB_TOKEN", raising=False)
+    monkeypatch.delenv("COVHUB_DATABASE_URL", raising=False)
+    with TestClient(create_app(str(cfg_path)), base_url="http://hub") as client:
+        r = client.get("/")
+        assert r.status_code == 200 and "看板" in r.text          # 免令牌
+        r = client.get("/assets/index-abc.js")
+        assert r.status_code == 200 and "immutable" in r.headers["cache-control"]
+        assert client.get("/svc/current/", follow_redirects=False).status_code == 401
+        # 自托管时 /docs 才给「回看板」的链接
+        r = client.get("/docs")
+        assert r.status_code != 200 or '<a href="/">' in r.text
 
 
 def test_static_rejects_traversal_and_unknown_api(hub):
@@ -140,21 +199,37 @@ def test_services_crud(hub):
 
 def test_docs_page_is_open_and_self_hosted(hub):
     """/docs 不要令牌，Swagger UI 的资源从包里出，不引 CDN；spec 带令牌的 securityScheme。"""
-    from covhub.api.static import WEB_DIR
+    from covhub.api.docs import SWAGGER_DIR
     r = hub.get("/docs")
-    if not (WEB_DIR / "swagger" / "swagger-ui-bundle.js").is_file():
+    if not (SWAGGER_DIR / "swagger-ui-bundle.js").is_file():
         assert r.status_code == 503
     else:
         assert r.status_code == 200 and "http://" not in r.text and "https://" not in r.text
         assert "./swagger/swagger-ui-bundle.js" in r.text and "spec: {" in r.text
         assert "/api/predeploy" in r.text and "</script>" in r.text
         assert hub.get("/swagger/swagger-ui.css").status_code == 200        # 免令牌
+        assert hub.get("/swagger/package.json").status_code == 404          # 只发白名单里那几个
+        assert '<a href="/">' not in r.text      # 没配 webDir，hub 的根不是看板
     # spec 只内嵌在 /docs 里，不再单独暴露；令牌三来源是 spec 里的 securitySchemes，Authorize 能直接用
     assert hub.get("/api/openapi.json").status_code == 404
     spec = hub.app.openapi()
     assert spec["components"]["securitySchemes"]["tokenHeader"]["name"] == "X-Covhub-Token"
     assert {"tokenHeader": []} in spec["paths"]["/api/dump"]["post"]["security"]
     assert "security" not in spec["paths"]["/api/health"]["get"]
+
+
+def test_login_exchanges_token_for_cookie(hub):
+    """分离部署下看板的登录入口：hub 收不到前端的 /?token=，只能靠这条。"""
+    assert hub.post("/api/login").status_code == 401
+    assert hub.post("/api/login", headers={"X-Covhub-Token": "wrong"}).status_code == 401
+    r = hub.post("/api/login", headers=H)
+    assert r.status_code == 200 and r.json() == {"ok": True, "tokenRequired": True}
+    assert "covhub_token=secret" in r.headers["set-cookie"]
+    assert "HttpOnly" in r.headers["set-cookie"]
+    # 拿到的 Cookie 对 /api/* 和报告目录都好使
+    jar = {"covhub_token": "secret"}
+    assert hub.get("/api/status", cookies=jar).status_code == 200
+    assert hub.get("/svc/current/jacoco.xml", cookies=jar).status_code == 200
 
 
 def test_no_cors_anywhere(hub):

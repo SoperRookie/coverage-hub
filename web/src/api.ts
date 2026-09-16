@@ -1,5 +1,6 @@
-// hub 的 JSON 接口。鉴权靠 Cookie（?token= 带对一次后 hub 种下），这里只负责在 401 时
-// 把「需要令牌」这件事抛给页面。
+// hub 的 JSON 接口。前后端分离部署时看板和 hub 由 nginx 反代到同一个源，所以路径仍是
+// 站内绝对路径、Cookie 仍是 same-origin —— 不需要 CORS，也没有 baseURL 这一说。
+// 鉴权靠 Cookie（login() 拿令牌换来的），这里只负责在 401 时把「需要令牌」抛给页面。
 
 export class ApiError extends Error {
   status: number;
@@ -287,36 +288,44 @@ export interface ProjectReport {
 const enc = encodeURIComponent;
 
 export const api = {
-  overview: () => request<Overview>("api/overview"),
+  overview: () => request<Overview>("/api/overview"),
   detail: (name: string, version?: string | null) =>
-    request<Detail>(`api/services/${enc(name)}/detail${version ? `?version=${enc(version)}` : ""}`),
-  health: () => request<{ ok: boolean; version: string }>("api/health"),
+    request<Detail>(`/api/services/${enc(name)}/detail${version ? `?version=${enc(version)}` : ""}`),
+  health: () => request<{ ok: boolean; version: string }>("/api/health"),
   source: (name: string, kind: "runtime" | "unit", file: string, version?: string | null) =>
-    request<SourceView>(`api/services/${enc(name)}/source?kind=${kind}&file=${enc(file)}${version ? `&version=${enc(version)}` : ""}`),
+    request<SourceView>(`/api/services/${enc(name)}/source?kind=${kind}&file=${enc(file)}${version ? `&version=${enc(version)}` : ""}`),
   /** 手动触发：拉一次快照并出报告（累加，不清零） */
-  dump: (name: string) => command(`api/dump?service=${enc(name)}`),
+  dump: (name: string) => command(`/api/dump?service=${enc(name)}`),
   /** 手动触发：结算当前周期并归档（dump --reset + 归档 + 终版报告） */
   predeploy: (name: string, version?: string) =>
-    command(`api/predeploy?service=${enc(name)}${version ? `&version=${enc(version)}` : ""}`),
+    command(`/api/predeploy?service=${enc(name)}${version ? `&version=${enc(version)}` : ""}`),
   /** 手动触发：用已有 exec 重出报告 */
-  report: (name: string) => command(`api/report?service=${enc(name)}`),
+  report: (name: string) => command(`/api/report?service=${enc(name)}`),
   compare: (name: string, a: string, b: string) =>
-    request<Compare>(`api/services/${enc(name)}/compare?a=${enc(a)}&b=${enc(b)}`),
-  projectReport: (name: string, days: number) => request<ProjectReport>(`api/projects/${enc(name)}/report?days=${days}`),
-  projects: () => request<{ projects: Project[] }>("api/projects"),
+    request<Compare>(`/api/services/${enc(name)}/compare?a=${enc(a)}&b=${enc(b)}`),
+  projectReport: (name: string, days: number) => request<ProjectReport>(`/api/projects/${enc(name)}/report?days=${days}`),
+  projects: () => request<{ projects: Project[] }>("/api/projects"),
   createProject: (body: { name: string; title?: string | null; description?: string | null }) =>
-    request<{ project: Project }>("api/projects", { method: "POST", body }),
+    request<{ project: Project }>("/api/projects", { method: "POST", body }),
   updateProject: (name: string, body: { title?: string | null; description?: string | null }) =>
-    request<{ project: Project }>(`api/projects/${enc(name)}`, { method: "PATCH", body }),
-  deleteProject: (name: string) => request<{ ok: boolean }>(`api/projects/${enc(name)}`, { method: "DELETE" }),
+    request<{ project: Project }>(`/api/projects/${enc(name)}`, { method: "PATCH", body }),
+  deleteProject: (name: string) => request<{ ok: boolean }>(`/api/projects/${enc(name)}`, { method: "DELETE" }),
   /** 把服务归到某个项目；project 传 null 表示解绑 */
   assignService: (service: string, project: string | null) =>
-    request<{ service: unknown }>(`api/services/${enc(service)}`, { method: "PATCH", body: { project } }),
+    request<{ service: unknown }>(`/api/services/${enc(service)}`, { method: "PATCH", body: { project } }),
 };
 
-/** 401 时跳到带令牌的地址，hub 种 Cookie 后 302 回来（hash 路由的深链会保留）。 */
-export function gotoWithToken(token: string) {
-  const url = new URL(window.location.href);
-  url.search = "?token=" + encodeURIComponent(token);
-  window.location.href = url.toString();
+/** 用令牌换 Cookie。换到了就地刷新，当前 hash 深链会保留。
+ *
+ * 不再走「跳 /?token= 让 hub 种 Cookie」那条老路：分离部署时首页是 nginx 发的，
+ * hub 压根收不到那个请求。令牌只出现在这一个请求的头里，不进地址栏和浏览器历史。
+ */
+export async function login(token: string): Promise<void> {
+  const resp = await fetch("/api/login", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "X-Covhub-Token": token, Accept: "application/json" },
+  });
+  if (!resp.ok) throw new ApiError(resp.status, resp.status === 401 ? "令牌不对" : `HTTP ${resp.status}`);
+  window.location.reload();
 }
