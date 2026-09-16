@@ -1,5 +1,26 @@
 # 更新日志
 
+## v2.3.0（2026-09-16）
+
+**前后端分离部署。** 看板不再随 Python 包分发，前端和 hub 是两个交付物。
+
+- 前端产物从 `covhub/webui/` 挪到 **`web/dist`**（仍进版本库，hub / nginx 机器不装 node），
+  不再进 wheel（`package-data` 只剩后端资源）。部署时解包给 nginx，模板见
+  **`integration/nginx/covhub.conf`**：前端由 nginx 发，`/api/*`、`/docs`、`/swagger/`、
+  `/<服务>/(current|versions|unit|artifacts|diff)/` 反代给 hub。
+- **前端与 hub 必须同源**（模板就是这么配的）。鉴权认 Cookie，所以一个 CORS 头都不发 ——
+  开跨域等于让任意页面替已登录的浏览器调写接口。
+- **新增 `POST /api/login`**：令牌走 `X-Covhub-Token` 头换一个 `HttpOnly` Cookie，看板的登录入口。
+  分离部署后首页由 nginx 发，hub 收不到 `/?token=`，老的种 Cookie 路径走不通了；令牌也不再进
+  地址栏、浏览器历史和 Referer。静态目录的 `?token=` **保留**，直接分享出去的报告链接还靠它。
+- **`serve.webDir` 升为正式配置项**：留空 = 分离部署，hub 只做 API + 报告目录，根路径给一页说明；
+  指向产物目录则由 hub 一起托管，回到 2.2 及以前的一体形态（单机够用，不必装 nginx）。
+  相对路径现在按配置文件所在目录解析（之前跟着进程 CWD 走）。
+- **`/docs` 与前端构建解耦**：Swagger UI 的资源移到 Python 包里的 `covhub/static/swagger/`，
+  由 `api/docs.py` 自己的白名单路由发出。纯后端部署下接口文档照常可用；
+  换 swagger-ui 版本时跑 `cd web && npm run swagger`。
+- 服务名保留字补上 `docs`、`swagger`（这两个路径已被后端路由占用）。
+
 ## v2.2.1（2026-09-15）
 
 - 修复：一个版本周期攒下几百个 exec 后，`report` / `merge` / `execinfo` 把全部文件塞进一条命令行，

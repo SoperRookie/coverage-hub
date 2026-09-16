@@ -3,7 +3,7 @@
   "info": {
     "title": "covhub 控制 API",
     "description": "JaCoCo 运行期覆盖率的采集与看板。整套方案只有 hub 这一个服务端，被测机器和发版节点不装 Python、不装 java、不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。\n\n**写接口在 hub 内部串行执行**，返回体里带着这次执行的日志。**非 2xx 一律表示失败**，调用方应据此让部署流程停下来。\n\n发版节点上更省事的做法是用 integration/covhub-client.sh 包一层。",
-    "version": "2.2.1"
+    "version": "2.3.0"
   },
   "paths": {
     "/api/health": {
@@ -26,6 +26,43 @@
             }
           }
         }
+      }
+    },
+    "/api/login": {
+      "post": {
+        "tags": [
+          "会话"
+        ],
+        "summary": "用令牌换一个 Cookie",
+        "description": "看板的登录入口：令牌走 X-Covhub-Token 头，对了就种下 Cookie。\n\n前后端分离部署时看板的首页由 nginx 发，hub 收不到它 —— 靠静态目录 `?token=` 种\nCookie 的老路走不通了。令牌只出现在这一个请求的头里，不进地址栏、浏览器历史和\nReferer，比原先跳 /?token= 更稳妥。\n\n报告链接直接分享出去的场景仍然走 `?token=`（见 api/static.py）。",
+        "operationId": "login_api_login_post",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          }
+        ]
       }
     },
     "/api/status": {
@@ -3567,7 +3604,7 @@
             "title": "Version",
             "description": "hub 版本",
             "examples": [
-              "2.2.1"
+              "2.3.0"
             ]
           },
           "services": {
@@ -3700,6 +3737,25 @@
           "since"
         ],
         "title": "Instance"
+      },
+      "LoginResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "tokenRequired": {
+            "type": "boolean",
+            "title": "Tokenrequired",
+            "description": "这个 hub 配了 serve.token 吗。false 时不种 Cookie，也不用登录"
+          }
+        },
+        "type": "object",
+        "required": [
+          "tokenRequired"
+        ],
+        "title": "LoginResult"
       },
       "ProjectListResponse": {
         "properties": {
@@ -5055,6 +5111,10 @@
     {
       "name": "探活",
       "description": "不需要令牌"
+    },
+    {
+      "name": "会话",
+      "description": "看板登录：拿令牌换一个 Cookie"
     },
     {
       "name": "查询",

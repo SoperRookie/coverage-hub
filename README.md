@@ -94,7 +94,8 @@ python covhub.py predeploy my-service --version 1.4.2   # 或在 hub 本机
 python covhub.py serve --with-watch    # 看板 + 控制 API + 定时采集 + push 收集端，一个进程全包
 ```
 
-看板是独立的 Vue 前端（产物在 `covhub/webui/`，随包分发，hub 机器不装 node）：层级是**项目 → 服务**：首页只列项目
+看板是独立的 Vue 前端（产物在 `web/dist`，进版本库，hub 机器不装 node；默认前后端分离部署，
+见[部署形态](#部署形态)）：层级是**项目 → 服务**：首页只列项目
 （卡片上有服务数、在线/离线、每个服务的运行时总/新增覆盖率），新建 / 编辑 / 删除项目也在这里；
 进项目是它的服务面板（在线状态、版本、运行时总/新增、单测总/新增、触达类数，能从「未分组」里添加服务、
 把服务移出）；再进服务是详情页：四个环形指标（运行时 / 单测 × 总 / 新增）、趋势图、新增代码按文件的覆盖明细（点开看源码与逐行执行状态）、
@@ -257,6 +258,7 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 |---|---|---|
 | `/api/health` | GET | 存活探测，不需要令牌 |
 | `/docs` | GET | 在线接口文档（Swagger UI，hub 自己托管），不需要令牌 |
+| `/api/login` | POST | 用令牌（`X-Covhub-Token` 头）换一个 Cookie，看板的登录入口 |
 | `/api/status[?service=X]` | GET | 连通性与最新覆盖率（JSON） |
 | `/api/agent-opts?service=X` | GET | 该服务应注入的 `-javaagent` 参数串（加 `&format=text` 出纯文本） |
 | `/api/agent.jar` | GET | 下载 `jacocoagent.jar` |
@@ -296,10 +298,38 @@ covhub-client.sh upload-classes order-service 1.4.3 \
 covhub-client.sh wait-online    order-service            # 4. 确认新实例采集恢复
 ```
 
+### 部署形态
+
+前后端是两个交付物：Python 包（API + 采集 + 报告目录）和前端产物（`web/dist`，进版本库）。
+两种部署方式，接口和数据完全一样，区别只在谁来发那几个静态文件。
+
+**一、前后端分离（默认）。** 前端产物交给 nginx，`/api/*`、`/docs`、报告目录反代给 hub：
+
+```sh
+scp -r web/dist/* nginx机器:/opt/covhub-web/
+# nginx 配置见 integration/nginx/covhub.conf
+```
+
+前端和 hub **必须落在同一个源下**（模板里就是这么配的）—— 控制面的鉴权认 Cookie，
+hub 一个 CORS 头都不发，开跨域等于让任意页面替已登录的浏览器调写接口。
+
+**二、hub 自己托管（单机够用）。** 把 `web/dist` 拷到 hub 机器上，配置里指过去，一个端口全包：
+
+```yaml
+serve:
+  port: 8900
+  token: "..."
+  webDir: /opt/covhub/web     # 留空 = 不托管前端，根路径只给一页说明
+```
+
+不管哪种，`COVHUB_URL`（`covhub-client.sh` 和 Jenkins 库用的）都是 **hub 的 API 地址**，
+不是看板地址：指 nginx 或直连 hub 的 8900 都行。
+
 ### 查看接口文档
 
 **在线文档：`http://<hub>:8900/docs`**（看板侧栏底部也有入口）。这是 hub 自己托管的 Swagger UI，
-资源打在包里（`covhub/webui/swagger/`，随前端一起构建），不从 CDN 拉，内网能开；页面不要令牌。
+资源打在 Python 包里（`covhub/static/swagger/`），不从 CDN 拉，内网能开，也不依赖前端有没有构建；
+页面不要令牌。
 带令牌的接口先点右上角 **Authorize** 填 `X-Covhub-Token`，之后 Try it out 每个请求都带上 ——
 注意写接口会真的执行（`dump` / `predeploy` 会改数据）。
 
@@ -312,12 +342,12 @@ OpenAPI 描述内嵌在这个页面里，hub 不单独暴露 JSON 接口。要�
 
 配了 `serve.token`（或给 hub 进程设了环境变量 `COVHUB_TOKEN`）之后，`/api/*` 和 `data/` 静态目录
 （报告、jacoco.xml、`artifacts/` 里线上跑的字节码、`exec/` 里不可再生的执行轨迹）都要令牌；
-只有 `/api/health`、`/docs` 和**看板前端本身**（`/`、`/assets/*`，公开的构建产物，
-不含秘密）例外 —— 前端加载出来后会因为 API 401 弹出令牌输入框。
+只有 `/api/health`、`/api/login`、`/docs`（含 `/swagger/*`）和**自托管时的看板前端**
+（`/`、`/assets/*`，公开的构建产物，不含秘密）例外 —— 前端加载出来后会因为 API 401 弹出令牌输入框。
 
 | 场景 | 怎么带 |
 |---|---|
-| 浏览器看看板 | 打开 `http://<hub>:8900/?token=<serve.token>`，hub 种一个 `HttpOnly` Cookie 再跳回干净地址，之后不必再带；或直接打开 `/` 在弹窗里填 |
+| 浏览器看看板 | 打开看板，在弹窗里填令牌 —— 它调 `POST /api/login` 换一个 `HttpOnly` Cookie，之后 API 和报告链接都放行。直接分享出去的报告链接仍可用 `?token=<serve.token>`，hub 种下 Cookie 再跳回干净地址 |
 | `curl` / 流水线 | `-H "X-Covhub-Token: <token>"` |
 | 客户端脚本 | 设 `COVHUB_TOKEN` 环境变量 |
 
@@ -472,5 +502,5 @@ data/
 - **上传接口走的是原始正文**，前面有 nginx 的话把 `client_max_body_size` 调到能装下聚合 XML（几十 MB）。
 - **性能开销通常在个位数百分比**，可用于测试环境常驻，但不建议长期挂在生产上。
 - **归档不会被覆盖。** 同名版本已有归档时会自动存成 `<版本>-2`。
-- **改前端要在开发机构建**：`cd web && npm ci && npm run build`，产物 `covhub/webui/` 和源码一起提交；hub 机器不需要 Node。
+- **改前端要在开发机构建**：`cd web && npm ci && npm run build`，产物 `web/dist` 和源码一起提交；hub / nginx 机器不需要 Node。
 - **覆盖率不是质量指标。** 它只说明代码被执行过，不说明断言是否有效。分支覆盖率通常比指令覆盖率更有参考价值。

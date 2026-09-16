@@ -187,18 +187,49 @@ class 对不上，报告全是"未覆盖"**且不会报错**。第 5 步就是�
 （`predeploy` 自己也会在归档前做一次同样的体检，匹配率低时告警但**不阻断结算** ——
 exec 不可再生，因为对不上就拒绝归档只会两头落空。）
 
-## 反代（nginx）
+## 前后端分离部署（nginx）
 
-hub 前面放 nginx 时两件事：上传接口（class 产物、单测 XML、diff）走原始正文，`client_max_body_size`
-默认 1m 不够；看板前端本身免令牌，但 `/api/*` 与报告目录仍要令牌，别在 nginx 层再加一套 basic auth
-（Cookie 流程会被打断）。
+2.3 起看板是独立交付物：产物在版本库的 `web/dist`，不再随 Python 包分发。**前端由 nginx 发，
+`/api/*`、`/docs` 与报告目录反代给 hub**，完整模板见 `integration/nginx/covhub.conf`。
+
+```sh
+scp -r web/dist/* nginx机器:/opt/covhub-web/     # 换版本就是覆盖一遍，不用重启 hub
+```
 
 ```nginx
-location / {
+root /opt/covhub-web;
+location / { try_files $uri $uri/ =404; }        # hash 路由，不要回落 index.html
+location /api/ {
     proxy_pass http://127.0.0.1:8900;
-    proxy_set_header Host $host;
-    client_max_body_size 200m;
-    proxy_read_timeout 300s;      # predeploy 要跑 jacococli，几分钟是正常的
+    client_max_body_size 200m;                   # 上传接口走原始正文，默认 1m 不够
+    proxy_read_timeout 300s;                     # predeploy 要跑 jacococli，几分钟是正常的
 }
+location = /docs   { proxy_pass http://127.0.0.1:8900; }
+location /swagger/ { proxy_pass http://127.0.0.1:8900; }
+location ~ ^/[^/]+/(current|versions|unit|artifacts|diff)/ { proxy_pass http://127.0.0.1:8900; }
 ```
+
+三件要注意的事：
+
+- **前端和 hub 必须在同一个源下。** 控制面的鉴权认 Cookie，hub 一个 CORS 头都不发 ——
+  开跨域等于让任意页面替已登录的浏览器调写接口。把前端放到另一个域名就得连 hub 一起反代过去。
+- **看板前端免令牌，`/api/*` 与报告目录仍要令牌**，别在 nginx 层再加一套 basic auth
+  （hub 的 Cookie 流程会被打断）。第一次打开看板会弹令牌输入框，它调 `POST /api/login`
+  换一个 `HttpOnly` Cookie，之后报告链接也一起放行。
+- **`COVHUB_URL` 是 hub 的 API 地址，不是看板地址。** `covhub-client.sh` 和 Jenkins 共享库
+  只打 `/api/*`，指 nginx（`http://covhub.internal`）或直连 hub（`http://hub:8900`）都行；
+  直连能少一跳，也不受 nginx 超时限制。
+
+### 不想装 nginx
+
+单机、就一个看板的场景，让 hub 自己托管：把 `web/dist` 拷到 hub 机器上，配置里写
+
+```yaml
+serve:
+  port: 8900
+  token: "..."
+  webDir: /opt/covhub/web       # 相对路径按配置文件所在目录解析
+```
+
+这就回到 2.2 及以前的形态 —— 一个端口、一个进程，看板和 API 同源，什么都不用反代。
 

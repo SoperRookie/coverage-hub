@@ -41,7 +41,8 @@
 
 | 机器 | 需要什么 | 不需要什么 |
 |---|---|---|
-| **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里） |
+| **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里，`web/dist`） |
+| **看板那一台**（可以就是 hub 那台） | nginx 之类的静态服务器 + `web/dist` 的内容（模板见 `integration/nginx/covhub.conf`）。不想单独部署就配 `serve.webDir`，让 hub 一起托管 | Node、Python |
 | **被测服务所在机器** | `jacocoagent.jar`（`covhub-client.sh fetch-agent` 下载）；pull 通道要能被 hub 连上 agent 端口 | Python、covhub、配置文件 |
 | **发版节点 / 流水线** | `curl`（用 `integration/covhub-client.sh` 包一层） | Python、java、配置文件、历史 class 产物 |
 | **被测项目本身** | **什么都不用改** | 代码、pom、Dockerfile、启动脚本 |
@@ -170,7 +171,7 @@ sudo mkdir -p /opt/coverage-hub
 sudo chown "$USER" /opt/coverage-hub
 cd /opt/coverage-hub
 
-git clone <本仓库> .                # covhub.py、covhub/、integration/、lib/ 下两个 jar、前端产物都在版本库里
+git clone <本仓库> .                # covhub.py、covhub/、integration/、lib/ 下两个 jar、前端产物 web/dist 都在版本库里
 python3 --version                   # 3.12
 java -version                       # ≥ 8
 pip3 install .                      # 依赖：FastAPI、uvicorn、SQLAlchemy、Alembic、pydantic、PyYAML、PyMySQL
@@ -334,8 +335,12 @@ python3 covhub.py status
 # ------------------------------------------------------------------------------
 ```
 
-浏览器打开 `http://<hub>:8900/?token=<令牌>` 应能看到空看板（也可以直接打开 `/`，前端
-本身不要令牌，它拿到 API 的 401 后会弹出令牌输入框）。
+浏览器打开看板应能看到一个空面板：前端本身不要令牌，它拿到 API 的 401 后会弹出令牌输入框，
+填一次（走 `POST /api/login`）就换到 Cookie，之后 API 和报告链接都放行。
+
+看板地址取决于部署形态 —— 前后端分离时是 nginx 的地址（`integration/nginx/covhub.conf`
+是模板）；配了 `serve.webDir` 让 hub 自己托管的话就是 `http://<hub>:8900/`。
+纯后端形态下打开 `http://<hub>:8900/` 会看到一页说明，那是对的，不是部署坏了。
 
 ### 2.6 把客户端脚本发给各团队
 
@@ -1167,7 +1172,8 @@ cd /opt/coverage-hub && git pull && sudo systemctl restart covhub
 
 配置文件、数据库、`data/` 都不在版本库里，`git pull` 不会碰它们。依赖有变化时重跑
 `pip3 install .`；表结构有变化时 `serve` 启动会自动升级（`autoUpgrade: true`），或手工
-`python3 covhub.py db upgrade`。前端产物随仓库更新，hub 机器不需要 Node。
+`python3 covhub.py db upgrade`。前端产物随仓库更新（`web/dist`），hub 机器不需要 Node；
+分离部署时记得把新产物同步到 nginx 那台：`scp -r web/dist/* nginx机器:/opt/covhub-web/`。
 
 ### 8.7 升级 JaCoCo
 
@@ -1241,8 +1247,10 @@ cd /opt/coverage-hub && git pull && sudo systemctl restart covhub
 | 上传单测 XML 返回 413 | nginx 日志 | 反代的 `client_max_body_size` 默认 1m，聚合 XML 有几十 MB，调大 |
 | hub 启动日志第一行是 `sqlite:///…` | —— | `database.url` 没配或环境变量没传到进程，跑在了单机试用的 SQLite 上 |
 | 看板卡片提示「采集可能已经停了」 | hub 日志 | 超过 3 个轮询周期没新数据：hub 进程挂了、`--with-watch` 没带、或服务下线了 |
-| 浏览器打开看板弹「需要访问令牌」 | —— | 配了 `serve.token`。填一次，hub 种 Cookie 后不再问；或直接用 `?token=` 打开 |
-| 浏览器打开 `/` 是一段 401 JSON 或目录列表 | hub 日志第一行的版本号 | 跑的还是 1.x，或前端产物 `covhub/webui/` 缺失（`pip install .` 没带上 / 手工拷贝漏了目录） |
+| 浏览器打开看板弹「需要访问令牌」 | —— | 配了 `serve.token`。填一次换到 Cookie，之后不再问 |
+| 打开 hub 的 `/` 看到一页说明而不是看板 | —— | 正常：前后端分离时看板在 nginx 那边。要让 hub 自己托管就配 `serve.webDir` |
+| 打开看板是 404 / 白屏 | nginx 日志 | `web/dist` 没同步到 nginx 的 root 目录，或 root 配错；产物换版本后要整个目录覆盖 |
+| 看板能开但所有数据都报错 | 浏览器控制台 | nginx 没把 `/api/` 反代给 hub（照 `integration/nginx/covhub.conf` 补齐 `/api/`、`/docs`、报告目录三条 location） |
 | 看板本来能开，某天开始要令牌 | —— | hub 加了 `serve.token`。令牌同时管着静态目录 |
 | 日志采集把 `Picked up JAVA_TOOL_OPTIONS` 当错误告警 | —— | 那是 JVM 打到 stderr 的正常提示，加个过滤规则 |
 | APM agent 与 JaCoCo 同时挂，匹配率异常 | 调整 `-javaagent` 顺序 | JaCoCo 要放在会改字节码的 agent **前面** |
