@@ -81,6 +81,11 @@ def load_config(path):
     for key in ("jacocoCli", "jacocoAgent", "dataDir"):
         if cfg.get(key) and not os.path.isabs(cfg[key]):
             cfg[key] = os.path.normpath(os.path.join(base, cfg[key]))
+    # serve.webDir 同样相对配置文件解析 —— 它是磁盘路径，跟着进程 CWD 走的话
+    # systemd 起的 hub 和手敲命令起的 hub 会找到不同的目录
+    serve = cfg.get("serve")
+    if isinstance(serve, dict) and serve.get("webDir") and not os.path.isabs(serve["webDir"]):
+        serve["webDir"] = os.path.normpath(os.path.join(base, serve["webDir"]))
     # 文件里的 services 早已不生效。不报错（升级第一步就把人卡住太粗暴），
     # 但每个进程提醒一次，直到有人跑过 import 并把这一段删掉
     if cfg.get("services") and not _warned.get(cfg["configPath"]):
@@ -153,6 +158,8 @@ database:
 serve:
   port: 8900
   token: ""                  # 控制 API 的令牌，不配则任何人都能调写接口
+  webDir: ""                 # 看板前端产物目录。留空 = 前后端分离部署，看板由 nginx 之类
+                             # 托管，hub 只做 API + 报告目录；填上则由 hub 一起托管（单机够用）
 
 watch:
   intervalSeconds: 300       # 轮询间隔，同时是断代时数据丢失的上界
@@ -169,7 +176,7 @@ CONFIG_TEMPLATE_JSON = {
     "jacocoCli": "./lib/jacococli.jar",
     "dataDir": "./data",
     "database": {"url": "", "autoUpgrade": True},
-    "serve": {"port": 8900, "token": ""},
+    "serve": {"port": 8900, "token": "", "webDir": ""},
     "watch": {"intervalSeconds": 300},
     "collect": {"port": 6400, "bindAddress": "0.0.0.0",
                 "advertiseAddress": "改成被测端能访问到的 hub 地址",

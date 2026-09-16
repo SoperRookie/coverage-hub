@@ -32,6 +32,7 @@ DESCRIPTION = (
 
 TAGS = [
     {"name": "探活", "description": "不需要令牌"},
+    {"name": "会话", "description": "看板登录：拿令牌换一个 Cookie"},
     {"name": "查询", "description": "只读，不改任何状态"},
     {"name": "采集", "description": "拉数据、出报告，会写 data/"},
     {"name": "发版", "description": "结算、换产物 —— 顺序错了会丢数据"},
@@ -117,6 +118,7 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
         return response
 
     app.include_router(routes_control.open_router)
+    app.include_router(routes_control.session_router)
     app.include_router(routes_control.router)
     app.include_router(routes_services.router)
     app.include_router(routes_services.import_router)
