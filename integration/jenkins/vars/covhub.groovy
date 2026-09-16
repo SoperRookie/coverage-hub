@@ -366,7 +366,7 @@ String fetchAgent(Map args) {
 /**
  * 从 hub 取回某个版本的 class 产物，解到 dest 目录，返回该目录。
  *
- * 推 Sonar 时 -Dsonar.java.binaries 必须是**采集时运行的那份 class**（JaCoCo 按
+ * 用于在别处重出报告或做比对：必须是**采集时运行的那份 class**（JaCoCo 按
  * CRC64 class id 匹配，对不上就是 0%）。有了它，发版节点不必自己囤历史产物 ——
  * hub 上有 upload-classes 传上去的那一份，或结算时 manifest 记下的路径。
  */
@@ -401,7 +401,7 @@ String fetchClasses(Map args) {
 }
 
 /**
- * 从 hub 下载某个已结算版本的 jacoco.xml，用于在本节点推 Sonar。
+ * 从 hub 下载某个已结算版本的 jacoco.xml（给别的工具消费）。
  * hub 的看板本身就是静态文件服务，报告直接按路径取。
  */
 String fetchReport(Map args) {
@@ -418,29 +418,3 @@ String fetchReport(Map args) {
     return dest
 }
 
-/**
- * 把运行期覆盖率推 SonarQube。
- *
- * 强烈建议用与单元测试不同的 projectKey（如 my-service-runtime），
- * 两个 project 并列才能横向对比：既无单测、线上也没人跑的代码可以考虑删除；
- * 线上频繁执行却没有单测保护的，是补测试的最高优先级。
- */
-void pushSonar(Map args) {
-    assert args.projectKey : 'pushSonar 需要 projectKey'
-    assert args.xmlReport : 'pushSonar 需要 xmlReport（jacoco.xml 路径）'
-    assert args.binaries : 'pushSonar 需要 binaries（与该 xml 对应的 class 目录）'
-    String sources = args.sources ?: 'src/main/java'
-    String name = args.projectName ?: args.projectKey
-    String serverName = args.sonarEnv ?: 'SonarQube'
-
-    withSonarQubeEnv(serverName) {
-        sh """
-            sonar-scanner \
-              -Dsonar.projectKey=${args.projectKey} \
-              -Dsonar.projectName='${name}' \
-              -Dsonar.sources=${sources} \
-              -Dsonar.java.binaries=${args.binaries} \
-              -Dsonar.coverage.jacoco.xmlReportPaths=${args.xmlReport}
-        """
-    }
-}

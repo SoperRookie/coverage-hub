@@ -9,7 +9,7 @@
  *   2. 由聚合模块产出 jacoco-aggregate/jacoco.xml
  *   3. 把 jacoco.xml 和 git diff 推给 hub —— 看板上「单测覆盖率」与「新增代码
  *      覆盖率」两列就来自这里（hub 停机时只警告，不卡构建）
- *   4. 推 SonarQube，并归档 class 产物（可选，见下）
+ *   4. 归档 class 产物（可选，见下）
  *
  * 【前置】被测项目已加入 integration/maven-aggregate-module 那个聚合模块 ——
  * 这要改研发的 pom。不能改的话这整条流水线都用不上，运行期覆盖率不依赖它，
@@ -38,10 +38,6 @@ pipeline {
         // 算「新增代码」的基线。留空则问 hub 上一次结算的版本对应的 commit，
         // 没有就退回 origin/main。浅克隆要先 fetch --unshallow --tags，否则 rev-parse 找不到基线
         DIFF_BASE       = ''
-
-        // 单测覆盖率的 project。运行期覆盖率用 "${SONAR_PROJECT_KEY}-runtime"
-        SONAR_PROJECT_KEY  = 'my-service'
-        SONAR_PROJECT_NAME = 'my-service'
     }
 
     options {
@@ -91,7 +87,7 @@ pipeline {
                               "确认聚合模块已加入父 pom 的 <modules>，且排在最后。")
                     }
                 }
-                // Jenkins 原生展示（需 JaCoCo 插件）；只是顺带，真正的门禁在 Sonar
+                // Jenkins 原生展示（需 JaCoCo 插件）；只是顺带，数字以 hub 看板为准
                 jacoco execPattern: '**/target/jacoco.exec',
                        classPattern: '**/target/classes',
                        sourcePattern: '**/src/main/java',
@@ -138,25 +134,6 @@ pipeline {
             }
         }
 
-        stage('SonarQube') {
-            // 单元测试覆盖率推到主 project。运行期覆盖率走另一个 project
-            // （<key>-runtime），由发版流水线推送 —— 见 integration/sonar/README.md。
-            // 两个 project 并列，不要合并成一个数：合并之后正好把
-            //「有单测但线上没人跑」「线上跑得勤却没单测」这个区分抹掉了。
-            steps {
-                withSonarQubeEnv('SonarQube') {
-                    sh '''
-                        ./mvnw sonar:sonar -B \
-                          -Drevision=${REVISION} \
-                          -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                          -Dsonar.projectName="${SONAR_PROJECT_NAME}" \
-                          -Dsonar.coverage.jacoco.xmlReportPaths=${AGGREGATE_XML} \
-                          --settings ./settings.xml
-                    '''
-                }
-            }
-        }
-
         stage('Archive for runtime coverage (可选)') {
             // 运行期出报告时，--classfiles 必须是【运行中那个版本】的 class。
             //
@@ -182,7 +159,7 @@ pipeline {
 
     post {
         success {
-            echo "构建期覆盖率已推送 Sonar；class 产物已归档（运行期另有 classDumpDir 一路，不依赖这里）。"
+            echo "单测报告与 diff 已推给 hub；class 产物已归档（运行期另有 classDumpDir 一路，不依赖这里）。"
         }
     }
 }

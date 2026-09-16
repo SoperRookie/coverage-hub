@@ -52,7 +52,7 @@
               <goal>report-aggregate</goal>
             </goals>
             <configuration>
-              <!-- 同时产出 XML（给 Sonar）与 HTML（给人看） -->
+              <!-- 同时产出 XML（推给 hub）与 HTML（给人看） -->
               <formats>
                 <format>XML</format>
                 <format>HTML</format>

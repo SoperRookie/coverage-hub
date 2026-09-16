@@ -32,8 +32,7 @@
 和这一版的 git diff。有了它们，看板上每个服务就有四个数：运行时总覆盖、运行时**新增代码**
 覆盖、单测总覆盖、单测新增代码覆盖。
 
-想先看看整体长什么样：`docs/diagrams/` 里有八张架构图（部署拓扑、一次采集、发版流程……），
-接口在 hub 的 `/docs`（自带 Swagger UI），本机试玩可用 `tools/seed_demo.py` 灌一套演示数据。
+接口文档在 hub 的 `/docs`（自带 Swagger UI），本机试玩可用 `tools/seed_demo.py` 灌一套演示数据。
 
 ### 谁装什么
 
@@ -375,7 +374,14 @@ fetch-classes <service> <version> <目标目录>     取回某版本的 class �
 wait-online <service> [超时秒数，默认 120]       等新实例的 agent 就绪
 unit-coverage <service> <version> <jacoco.xml> [--group 模块]   构建流水线：送单测报告
 diff <service> <version> <diff文件> --base <基线> [--head <本次>] 构建流水线：送 git diff
+last-version <service> [--plain]               上一次结算的版本与其 diff 的 head（定 diff 基线）
+recompute <service> [version]                  按已有 diff 重算新增代码覆盖
 ```
+
+环境变量除 `COVHUB_URL` / `COVHUB_TOKEN` 外还有 `COVHUB_TIMEOUT`（单次请求最长秒数，默认 600，
+predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。退出码：0 成功、1 hub 返回非 2xx
+（业务失败，响应体的 `log` 里有原因）、2 连不上 hub 或参数错。只有 GET 会自动重试，`dump` / `predeploy`
+这类会改状态的不重试。
 
 ---
 
@@ -744,7 +750,7 @@ Step 3 里 `classfiles` 随便填的那个值到这里被自动纠正。两台�
 > `upload-classes` 传上来即可（`Jenkinsfile.build` 里有现成的一步）。两者都有时优先
 > 用 classdumpdir 那份 —— 它才是运行时真相。
 
-日后推 Sonar 需要某个版本的 class 时，从 hub 取回来即可，本机不必囤：
+日后要在别处用某个版本的 class（重出报告、比对）时，从 hub 取回来即可，本机不必囤：
 
 ```bash
 covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
@@ -915,7 +921,6 @@ classfiles  /opt/coverage-hub/data/order-service/artifacts/1.4.2
 3. wait-online     确认新实例 agent 就绪
 4. upload-classes  把新版本的 class 传给 hub 并指过去（--retarget）
 5. diagnose        体检：确认这一版的 class 真的对得上
-6. sonar           推旧版本的 jacoco.xml（可选）
 ```
 
 全是发给 hub 的 HTTP 请求，**发版节点只要有 curl**。
@@ -1004,9 +1009,9 @@ push 通道下滚动发版中途新旧副本同时在线，hub 会检出「混�
 covhub-client.sh unit-coverage order-service "$VERSION" \
     coverage-report/target/site/jacoco-aggregate/jacoco.xml
 
-# 2. 这一版的 git diff。基线是上一版的 commit / tag：可以先问 hub 上一次结算的版本对应的 commit
-BASE=$(curl -s -H "X-Covhub-Token: $COVHUB_TOKEN" "$COVHUB_URL/api/services/order-service/versions" \
-       | python3 -c 'import json,sys;print((json.load(sys.stdin).get("latest") or {}).get("head") or "origin/main")')
+# 2. 这一版的 git diff。基线是上一版的 commit / tag：先问 hub 上一次结算的版本对应的 commit
+BASE=$(covhub-client.sh last-version order-service --plain | cut -f2)   # 第一次接入时为空
+BASE=${BASE:-origin/main}
 git fetch --unshallow --tags 2>/dev/null || git fetch --tags
 git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR \
     "$BASE"..HEAD -- '*.java' '*.kt' > covhub.diff
@@ -1022,7 +1027,7 @@ covhub-client.sh diff order-service "$VERSION" covhub.diff --base "$(git rev-par
   服务配置里的 `version` 得是同一个字符串，hub 才能把 diff 和运行时快照对上。
   `diff` 命令的返回体里 `matchesCurrentVersion: false` 就是在提醒这件事。
 - **分母只算 JaCoCo 有探针的行。** 空行、注释、import、纯声明不参与；一次全文件格式化会让
-  整个文件算成新增（和 Sonar 一样）。没有可覆盖的新增行时看板显示「无新增」。
+  整个文件算成新增。没有可覆盖的新增行时看板显示「无新增」。
 - **顺序不限。** diff、单测 XML、运行时快照哪个先到都行，晚到的会把已有的重算一遍，已归档
   的版本也会回写。
 
@@ -1052,14 +1057,7 @@ mvn clean verify                      # 不能加 -DskipTests，否则没有 exe
 ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 ```
 
-Sonar 配置：
-
-```properties
-sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregate/jacoco.xml
-```
-
-运行期那份建议推到**独立的 project key**（`order-service-runtime`），和单测的并列，
-原因与做法见 `integration/sonar/README.md`。
+这份 XML 就是 §5.6 里 `unit-coverage` 推给 hub 的那个文件。
 
 ---
 
@@ -1081,6 +1079,28 @@ sonar.coverage.jacoco.xmlReportPaths=coverage-report/target/site/jacoco-aggregat
 - [ ] 运维知道 stderr 会多一行 `Picked up JAVA_TOOL_OPTIONS`，不会当成告警
 - [ ] 看板上能找到该服务，详情页四个环形指标里至少「运行时 · 总覆盖」有值
 - [ ] （要单测 / 新增代码覆盖率的话）构建流水线已加 `unit-coverage` 与 `diff` 两步，详情页「新增代码明细」有文件列表
+
+### 看板每一块数据从哪来
+
+只做完 §3 的话，看板上只有「运行时 · 总覆盖」一个数。要把详情页、报表上的每一块都填满，对照这张表补：
+
+| 看板上的东西 | 数据来源 | 要做到的事 |
+|---|---|---|
+| 运行时 · 总覆盖、趋势图、在线状态 | hub 轮询 agent | §3 接入 + hub 带 `--with-watch` 起 |
+| 运行时 · 新增代码、「新增代码」页签 | 运行时报告 ∩ 这一版的 git diff | 构建流水线推 `diff`（§5.6），**版本串与服务的 `version` 一致** |
+| 「新增代码」里点开看源码 | `sourcefiles` 指向的源码目录 | Step 8 配 `sourcefiles`（当前版本的源码；历史版本用结算时存下的片段） |
+| 单测 · 总覆盖、「单测覆盖率」页签 | 构建流水线推的 jacoco.xml | §6 加聚合模块 + §5.6 推 `unit-coverage` |
+| 单测 · 新增代码 | 单测 XML ∩ git diff | 上面两条都做 |
+| 已结算版本、版本下拉（历史版本） | 每次 `predeploy` 的归档 | 发版流程排进 `predeploy`（§5），每发一版多一条 |
+| 历史对比 | 两个归档 / 当前周期的 jacoco.xml | 至少结算过一版；比对的是运行时指令覆盖 |
+| 触达类、指纹匹配率、`diagnose` | exec 与 class 指纹 | Step 7 `upload-classes --retarget`（或 `classDumpDir`） |
+| JaCoCo 原生报告下钻到行 | `sourcefiles` | Step 8 |
+| 项目卡片、项目报表、侧栏项目 | 服务归属项目 | Step 3 `--project` 或看板里「添加服务」 |
+| 报表里的「期间结算版本 / 单测报告」 | archives / unit_reports 表 | 同上两行：有 `predeploy`、有 `unit-coverage` |
+| 断代记录 | hub 自动检测 | 不用做，pull 通道自动；push 只告警混版本 |
+
+一句话：**运行时靠接入，新增代码靠 diff，单测靠 XML，历史靠 predeploy，源码靠 sourcefiles，分组靠 project**。
+前三样以外都是可选的，缺哪块看板就在哪块显示「—」，不会报错。
 
 ---
 

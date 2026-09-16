@@ -3,7 +3,7 @@
   "info": {
     "title": "covhub 控制 API",
     "description": "JaCoCo 运行期覆盖率的采集与看板。整套方案只有 hub 这一个服务端，被测机器和发版节点不装 Python、不装 java、不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。\n\n**写接口在 hub 内部串行执行**，返回体里带着这次执行的日志。**非 2xx 一律表示失败**，调用方应据此让部署流程停下来。\n\n发版节点上更省事的做法是用 integration/covhub-client.sh 包一层。",
-    "version": "2.1.0"
+    "version": "2.2.1"
   },
   "paths": {
     "/api/health": {
@@ -1061,7 +1061,7 @@
           "产物"
         ],
         "summary": "取回某个版本的 class 产物",
-        "description": "打成 tar.gz 回传。推 Sonar 时 -Dsonar.java.binaries 要的就是**采集时运行的那份 class**\n—— 有了它，发版节点不必自己囤历史产物。\n\n两个来源按可信度排序：先找 upload-classes 传上来的 artifacts/<版本>/，\n再找结算时 manifest 里记的 classfiles。都没有就 404。",
+        "description": "打成 tar.gz 回传。在别处重出报告时要的就是**采集时运行的那份 class**\n—— 有了它，发版节点不必自己囤历史产物。\n\n两个来源按可信度排序：先找 upload-classes 传上来的 artifacts/<版本>/，\n再找结算时 manifest 里记的 classfiles。都没有就 404。",
         "operationId": "classes_api_classes_get",
         "security": [
           {
@@ -3567,7 +3567,7 @@
             "title": "Version",
             "description": "hub 版本",
             "examples": [
-              "2.1.0"
+              "2.2.1"
             ]
           },
           "services": {

@@ -6,7 +6,7 @@
 |---|---|
 | `vars/covhub.groovy` | Shared Library，把 covhub 命令封装成 pipeline 步骤 |
 | `vars/deployTarget.groovy` | Shared Library，五种部署方式的实现 |
-| `Jenkinsfile.build` | 构建期：跑测试 → 聚合报告 → **推单测报告与 git diff 给 hub** → 推 Sonar → 归档 class 产物（聚合模块**要改研发的 pom**，不能改就跳过聚合与单测那几步，diff 那一步不需要 pom） |
+| `Jenkinsfile.build` | 构建期：跑测试 → 聚合报告 → **推单测报告与 git diff 给 hub** → 归档 class 产物（聚合模块**要改研发的 pom**，不能改就跳过聚合与单测那几步，diff 那一步不需要 pom） |
 | `Jenkinsfile.deploy` | 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复 |
 
 ## 一、安装 Shared Library
@@ -32,12 +32,12 @@
 | `curl` | 就这一个。不需要 Python、不需要 java、不需要配置文件 |
 | 环境变量 `COVHUB_URL` | hub 地址，如 `http://covhub.internal:8900`。已写在 `Jenkinsfile.deploy` 的 `environment` 块里，改成你们的 |
 | 凭据（可选） | hub 配了 `serve.token` 时，建一个 Secret text 凭据存令牌，把 ID 填进 `COVHUB_TOKEN_ID` |
-| Jenkins 插件 | Pipeline Utility Steps（`covhub.diagnose` 用它的 `readJSON`）、Copy Artifacts、SonarQube Scanner；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
+| Jenkins 插件 | Pipeline Utility Steps（`covhub.diagnose` 用它的 `readJSON`）、Copy Artifacts；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
 | Config File Provider | 提供 Maven `settings.xml`，`fileId` 按你们实际的改 |
 | 构建节点的 git | `Jenkinsfile.build` 要 `git diff <上一版>..HEAD`，浅克隆（`depth 1`、不拉 tags）找不到基线 —— 检出配置里关掉浅克隆，或流水线先 `git fetch --unshallow --tags` |
 
 发版节点**不需要**能连到被测服务的 agent 端口 —— 连 agent 的是 hub。它只要能连上 hub 的 8900。
-也**不需要**本地的 class 产物库：新产物传给 hub，旧产物推 Sonar 时用
+也**不需要**本地的 class 产物库：新产物传给 hub，旧产物要用时
 `covhub.fetchClasses` 取回工作区。
 
 > **本地模式（兜底）**：Jenkins agent 恰好就跑在 hub 那台机器上时，可以给各步骤传
@@ -71,7 +71,6 @@ commit」（`covhub.lastVersion`），问不到退回 `origin/main`；`DIFF_BASE
 3. deploy          停旧实例、部署、起新实例（agent 经 JAVA_TOOL_OPTIONS 注入）
 4. upload-classes  把产物传给 hub，并把配置指过去（retarget）
 5. verify          轮询确认 agent 就绪 → 打基线快照 → 校验 class 指纹对得上
-6. sonar           取回旧版本的 jacoco.xml 与 class 产物，推上去
 ```
 
 **第 1 步跑到停服之后，那段数据就永久丢失了** —— agent 随进程消失，tcpserver 端口关闭，没有任何补救手段。所以 `predeploy` 在目标不可达时会让流水线**失败退出**，这是有意的设计；确实要跳过时才勾 `ALLOW_MISSING`。
@@ -121,21 +120,8 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 再 `daemon-reload`；`k8s` 用 `kubectl set env deployment/X JAVA_TOOL_OPTIONS-`（末尾减号
 表示删除该变量）。原始的 unit 文件、compose 文件、镜像自始至终没被改过。
 
-## 五、Sonar 的 project 划分
 
-建议**单元测试和运行期用两个独立的 project key**：
-
-| project key | 数据来源 |
-|---|---|
-| `my-service` | 构建期聚合报告 |
-| `my-service-runtime` | 运行期归档的 jacoco.xml |
-
-并列之后能做横向对比，交叉出来的两类代码最有价值：
-
-- **既无单测、线上也没人跑** —— 可以考虑删除
-- **线上频繁执行却没有单测保护** —— 补测试的最高优先级
-
-## 六、K8s 滚动更新的额外注意
+## 五、K8s 滚动更新的额外注意
 
 滚动更新会直接杀掉旧 Pod，`preStop` 钩子里来不及做完整的 dump + 归档。正确做法是在触发滚动更新**之前**，先在流水线里跑 `predeploy`（也就是 `Jenkinsfile.deploy` 的第 1 步），而不是依赖 Pod 生命周期钩子。
 
@@ -161,7 +147,6 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 | `covhub.pushUnitCoverage(service:, version:, xml:, group:, failOnError:)` | 把单测 jacoco.xml 传给 hub（`services: 'a,b'` 一份落多个服务） |
 | `covhub.pushDiff(service:, version:, base:, head:, file:, failOnError:)` | 把 git diff 传给 hub，用于新增代码覆盖率 |
 | `covhub.lastVersion(service:)` | 问 hub 最近结算的版本与其 diff 的 head，用来定 diff 基线 |
-| `covhub.pushSonar(projectKey:, xmlReport:, binaries:, sources:)` | 推 SonarQube |
 
 除 `agentOpts` / `online` / `status` / `pushUnitCoverage` / `pushDiff`（默认只警告）外，任何一步在
 hub 返回非 2xx 时都会让流水线失败 —— 覆盖率结算失败必须停住发版，而不是带着已丢失的数据继续。

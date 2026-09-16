@@ -1,4 +1,4 @@
-# coverage-hub v2.1.0
+# coverage-hub v2.2.1
 
 通用 JaCoCo 覆盖率方案：**运行期**随服务启动自动采集、发版前自动结算；**构建期**的单测
 覆盖率与 git diff 由流水线送进来；一个 Vue 看板按项目 → 服务展示**总覆盖率**与**本版本新增
@@ -15,8 +15,41 @@ java、不放配置文件 —— 它们只需要 `curl`，以及被测 JVM 里�
 >
 > **从 1.x 升级**：服务配置和覆盖率历史现在在数据库里，看板是独立前端。见 [§ 七 从 1.x 升级](#七从-1x-升级)。
 >
-> **建库建表 SQL**（MySQL 8，DBA 用）在 [docs/sql/](docs/sql/README.md)；**架构图**在 [docs/diagrams/](docs/diagrams/README.md)（部署拓扑、一次采集、发版流程、周期状态、push 通道、
-> 构建期数据、数据模型、看板导航，PlantUML）；各版本改动见 [CHANGELOG.md](CHANGELOG.md)。
+> **建库建表 SQL**（MySQL 8，DBA 用）在 [docs/sql/](docs/sql/README.md)；各版本改动见 [CHANGELOG.md](CHANGELOG.md)。
+
+---
+
+## 效果图
+
+本机起了 `tools/seed_demo.py` 灌的两个演示项目、20 个服务（`tools/demo_services.py` 把它们跑成真实 JVM），截图如下。
+
+**项目总览** —— 首页只有项目卡片：服务数、在线 / 离线、每个服务的运行时总 / 新增、单测总 / 新增。
+
+![项目总览](docs/screenshots/01-项目总览.png)
+
+**项目面板** —— 项目下的服务表；添加服务勾选即生效，右上角进报表。
+
+![项目面板](docs/screenshots/02-项目面板.png)
+
+**服务详情** —— 四个环形指标（运行时 / 单测 × 总 / 新增）、趋势图；右上角版本下拉切历史版本，「立即采集」「结算归档」手动触发。
+
+![服务详情](docs/screenshots/03-服务详情.png)
+
+**历史对比** —— 任意两个版本的总量差与按文件的指令覆盖差。
+
+![历史对比](docs/screenshots/04-历史对比.png)
+
+**项目报表** —— 时间范围内的服务现状、已结算版本、单测报告，可导出 CSV / PDF。
+
+![项目报表](docs/screenshots/05-项目报表.png)
+
+**深色主题** —— 侧栏底部切换，默认跟随系统。
+
+![深色主题](docs/screenshots/06-深色主题.png)
+
+**在线接口文档** —— hub 自带 Swagger UI（`/docs`），不引 CDN。
+
+![接口文档](docs/screenshots/07-接口文档.png)
 
 ---
 
@@ -192,9 +225,9 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 就不参与覆盖率），分子是其中被执行到的行（含部分覆盖，和 LINE 计数器同口径）。删除的行、只改
 不增的行不参与。没有可覆盖的新增行时显示「无新增」而不是 0% 或 100%。
 
-**基线怎么定**：`$BASE` 是上一版的 commit / tag，由流水线决定。`GET /api/services/<svc>/versions`
-（groovy 的 `covhub.lastVersion`）返回最近结算版本对应的 `head`，流水线可以先问 hub 再 diff；
-问不到就退回 `origin/main`。浅克隆要先 `git fetch --unshallow --tags`。
+**基线怎么定**：`$BASE` 是上一版的 commit / tag，由流水线决定。先问 hub 上一次结算的版本对应的 `head`
+（`covhub-client.sh last-version <svc> --plain | cut -f2`，groovy 里是 `covhub.lastVersion`，接口是
+`GET /api/services/<svc>/versions`），问不到（第一次接入）就退回 `origin/main`。浅克隆要先 `git fetch --unshallow --tags`。
 
 **版本串必须一致**：构建时给的 `version`、发版时 `predeploy` / `retarget` 用的 `version`、快照里记的
 `version` 三处要是同一个字符串，hub 才能把 diff 和快照对上。`POST /api/diff` 的返回体里
@@ -203,19 +236,14 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 **diff 里有、报告里没有的源码文件**（被 agent 的 `excludes` 排掉，或不在 `classfiles` 里）会单独列在
 `unmatched` 里，看板上有中性提示 —— 它们从分母里消失比算错更糟。
 
-### 3. 推 SonarQube
-
-单测报告推 Sonar 的做法不变（`Jenkinsfile.build` 的 `SonarQube` 阶段）；运行期那份 XML 也能推，
-**建议用独立的 project key**（如 `myapp-runtime`），见 `integration/sonar/README.md`。
-
 ---
 
 ## 三、Jenkins 接入
 
 见 `integration/jenkins/`：一个 Shared Library（`vars/covhub.groovy`）加两条流水线模板。
 
-- `Jenkinsfile.build` —— 构建期：跑测试 → 聚合报告 → **推单测报告与 diff 给 hub** → 推 Sonar → 归档 class 产物（可选）
-- `Jenkinsfile.deploy` —— 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复 → 推 Sonar
+- `Jenkinsfile.build` —— 构建期：跑测试 → 聚合报告 → **推单测报告与 diff 给 hub** → 归档 class 产物（可选）
+- `Jenkinsfile.deploy` —— 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复
 
 安装步骤、节点前置条件与各步骤的注意事项见 `integration/jenkins/README.md`。
 

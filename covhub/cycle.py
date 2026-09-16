@@ -10,7 +10,7 @@ from .agent import service_channel
 from .collector import get_collector, collector_instances
 from .db import repo
 from .diagnose import diagnose
-from .jacoco import do_dump, exec_sessions, fingerprint, make_report, run_cli
+from .jacoco import do_dump, exec_sessions, fingerprint, make_report, merge_execs
 from .layout import ensure_dirs, safe_segment, svc_dir
 from .logbuf import log
 
@@ -128,13 +128,13 @@ def archive_cycle(cfg, svc, version, entry, out_dir, execs, reason, health=None)
         shutil.move(path, dest)
         moved.append(dest)
 
-    # 一个版本压成一个 exec：重出报告更快，推 Sonar / 转存归档也只用带一个文件。
+    # 一个版本压成一个 exec：重出报告更快，转存归档也只用带一个文件。
     # 原始快照仍然保留 —— 它们各自带着会话信息，是日后取证的依据。
     merged = None
     if moved:
         try:
             merged = os.path.join(archive, "merged.exec")
-            run_cli(cfg, ["merge"] + moved + ["--destfile", merged])
+            merge_execs(cfg, moved, merged)
         except RuntimeError as exc:
             log("  ! merge 失败，跳过（原始快照不受影响）：%s" % exc)
             merged = None
