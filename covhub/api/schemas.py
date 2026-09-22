@@ -153,8 +153,16 @@ class ServiceListResponse(BaseModel):
 class ImportResult(BaseModel):
     ok: bool = True
     log: str
+    projects: dict[str, str] = Field(description="每个项目的处理结果：added / updated / skipped / invalid")
     services: dict[str, str] = Field(description="每个服务的处理结果：added / updated / skipped / invalid")
     state: dict[str, dict[str, int]] = Field(description="每个服务导入的历史计数")
+
+
+class ExportResult(BaseModel):
+    """与 covhub export 的文件同形，去掉 ok 后可直接作 import 的输入。"""
+    ok: bool = True
+    projects: list[ProjectSpec]
+    services: list[ServiceSpec] = Field(description="入库原文：classfiles / sourcefiles 的相对路径不展开")
 
 
 class ProjectOut(ProjectSpec):

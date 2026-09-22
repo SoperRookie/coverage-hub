@@ -1,5 +1,14 @@
 # 更新日志
 
+## v2.3.2（2026-09-22）
+
+- 新增 `covhub export [--out FILE] [--json]` 与 `GET /api/export`：把库里的项目与服务配置导成
+  `import` 能吃的文件。服务配置在数据库里，换一个库（比如在 `covhub_dev` 上调完切回生产库）
+  配置不会自己长出来，之前只能逐个 `service add` 重登记。导出的是入库原文：相对路径不展开、
+  None 的标量不出现，导回去不会给 `bindAddress` 等填上默认值。
+- `import` 同时认 `projects` 段；服务引用的项目在目标库不存在时按名字自动建出（旧
+  `targets.yaml` 没有项目这一层，不该卡在「先 `project add`」上）。返回体多了 `projects` 计数。
+
 ## v2.3.1（2026-09-16）
 
 - 启动日志多一行「看板由谁托管」：未配 `serve.webDir` 时说明本进程只发 API 与报告目录，

@@ -78,3 +78,54 @@ def test_upsert_is_idempotent(db):
     assert repo.get_service("order")["version"] == "1.4.2"
     assert repo.upsert_service(dict(fields, version="9"), overwrite=True) == "updated"
     assert repo.get_service("order")["version"] == "9"
+
+
+def test_export_then_import_into_another_db(db, tmp_path):
+    """开发库调完切生产库，配置不会自己长出来 —— export / import 是搬配置的通道。"""
+    cfg = {"baseDir": str(tmp_path)}
+    ops.project_add(cfg, {"name": "shop", "title": "商城"})
+    ops.service_add(cfg, dict(PULL, project="shop"))
+    ops.service_add(cfg, {"name": "pay", "channel": "push", "includes": ["com.pay.*"]})
+
+    data = ops.export_config(cfg)
+    assert [p["name"] for p in data["projects"]] == ["shop"]
+    assert data["services"][0]["project"] == "shop"
+    assert "id" not in data["services"][0]
+    # 存原文：相对路径不展开，另一台 hub 的 baseDir 不一样也照样成立
+    assert data["services"][0]["classfiles"] == ["./data/order/artifacts/1.4.2"]
+    assert "bindAddress" not in data["services"][0]      # None 的标量不出现，导回去也不会填默认值
+
+    import yaml
+    src = tmp_path / "export.yaml"
+    src.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+
+    # 模拟切到另一个库：清空后从文件导回
+    ops.service_remove(cfg, "order")
+    ops.service_remove(cfg, "pay")
+    ops.project_remove(cfg, "shop")
+    out = ops.import_legacy(cfg, str(src), with_state=False)
+    assert out["projects"] == {"shop": "added"}
+    assert out["services"] == {"order": "added", "pay": "added"}
+    assert repo.get_project("shop")["title"] == "商城"
+    assert repo.get_service("order")["project"] == "shop"
+    assert repo.get_service("order")["classfiles"] == ["./data/order/artifacts/1.4.2"]
+    assert ops.export_config(cfg) == data
+
+    # 幂等；--overwrite 才覆盖
+    again = ops.import_legacy(cfg, str(src), with_state=False)
+    assert again["projects"] == {"shop": "skipped"} and set(again["services"].values()) == {"skipped"}
+
+
+def test_import_creates_project_the_service_refers_to(db, tmp_path):
+    """旧 targets.yaml 没有 projects 段；服务指着库里没有的项目时按名字建出来，别卡在 project add 上。"""
+    import yaml
+    src = tmp_path / "svc.yaml"
+    src.write_text(yaml.safe_dump({"services": [dict(PULL, project="shop")]}), encoding="utf-8")
+    cfg = {"baseDir": str(tmp_path)}
+    dry = ops.import_legacy(cfg, str(src), dry_run=True, with_state=False)
+    assert dry["services"] == {"order": "added"}
+    assert repo.list_projects() == []                       # 试运行不建
+    out = ops.import_legacy(cfg, str(src), with_state=False)
+    assert out["services"] == {"order": "added"}
+    assert [p["name"] for p in repo.list_projects()] == ["shop"]
+    assert repo.get_service("order")["project"] == "shop"

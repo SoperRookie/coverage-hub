@@ -271,14 +271,34 @@ def _validate(model, fields):
         raise CovhubError("服务配置不合法 —— " + "；".join(parts))
 
 
+def export_config(cfg):
+    """把库里的项目与服务配置导成 import 能吃的形态（projects + services）。
+
+    路径存原文不展开，去掉 id / 时间戳这些库自己的列 —— 导出的文件要能原样
+    `covhub import` 进另一个库（生产 / 开发两套库切换时用），也能当备份。
+    """
+    projects = [{"name": p["name"], "title": p.get("title"), "description": p.get("description")}
+                for p in repo.list_projects()]
+    services = []
+    for row in repo.list_services():
+        row.pop("id", None)
+        services.append(row)
+    return {"projects": projects, "services": services}
+
+
 def import_legacy(cfg, config_path, dry_run=False, overwrite=False, with_state=True):
-    """把旧 targets.yaml 的 services 和 data/<svc>/state.json 导进数据库。幂等。"""
-    log("从 %s 导入服务配置%s" % (config_path, "（试运行）" if dry_run else ""))
+    """把配置文件里的 projects / services 和 data/<svc>/state.json 导进数据库。幂等。
+
+    来源是旧 targets.yaml 或 `covhub export` 的输出。
+    """
+    log("从 %s 导入配置%s" % (config_path, "（试运行）" if dry_run else ""))
+    projects = importer.import_projects(config_path, dry_run=dry_run, overwrite=overwrite)
     services = importer.import_services(config_path, dry_run=dry_run, overwrite=overwrite)
-    counts = {}
-    for outcome in services.values():
-        counts[outcome] = counts.get(outcome, 0) + 1
-    log("服务：%s" % (", ".join("%s %d" % kv for kv in sorted(counts.items())) or "无"))
+    for label, outcomes in (("项目", projects), ("服务", services)):
+        counts = {}
+        for outcome in outcomes.values():
+            counts[outcome] = counts.get(outcome, 0) + 1
+        log("%s：%s" % (label, ", ".join("%s %d" % kv for kv in sorted(counts.items())) or "无"))
 
     states = {}
     if with_state:
@@ -289,4 +309,4 @@ def import_legacy(cfg, config_path, dry_run=False, overwrite=False, with_state=T
             states[name] = c
             log("  %s 的历史：快照 %d、归档 %d、断代 %d，已存在跳过 %d"
                 % (name, c["snapshots"], c["archives"], c["breaks"], c["skipped"]))
-    return {"services": services, "state": states}
+    return {"projects": projects, "services": services, "state": states}

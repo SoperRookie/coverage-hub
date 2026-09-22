@@ -260,6 +260,23 @@ def cmd_import(cfg, args):
                       dry_run=args.dry_run, overwrite=args.overwrite)
 
 
+def cmd_export(cfg, args):
+    data = ops.export_config(cfg)
+    if args.json or (args.out and config_format(args.out) == "json"):
+        text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    else:
+        import yaml
+        # 不排序键，name 在最前面才好读；PyYAML 会给 "1.4" 这种版本串自动加引号
+        text = "# covhub export：项目与服务配置，用 covhub import 本文件 导进另一个库。\n" + \
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        log("已导出 %d 个项目、%d 个服务到 %s" % (len(data["projects"]), len(data["services"]), args.out))
+    else:
+        print(text, end="")
+
+
 def cmd_serve(cfg, args):
     from .api.app import serve
     port = args.port or (cfg.get("serve") or {}).get("port", 8900)
@@ -395,10 +412,14 @@ def main():
     q.add_argument("name")
     q.add_argument("--yes", action="store_true")
 
-    p = sub.add_parser("import", help="把旧 targets.yaml 里的 services 导入数据库")
-    p.add_argument("source", nargs="?", help="旧配置文件路径，缺省用 -c 指向的那个")
+    p = sub.add_parser("import", help="把配置文件里的 projects / services 导入数据库（旧 targets.yaml 或 export 的输出）")
+    p.add_argument("source", nargs="?", help="配置文件路径，缺省用 -c 指向的那个")
     p.add_argument("--dry-run", action="store_true", help="只报告会做什么，不写库")
-    p.add_argument("--overwrite", action="store_true", help="同名服务已存在时覆盖")
+    p.add_argument("--overwrite", action="store_true", help="同名项目 / 服务已存在时覆盖")
+
+    p = sub.add_parser("export", help="把库里的项目与服务配置导出成 import 能吃的文件（换库、备份用）")
+    p.add_argument("--out", metavar="FILE", help="写到文件（按扩展名选 YAML / JSON），不给则打到 stdout")
+    p.add_argument("--json", action="store_true", help="输出 JSON 而不是 YAML")
 
     p = sub.add_parser("db", help="数据库结构维护")
     sp = p.add_subparsers(dest="action", required=True)
@@ -437,7 +458,7 @@ def main():
     except CovhubError as exc:
         die(str(exc))
     needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": (), "service": (),
-             "project": (), "import": (), "db": (), "openapi": (), "unit-coverage": (),
+             "project": (), "import": (), "export": (), "db": (), "openapi": (), "unit-coverage": (),
              "diff": (), "recompute": ()}.get(
         args.cmd, ("jacocoCli", "jacocoAgent"))
     for key in needs:
@@ -449,7 +470,7 @@ def main():
         "agent-opts": cmd_agent_opts, "status": cmd_status, "dump": cmd_dump,
         "predeploy": cmd_predeploy, "report": cmd_report, "retarget": cmd_retarget,
         "diagnose": cmd_diagnose, "service": cmd_service, "project": cmd_project,
-        "import": cmd_import, "db": cmd_db, "unit-coverage": cmd_unit_coverage,
+        "import": cmd_import, "export": cmd_export, "db": cmd_db, "unit-coverage": cmd_unit_coverage,
         "diff": cmd_diff, "recompute": cmd_recompute,
         "openapi": cmd_openapi, "watch": cmd_watch, "serve": cmd_serve,
     }

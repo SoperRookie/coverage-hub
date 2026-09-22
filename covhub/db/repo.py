@@ -186,6 +186,21 @@ def update_project(name, fields):
         return d
 
 
+def upsert_project(fields, overwrite=False):
+    """import 用：返回 added / updated / skipped。"""
+    with session_scope() as s:
+        proj = s.scalar(select(Project).where(Project.name == fields["name"]))
+        if proj is None:
+            s.add(Project(**fields))
+            return "added"
+        if not overwrite:
+            return "skipped"
+        for key, value in fields.items():
+            if key != "name":
+                setattr(proj, key, value)
+        return "updated"
+
+
 def remove_project(name):
     """只删项目；服务的 project_id 由外键 SET NULL（SQLite 靠 PRAGMA foreign_keys=ON）。"""
     with session_scope() as s:

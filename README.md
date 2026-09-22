@@ -274,7 +274,8 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 | `/api/recompute?service=X[&version=V]` | POST | 按已有 diff 重算新增代码覆盖 |
 | `/api/services`、`/api/services/{name}` | GET / POST / PUT / PATCH / DELETE | 服务配置的增删改查 |
 | `/api/projects`、`/api/projects/{name}` | GET / POST / PATCH / DELETE | 项目（服务分组）的增删改查 |
-| `/api/import` | POST | 把旧 targets.yaml 的 services 与 data/*/state.json 导进库 |
+| `/api/export` | GET | 导出全部项目与服务配置（与 `covhub export` 同形，可作 import 的输入） |
+| `/api/import` | POST | 导入项目与服务配置（旧 targets.yaml 或 export 的输出）及 data/*/state.json 里的历史 |
 | `/api/overview` | GET | 看板首页数据 |
 | `/api/services/{name}/detail[?version=D]` | GET | 服务详情页数据；带 `version`（归档目录名）时看那个历史版本 |
 | `/api/services/{name}/source?file=F[&kind=unit][&version=D]` | GET | 某个文件新增代码的源码与逐行覆盖状态 |
@@ -403,6 +404,19 @@ python covhub.py service update order-service --report-excludes 'com/example/ord
 python covhub.py service show order-service
 ```
 
+配置跟着数据库走：换一个库（比如在 `covhub_dev` 上调试完切回生产库 `covhub`）服务不会自己长出来，
+用 `export` / `import` 搬：
+
+```bash
+python covhub.py export --out services.yaml                # 在旧库上导出项目 + 服务
+COVHUB_DATABASE_URL=mysql+pymysql://...covhub python covhub.py import services.yaml   # 在新库上导入
+```
+
+`import` 幂等：已有的同名项目 / 服务默认跳过，`--overwrite` 才覆盖；服务引用的项目在新库里不存在时按
+名字自动建出。`data/` 目录两套库可以共用（磁盘上只有采集产物，库里只有元数据），历史快照 / 归档
+不随 export 走 —— `import` 会顺带从 `data/<svc>/state.json` 与 `versions/*/manifest.json` 补回归档记录，
+1.x 之后没有 state.json 的服务只导配置。
+
 | 字段 | 说明 |
 |---|---|
 | `project` | 所属项目名（先 `project add`），看板按它分组 |
@@ -431,7 +445,8 @@ python covhub.py service show order-service
 | `db upgrade / current` | 建表 / 升级表结构（`serve` 默认自动做）；`db revision` 给开发者生成迁移脚本 |
 | `project list / show / add / update / remove` | 项目（服务分组） |
 | `service list / show / add / update / remove / template` | 服务配置（存数据库） |
-| `import [旧配置] [--dry-run] [--overwrite]` | 把旧 `targets.yaml` 的 services 与 `data/*/state.json` 导进库，幂等 |
+| `export [--out FILE] [--json]` | 把库里的项目与服务配置导成文件（换库、备份用） |
+| `import [文件] [--dry-run] [--overwrite]` | 导入项目与服务配置（旧 `targets.yaml` 或 `export` 的输出）与 `data/*/state.json` 的历史，幂等 |
 | `agent-opts <service>` | 打印启动时应注入的 `-javaagent` 参数串 |
 | `status [service]` | 目标连通性与最新覆盖率 |
 | `dump <service>` | 拉一次快照并出报告（累加，不清零） |

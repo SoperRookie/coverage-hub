@@ -197,6 +197,17 @@ def test_services_crud(hub):
     assert hub.get("/api/services/svc", headers=H).status_code == 404
 
 
+def test_export_matches_import_shape(hub):
+    hub.post("/api/projects", headers=H, json={"name": "shop", "title": "商城"})
+    hub.post("/api/services", headers=H, json=dict(PULL, project="shop"))
+    assert hub.get("/api/export").status_code == 401
+    r = hub.get("/api/export", headers=H)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["projects"] == [{"name": "shop", "title": "商城", "description": None}]
+    assert body["services"][0]["project"] == "shop" and "id" not in body["services"][0]
+
+
 def test_docs_page_is_open_and_self_hosted(hub):
     """/docs 不要令牌，Swagger UI 的资源从包里出，不引 CDN；spec 带令牌的 securityScheme。"""
     from covhub.api.docs import SWAGGER_DIR

@@ -71,11 +71,18 @@ def remove_service(name: str, cfg: dict = Depends(get_cfg)):
 import_router = APIRouter(tags=["服务配置"], dependencies=[Depends(require_token)])
 
 
-@import_router.post("/api/import", summary="从旧 targets.yaml 导入服务与历史",
+@import_router.get("/api/export", summary="导出全部项目与服务配置",
+                   response_model=schemas.ExportResult, responses=ERR)
+def export_config(cfg: dict = Depends(get_cfg)):
+    """与 CLI 的 covhub export 同一份实现：存成文件后 covhub import 能原样导进另一个库。"""
+    return PrettyJSONResponse({"ok": True, **ops.export_config(cfg)})
+
+
+@import_router.post("/api/import", summary="导入项目与服务配置（旧 targets.yaml 或 export 的输出）及历史",
                     response_model=schemas.ImportResult, responses=ERR)
 async def import_legacy(request: Request,
                         source: str | None = Query(None, description="hub 上的旧配置文件路径，不给则用当前配置文件"),
-                        overwrite: bool = Query(False, description="同名服务已存在时覆盖"),
+                        overwrite: bool = Query(False, description="同名项目 / 服务已存在时覆盖"),
                         dryRun: bool = Query(False, description="只报告会做什么，不写库"),
                         cfg: dict = Depends(get_cfg)):
     """幂等，可重复调用。和 CLI 的 covhub import 是同一份实现。"""
