@@ -1,5 +1,28 @@
 # 更新日志
 
+## v2.4.0（2026-09-28）
+
+**源码按版本上传。** hub 独立部署后本机没有源码，原来只能在 hub 上 checkout 仓库、把
+`sourcefiles` 指过去 —— 要 git 权限，每次发版有人去切版本，且一个目录只能对一个版本
+（旧版本的新增代码因此看不到源码）。
+
+- 新增 `POST /api/upload-sources?service&version`、`covhub-client.sh upload-sources <svc> <ver> [包]`、
+  groovy `covhub.uploadSources`、CLI `covhub upload-sources <svc> [ver] <包或目录>`。客户端不给包时在当前
+  git 仓库里现打受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`，路径相对仓库根、与 git diff 一致）。
+  `Jenkinsfile.build` 的 `Push to covhub` 阶段已带上这一步。
+- hub 存到 `data/<svc>/sources/<版本>/`：**只收源码扩展名**（配置文件混进包里也不落盘），不剥顶层目录
+  （单模块仓库的模块目录是 diff 路径的一部分），按每个文件的 `package` 声明识别源码根 —— 多模块、非标准
+  目录、sources.jar 平铺都不用配。同版本重传整份替换，解到临时目录再换上，传坏了旧的还在。
+- 出报告按服务当前 `version` 取源码根传给 `--sourcefiles`：JaCoCo 类页面有逐行红绿标记，HTML 生成时内嵌
+  源码，归档报告不再依赖它。归档 `manifest.json` 多记一项 `sourcefiles`（实际用的源码根）。
+- 看板「新增代码」点开可「展开全文」（`GET /api/services/{name}/source` 加 `full=1`，返回体加
+  `sourceVersion` / `fullAvailable` / `full` / `totalLines`）；服务发了新版本之后旧版本的也照样对得上。
+  详情页在这一版没传源码时给提示（`detail` 的 `runtime.sourcesUploaded`）。
+- 服务配置里的 `sourcefiles` 降为兜底，且**只对服务当前 `version` 生效** —— 它是会跟着发版改掉的目录，
+  拿它去对旧版本只会错位（原先的源码视图会这么做）。
+- `/<svc>/sources/` 不经静态路径外发（按 resolve 后的路径判断，`//`、`..` 绕不过去），源码只通过报告与
+  源码视图接口出去，都要令牌。nginx 模板本就不反代它。
+
 ## v2.3.2（2026-09-22）
 
 - 新增 `covhub export [--out FILE] [--json]` 与 `GET /api/export`：把库里的项目与服务配置导成
