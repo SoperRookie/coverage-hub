@@ -59,9 +59,11 @@ def incremental_source(name: str,
                        kind: str = Query("runtime", description="runtime 或 unit"),
                        context: int = Query(3, ge=0, le=20, description="新增行前后带几行上下文"),
                        version: str | None = Query(None, description="看某个已结算版本的（归档目录名）"),
+                       full: bool = Query(False, description="给整个文件（该版本上传过源码才有全文，否则仍只有片段）"),
                        cfg: dict = Depends(get_cfg)):
-    """新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用算增量时存下的片段
-    （历史版本靠它），其次从服务的 sourcefiles 里找，都没有时只有行号与状态。"""
+    """新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用该版本经
+    upload-sources 传上来的整份文件，其次用算增量时存下的片段（稀疏，没有全文），再次是服务
+    配置的 sourcefiles（只对当前版本可信）；都没有时只有行号与状态。"""
     if kind not in ("runtime", "unit"):
         kind = "runtime"
-    return PrettyJSONResponse({"ok": True, **views.incremental_source(cfg, name, kind, file, context, version)})
+    return PrettyJSONResponse({"ok": True, **views.incremental_source(cfg, name, kind, file, context, version, full)})

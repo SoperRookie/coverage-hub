@@ -301,6 +301,65 @@ def test_incremental_json_keeps_source_snippets(hub, tmp_path):
     assert s["lines"][3]["status"] == "covered"
 
 
+def _src_tar(files):
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, text in files.items():
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+MAIN_SRC = "package probe;\n\nclass Main {\n\n    static void tick() { }\n}\n"
+
+
+def test_upload_sources_feeds_full_source_view_for_old_versions(hub, tmp_path):
+    """按版本传上来的源码：服务 retarget 到新版本之后，旧版本的新增代码仍能看整个文件。"""
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0"))
+    hub.post("/api/diff?service=svc&version=2.0&base=v1", headers=H, content=DIFF.encode())
+    hub.post("/api/unit-coverage?service=svc&version=2.0", headers=H, content=XML.encode())
+    blob = _src_tar({"src/main/java/probe/Main.java": MAIN_SRC,
+                     "src/main/resources/application.yml": "password: x\n"})
+    r = hub.post("/api/upload-sources?service=svc&version=2.0",
+                 headers={**H, "Content-Type": "application/x-www-form-urlencoded"}, content=blob)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["sources"]["files"] == 1 and body["sources"]["roots"] == ["src/main/java"]
+    assert body["matchesCurrentVersion"] is True and body["unit"]["pct"] == 100.0
+    assert not (tmp_path / "data" / "svc" / "sources" / "2.0" / "src" / "main" / "resources").exists()
+    # 有 diff 时顺手补上了片段
+    stored = json.loads((tmp_path / "data" / "svc" / "unit" / "2.0" / "incremental.json").read_text(encoding="utf-8"))
+    assert stored["files"]["src/main/java/probe/Main.java"]["snippets"]["5"] == "    static void tick() { }"
+
+    # 发了新版本：旧版本的源码视图照样按 2.0 的源码走，还能给全文
+    hub.post("/api/retarget?service=svc&version=3.0", headers=H)
+    s = hub.get("/api/services/svc/source?file=src/main/java/probe/Main.java&kind=unit", headers=H).json()
+    assert s["sourcePath"] == "sources/2.0" and s["sourceVersion"] == "2.0" and s["fullAvailable"] is True
+    assert [l["nr"] for l in s["lines"]] == [2, 3, 4, 5, 6]
+    s = hub.get("/api/services/svc/source?file=src/main/java/probe/Main.java&kind=unit&full=1", headers=H).json()
+    assert s["full"] is True and s["totalLines"] == 6 and [l["nr"] for l in s["lines"]] == [1, 2, 3, 4, 5, 6]
+    # 当前版本 3.0 还没传源码：详情页据此提示
+    assert hub.get("/api/services/svc/detail", headers=H).json()["runtime"]["sourcesUploaded"] is False
+
+    # 源码目录不经静态路径外发，换着写法也绕不过去
+    for path in ("/svc/sources/", "/svc/sources/2.0/src/main/java/probe/Main.java",
+                 "/svc//sources/2.0/", "/svc/current/../sources/2.0/"):
+        assert hub.get(path, headers=H).status_code == 404, path
+
+    # 坏输入：版本串、空正文、没有源码文件、不安全路径
+    assert hub.post("/api/upload-sources?service=svc&version=../x", headers=H, content=blob).status_code == 400
+    assert hub.post("/api/upload-sources?service=svc&version=2.0", headers=H).status_code == 400
+    r = hub.post("/api/upload-sources?service=svc&version=2.0", headers=H, content=_src_tar({"README.md": "x"}))
+    assert r.status_code == 400 and "一个源码文件" in r.json()["error"]
+    r = hub.post("/api/upload-sources?service=svc&version=2.0", headers=H, content=_src_tar({"../Evil.java": "x"}))
+    assert r.status_code == 400
+    assert hub.post("/api/upload-sources?service=nope&version=2.0", headers=H, content=blob).status_code == 404
+
+
 def test_overview_and_detail_shapes(hub):
     hub.post("/api/projects", headers=H, json={"name": "shop"})
     hub.post("/api/services", headers=H, json=dict(PULL, version="2.0", project="shop"))

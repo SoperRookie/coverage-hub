@@ -251,6 +251,10 @@ def cmd_diff(cfg, args):
     _print_service(ops.push_diff(cfg, args.service, args.version, args.base, text, head=args.head))
 
 
+def cmd_upload_sources(cfg, args):
+    _print_service(ops.upload_sources(cfg, args.service, args.version, args.src))
+
+
 def cmd_recompute(cfg, args):
     _print_service(ops.recompute_incremental(cfg, args.service, args.version))
 
@@ -390,6 +394,11 @@ def main():
     p.add_argument("--base", required=True, help="基线（上一版的 commit / tag）")
     p.add_argument("--head", help="本次的 commit")
 
+    p = sub.add_parser("upload-sources", help="收一份某版本的源码（报告下钻到行、新增代码看源码）")
+    p.add_argument("service")
+    p.add_argument("version", nargs="?", help="版本标识，缺省取服务当前 version")
+    p.add_argument("src", help="源码压缩包（tar.gz / zip），或一个源码目录（如 hub 上 checkout 的仓库）")
+
     p = sub.add_parser("recompute", help="按已有 diff 重算某版本的新增代码覆盖")
     p.add_argument("service")
     p.add_argument("--version")
@@ -459,7 +468,7 @@ def main():
         die(str(exc))
     needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": (), "service": (),
              "project": (), "import": (), "export": (), "db": (), "openapi": (), "unit-coverage": (),
-             "diff": (), "recompute": ()}.get(
+             "diff": (), "recompute": (), "upload-sources": ()}.get(
         args.cmd, ("jacocoCli", "jacocoAgent"))
     for key in needs:
         if not os.path.isfile(cfg.get(key, "")):
@@ -471,7 +480,7 @@ def main():
         "predeploy": cmd_predeploy, "report": cmd_report, "retarget": cmd_retarget,
         "diagnose": cmd_diagnose, "service": cmd_service, "project": cmd_project,
         "import": cmd_import, "export": cmd_export, "db": cmd_db, "unit-coverage": cmd_unit_coverage,
-        "diff": cmd_diff, "recompute": cmd_recompute,
+        "diff": cmd_diff, "recompute": cmd_recompute, "upload-sources": cmd_upload_sources,
         "openapi": cmd_openapi, "watch": cmd_watch, "serve": cmd_serve,
     }
     try:

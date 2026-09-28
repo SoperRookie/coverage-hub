@@ -22,6 +22,7 @@ from .jacoco import make_report
 from .layout import ensure_dirs
 from .logbuf import log
 from .schemas import ProjectPatch, ProjectSpec, ServicePatch, ServiceSpec
+from .sources import store_sources
 
 
 def agent_opts(cfg, name):
@@ -197,6 +198,31 @@ def unit_coverage(cfg, name, version, xml_path, group=None):
         raise CovhubError("没给 version，服务 %s 也没配 version" % name)
     row, summary, result = build.store_unit_report(cfg, svc, version, xml_path, group=group)
     return {"report": row, "incremental": build._brief(result) if result else None}
+
+
+def upload_sources(cfg, name, version, src):
+    """收一份某版本的源码（压缩包或目录），按版本存下；该版本有 diff 时把新增代码的片段补上。
+
+    报告里的源码行在下一次出报告时带上（采集轮询会做，急的话跑一次 report）；已经归档的
+    报告不重出 —— 归档报告对应的是当时那批 exec，重出是 report 的事，这里不越权。
+    """
+    svc = find_service(cfg, name)
+    version = version or svc.get("version")
+    if not version:
+        raise CovhubError("没给 version，服务 %s 也没配 version" % name)
+    stored = store_sources(cfg, svc, version, src)
+    current = svc.get("version")
+    if current != version:
+        log("  服务当前 version=%s：出报告按 version 找源码，retarget 到 %s 后才会用上这一份"
+            % (current, version))
+    else:
+        log("  当前周期的报告下一次采集时带上源码；要立即生效就跑一次 report")
+    out = {"version": version, "sources": stored, "matchesCurrentVersion": current == version,
+           "currentVersion": current, "runtime": None, "unit": None}
+    if build.load_diff_lines(cfg, svc, version) is not None:
+        recomputed = build.recompute(cfg, svc, version)
+        out.update(runtime=recomputed["runtime"], unit=recomputed["unit"])
+    return out
 
 
 def push_diff(cfg, name, version, base, text, head=None):

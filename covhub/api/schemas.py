@@ -228,6 +228,24 @@ class DiffOut(BaseModel):
     addedLines: int
 
 
+class SourcesStored(BaseModel):
+    path: str = Field(description="源码在 hub 上的落点（data/<svc>/sources/<版本>/）")
+    files: int = Field(description="收下的源码文件数（只收 .java/.kt/.groovy/.scala，测试代码除外）")
+    roots: list[str] = Field(description="按 package 声明识别出的源码根（相对落点，空串是落点本身）")
+
+
+class SourcesUploadResult(BaseModel):
+    ok: bool = True
+    service: str
+    version: str
+    sources: SourcesStored
+    matchesCurrentVersion: bool = Field(description="与服务当前 version 是否一致；不一致时出报告用不上这一份，retarget 后才用")
+    currentVersion: str | None = None
+    runtime: IncrementalBrief | None = Field(default=None, description="该版本有 diff 时，补上片段后重算的运行时新增覆盖")
+    unit: IncrementalBrief | None = None
+    log: str
+
+
 class DiffResult(BaseModel):
     ok: bool = True
     service: str

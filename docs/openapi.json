@@ -2622,6 +2622,159 @@
         }
       }
     },
+    "/api/upload-sources": {
+      "post": {
+        "tags": [
+          "构建期"
+        ],
+        "summary": "上传该版本的源码（报告下钻到行、新增代码看源码）",
+        "description": "hub 独立部署时本机没有源码：流水线按版本把源码传上来，存在 `data/<svc>/sources/<版本>/`。\n出报告按版本取（JaCoCo HTML 生成时把源码内嵌进类页面，归档后不再依赖它），新增代码视图\n能看整个文件，历史版本也对得上。\n\n只收 `.java/.kt/.groovy/.scala` 且丢掉 `src/test/`，其余文件（配置、密钥）一律不落盘；\n源码根按每个文件的 `package` 声明识别，与目录布局无关。同版本重传整份替换。\n这个目录**不经静态路径外发**，只通过报告与源码视图接口出去。",
+        "operationId": "upload_sources_api_upload_sources_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
+          },
+          {
+            "name": "services",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "一份源码落多个服务，逗号分隔（一个仓库多个服务时用）",
+              "title": "Services"
+            },
+            "description": "一份源码落多个服务，逗号分隔（一个仓库多个服务时用）"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取服务当前 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取服务当前 version"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourcesUploadResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "正文为空、不是 JaCoCo XML / git diff、或版本串不能作目录名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "源码压缩包，tar.gz 或 zip，从仓库根打包（covhub-client.sh upload-sources 会替你打）。curl 用 --data-binary @file",
+          "content": {
+            "application/gzip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/zip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/recompute": {
       "post": {
         "tags": [
@@ -3124,7 +3277,7 @@
           "看板"
         ],
         "summary": "某个文件的新增代码源码视图",
-        "description": "新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用算增量时存下的片段\n（历史版本靠它），其次从服务的 sourcefiles 里找，都没有时只有行号与状态。",
+        "description": "新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用该版本经\nupload-sources 传上来的整份文件，其次用算增量时存下的片段（稀疏，没有全文），再次是服务\n配置的 sourcefiles（只对当前版本可信）；都没有时只有行号与状态。",
         "operationId": "incremental_source_api_services__name__source_get",
         "security": [
           {
@@ -3201,6 +3354,18 @@
               "title": "Version"
             },
             "description": "看某个已结算版本的（归档目录名）"
+          },
+          {
+            "name": "full",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "给整个文件（该版本上传过源码才有全文，否则仍只有片段）",
+              "default": false,
+              "title": "Full"
+            },
+            "description": "给整个文件（该版本上传过源码才有全文，否则仍只有片段）"
           }
         ],
         "responses": {
@@ -4835,6 +5000,105 @@
           "dump"
         ],
         "title": "Session"
+      },
+      "SourcesStored": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "源码在 hub 上的落点（data/<svc>/sources/<版本>/）"
+          },
+          "files": {
+            "type": "integer",
+            "title": "Files",
+            "description": "收下的源码文件数（只收 .java/.kt/.groovy/.scala，测试代码除外）"
+          },
+          "roots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roots",
+            "description": "按 package 声明识别出的源码根（相对落点，空串是落点本身）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "files",
+          "roots"
+        ],
+        "title": "SourcesStored"
+      },
+      "SourcesUploadResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "sources": {
+            "$ref": "#/components/schemas/SourcesStored"
+          },
+          "matchesCurrentVersion": {
+            "type": "boolean",
+            "title": "Matchescurrentversion",
+            "description": "与服务当前 version 是否一致；不一致时出报告用不上这一份，retarget 后才用"
+          },
+          "currentVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currentversion"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "该版本有 diff 时，补上片段后重算的运行时新增覆盖"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "log": {
+            "type": "string",
+            "title": "Log"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "version",
+          "sources",
+          "matchesCurrentVersion",
+          "log"
+        ],
+        "title": "SourcesUploadResult"
       },
       "StatusResponse": {
         "properties": {

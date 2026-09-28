@@ -4,26 +4,10 @@ import json
 import os
 import shutil
 import tarfile
-import zipfile
 
 from .layout import ensure_dirs, safe_segment, svc_dir
 from .logbuf import log
-
-def _members_ok(names):
-    """压缩包来自流水线，仍按不可信输入处理：绝对路径、跳出目录一律拒绝。"""
-    for name in names:
-        clean = name.replace("\\", "/")
-        if clean.startswith("/") or ".." in clean.split("/") or ":" in clean.split("/")[0][1:2]:
-            raise RuntimeError("压缩包里有不安全的路径：%s" % name)
-
-
-def _common_prefix(names):
-    """构建期打包习惯上会带一层顶层目录（coverage-artifacts/），自动剥掉。"""
-    tops = {n.replace("\\", "/").split("/")[0] for n in names if n.strip("/")}
-    if len(tops) != 1:
-        return ""
-    top = tops.pop()
-    return top + "/" if any(n.replace("\\", "/").startswith(top + "/") for n in names) else ""
+from .sources import unpack
 
 
 def store_classes(cfg, svc, version, blob):
@@ -37,35 +21,7 @@ def store_classes(cfg, svc, version, blob):
     shutil.rmtree(dest, ignore_errors=True)
     os.makedirs(dest, exist_ok=True)
 
-    if zipfile.is_zipfile(blob):
-        with zipfile.ZipFile(blob) as zf:
-            names = zf.namelist()
-            _members_ok(names)
-            prefix = _common_prefix(names)
-            for name in names:
-                if name.endswith("/"):
-                    continue
-                rel = name[len(prefix):] if prefix and name.startswith(prefix) else name
-                target = os.path.join(dest, rel)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                with zf.open(name) as src, open(target, "wb") as out:
-                    shutil.copyfileobj(src, out)
-    else:
-        with tarfile.open(blob, "r:*") as tf:
-            members = [m for m in tf.getmembers() if m.isfile() or m.isdir()]
-            _members_ok([m.name for m in members])
-            prefix = _common_prefix([m.name for m in members])
-            for m in members:
-                if not m.isfile():
-                    continue
-                rel = m.name[len(prefix):] if prefix and m.name.startswith(prefix) else m.name
-                target = os.path.join(dest, rel)
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                src = tf.extractfile(m)
-                if src is None:
-                    continue
-                with src, open(target, "wb") as out:
-                    shutil.copyfileobj(src, out)
+    unpack(blob, dest)
 
     count = sum(len([f for f in files if f.endswith(".class")])
                 for _, _, files in os.walk(dest))

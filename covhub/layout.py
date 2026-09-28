@@ -17,6 +17,7 @@ from .errors import CovhubError
 #       classes/                按 reportExcludes 过滤后的 class 副本
 #       unit/<version>/         构建流水线传上来的单测 jacoco.xml + incremental.json
 #       diff/<version>.diff     流水线传上来的 git diff 原文 + .lines.json 行号明细
+#       sources/<version>/      流水线传上来的源码（sources.py），不经静态路径外发
 #   历史统计、归档元数据、断代记录在数据库里（db/models.py）
 # --------------------------------------------------------------------------
 

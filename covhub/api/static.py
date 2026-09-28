@@ -117,8 +117,13 @@ def static(path: str, request: Request, cfg: dict = Depends(get_hub_cfg)):
     denied = static_gate(request, cfg)
     if denied is not None:
         return denied
+    # 按版本上传的源码不经静态路径外发：它只该通过报告（生成时已内嵌）和源码视图接口出去，
+    # 目录列表一开，整个仓库的源码就能被逐个下载
+    # （按 resolve 之后的路径判断，svc//sources、svc/x/../sources 这类写法绕不过去）
     root = Path(cfg["dataDir"]).resolve()
     target = _inside(root, path)
+    if target is not None and target.relative_to(root).parts[1:2] == ("sources",):
+        return error(404, "未知路径")
     if target is None or not target.exists():
         return error(404, "未知路径")
 

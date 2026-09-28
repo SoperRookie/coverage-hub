@@ -1,6 +1,6 @@
-"""构建期送进来的东西：单测 jacoco.xml 与 git diff。
+"""构建期送进来的东西：单测 jacoco.xml、git diff、源码。
 
-两个接口的正文都是原始文件，照 upload-classes 的方式流式落盘：不挂 merged_params、
+几个接口的正文都是原始文件，照 upload-classes 的方式流式落盘：不挂 merged_params、
 不查 Content-Type —— curl --data-binary 默认发的是 x-www-form-urlencoded，按表单
 解析会把 XML / diff 吃掉。锁在线程池里拿。
 """
@@ -135,6 +135,57 @@ def _store_diffs(cfg, names, version, base, head, text):
                 r["service"] = n
                 r["log"] = "".join(lines)
             except Exception as exc:
+                lines.append("[covhub] %s\n" % exc)
+                r = {"ok": False, "service": n, "error": str(exc), "log": "".join(lines)}
+        out.append(r)
+    return out
+
+
+@router.post("/api/upload-sources", summary="上传该版本的源码（报告下钻到行、新增代码看源码）",
+             response_model=schemas.SourcesUploadResult, responses=ERR,
+             openapi_extra={"requestBody": {
+                 "required": True,
+                 "description": "源码压缩包，tar.gz 或 zip，从仓库根打包（covhub-client.sh upload-sources "
+                                "会替你打）。curl 用 --data-binary @file",
+                 "content": {
+                     "application/gzip": {"schema": {"type": "string", "format": "binary"}},
+                     "application/zip": {"schema": {"type": "string", "format": "binary"}},
+                     "application/octet-stream": {"schema": {"type": "string", "format": "binary"}},
+                 }}})
+async def upload_sources(request: Request,
+                         service: str | None = Query(None, description="服务名"),
+                         services: str | None = Query(None, description="一份源码落多个服务，逗号分隔（一个仓库多个服务时用）"),
+                         version: str | None = Query(None, description="版本标识，不给则取服务当前 version"),
+                         cfg: dict = Depends(get_cfg)):
+    """hub 独立部署时本机没有源码：流水线按版本把源码传上来，存在 `data/<svc>/sources/<版本>/`。
+    出报告按版本取（JaCoCo HTML 生成时把源码内嵌进类页面，归档后不再依赖它），新增代码视图
+    能看整个文件，历史版本也对得上。
+
+    只收 `.java/.kt/.groovy/.scala` 且丢掉 `src/test/`，其余文件（配置、密钥）一律不落盘；
+    源码根按每个文件的 `package` 声明识别，与目录布局无关。同版本重传整份替换。
+    这个目录**不经静态路径外发**，只通过报告与源码视图接口出去。"""
+    names = _targets(cfg, service, services)
+    path = await _spool(request, ".upload")
+    try:
+        results = await run_in_threadpool(_store_sources, cfg, names, version, path)
+    finally:
+        os.unlink(path)
+    if len(names) == 1:
+        body = {"ok": results[0].get("ok", True), "service": names[0], **results[0]}
+        return PrettyJSONResponse(body, status_code=200 if body["ok"] else 400)
+    body = {"ok": all(r.get("ok", True) for r in results), "services": names, "results": results}
+    return PrettyJSONResponse(body, status_code=200 if body["ok"] else 400)
+
+
+def _store_sources(cfg, names, version, path):
+    out = []
+    for n in names:
+        with LOCK, capture_logs() as lines:
+            try:
+                r = ops.upload_sources(cfg, n, version, path)
+                r["service"] = n
+                r["log"] = "".join(lines)
+            except Exception as exc:          # 版本串、压缩包格式、不安全路径都归 400
                 lines.append("[covhub] %s\n" % exc)
                 r = {"ok": False, "service": n, "error": str(exc), "log": "".join(lines)}
         out.append(r)
