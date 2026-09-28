@@ -177,6 +177,10 @@ covhub wait-online my-service
 covhub diagnose my-service
 ```
 
+源码（报告下钻到行、新增代码看全文）不在这里传：它和 diff 一样属于构建期，在构建这一版的
+checkout 里跑 `covhub upload-sources my-service "$NEW_VERSION"`（见 `Jenkinsfile.build`）。
+部署节点上通常没有源码。
+
 整个脚本没有一行 Python —— 五步都是发给 hub 的 HTTP 请求，任何一步非 2xx 都会因
 `set -e` 中断部署。
 

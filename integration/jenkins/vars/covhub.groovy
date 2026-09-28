@@ -80,7 +80,7 @@ private String enc(Object value) {
 
 /**
  * 把一个文件作为原始正文 POST 给 hub（--data-binary；-d 会吃掉换行，diff 就废了）。
- * uploadClasses / pushUnitCoverage / pushDiff 共用。failOnError=false 时非 2xx 只警告，
+ * uploadClasses / uploadSources / pushUnitCoverage / pushDiff 共用。failOnError=false 时非 2xx 只警告，
  * 返回 null。
  */
 private String httpUpload(Map args, String path, String file, String what, boolean failOnError) {
@@ -326,6 +326,44 @@ String pushDiff(Map args) {
     if (args.head) { qs += "&head=${enc(args.head)}" }
     return httpUpload(args, "/api/diff?${qs}", args.file as String, '推送 git diff',
                       args.failOnError ? true : false)
+}
+
+/**
+ * 按版本把源码传给 hub：JaCoCo 报告下钻到行、看板「新增代码」看整个文件都靠它，
+ * hub 上不用 checkout 源码，历史版本也对得上。
+ *   service / services、version 同上
+ *   archive   可选，现成的源码包（tar.gz / zip，比如 *-sources.jar 以外自己打的）。
+ *             不给就在当前工作区的 git 仓库里现打：受版本控制的 .java/.kt/.groovy/.scala，
+ *             去掉 src/test/，路径相对仓库根（和 git diff 一致）
+ *   failOnError  默认 false：源码只影响看源码，不影响覆盖率数字，不该卡住构建
+ * hub 那边只收源码文件，配置文件之类即便混进包里也不落盘。
+ */
+String uploadSources(Map args) {
+    assert (args.service || args.services) : 'uploadSources 需要 service'
+    assert args.version : 'uploadSources 需要 version'
+    assert hubUrl(args) : 'uploadSources 需要 hub（或环境变量 COVHUB_URL）'
+    String archive = args.archive as String
+    if (!archive) {
+        archive = '.covhub-sources.tar.gz'
+        sh '''
+            set -e
+            top=$(git rev-parse --show-toplevel)
+            git -C "$top" -c core.quotepath=false ls-files -- '*.java' '*.kt' '*.groovy' '*.scala' \\
+                | grep -v -e '^src/test/' -e '/src/test/' > .covhub-sources.lst || true
+            [ -s .covhub-sources.lst ] || { echo "[covhub] 仓库里没有受版本控制的源码文件" >&2; exit 1; }
+            tar czf .covhub-sources.tar.gz -C "$top" -T .covhub-sources.lst
+            echo "[covhub] 打包 $(wc -l < .covhub-sources.lst | tr -d ' ') 个源码文件"
+            rm -f .covhub-sources.lst
+        '''
+    }
+    String qs = (args.services ? "services=${enc(args.services)}" : "service=${enc(args.service)}") +
+                "&version=${enc(args.version)}"
+    try {
+        return httpUpload(args, "/api/upload-sources?${qs}", archive, '上传源码',
+                          args.failOnError ? true : false)
+    } finally {
+        if (!args.archive) { sh 'rm -f .covhub-sources.tar.gz' }
+    }
 }
 
 /**

@@ -146,7 +146,8 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 | `covhub.fetchReport(service:, version:, dest:)` | 从 hub 取回某版本的 `jacoco.xml` |
 | `covhub.pushUnitCoverage(service:, version:, xml:, group:, failOnError:)` | 把单测 jacoco.xml 传给 hub（`services: 'a,b'` 一份落多个服务） |
 | `covhub.pushDiff(service:, version:, base:, head:, file:, failOnError:)` | 把 git diff 传给 hub，用于新增代码覆盖率 |
+| `covhub.uploadSources(service:, version:, archive:, failOnError:)` | 按版本把源码传给 hub（不给 `archive` 就在工作区 git 仓库里现打），报告下钻到行、新增代码看全文用 |
 | `covhub.lastVersion(service:)` | 问 hub 最近结算的版本与其 diff 的 head，用来定 diff 基线 |
 
-除 `agentOpts` / `online` / `status` / `pushUnitCoverage` / `pushDiff`（默认只警告）外，任何一步在
+除 `agentOpts` / `online` / `status` / `pushUnitCoverage` / `pushDiff` / `uploadSources`（默认只警告）外，任何一步在
 hub 返回非 2xx 时都会让流水线失败 —— 覆盖率结算失败必须停住发版，而不是带着已丢失的数据继续。

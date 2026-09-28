@@ -96,7 +96,7 @@ pipeline {
         }
 
         stage('Push to covhub') {
-            // 单测报告 + git diff 送给 hub。版本串必须和发版时 predeploy / retarget 用的
+            // 单测报告 + git diff + 源码送给 hub。版本串必须和发版时 predeploy / retarget 用的
             // 一致（这里都是 REVISION），否则 hub 找不到对应的快照，新增覆盖永远算不出来。
             steps {
                 script {
@@ -130,6 +130,10 @@ pipeline {
                                         head: sh(script: 'git rev-parse HEAD', returnStdout: true).trim(),
                                         file: 'covhub.diff', tokenCredentialsId: env.COVHUB_TOKEN_ID)
                     }
+
+                    // 这一版的源码：hub 独立部署、本机没有源码，报告下钻到行和「新增代码」看全文都靠它
+                    covhub.uploadSources(service: env.COVHUB_SERVICE, version: env.REVISION,
+                                         tokenCredentialsId: env.COVHUB_TOKEN_ID)
                 }
             }
         }

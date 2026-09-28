@@ -92,7 +92,7 @@
 | `jacocoCli` | hub | hub 自己跑 `java -jar` 出报告 | hub 本机路径 |
 | `dataDir` | hub | 采集产物全在这 | hub 本机路径 |
 | `classfiles` | hub | 报告是 hub 出的，class 必须在 hub 上。用 `upload-classes --retarget` 会自动填 | hub 本机路径 |
-| `sourcefiles` | hub | 同上，下钻源码行时读 | hub 本机路径 |
+| `sourcefiles` | hub | 兜底用：该版本没经 `upload-sources` 传过源码时才读，且只对当前版本生效 | hub 本机路径（独立部署一般不配） |
 | `address` / `port` | 被测端的**对外**地址 | hub 连过去的目标。容器要写宿主机 IP + 映射出来的端口 | 宿主机 IP:映射端口 |
 | `bindAddress` | 被测端的**监听**地址 | agent 在被测 JVM 里监听 | 一律 `0.0.0.0` |
 | `collect.advertiseAddress` | **被测端能访问到的** hub 地址 | push 通道 agent 连回来用 | hub 的对外 IP / 域名，不是 `127.0.0.1` |
@@ -512,6 +512,7 @@ report <service>                               用已有 exec 重出报告
 diagnose <service> [version]                   exec 与 class 指纹是否对得上
 retarget <service> <version> [classfiles,...]  改配置里的版本与 class 路径
 upload-classes <service> <version> <包> [--retarget]  上传 class 产物
+upload-sources <service> <version> [包]          上传该版本源码（不给包就在当前 git 仓库里打）
 fetch-classes <service> <version> <目标目录>     取回某版本的 class 产物
 wait-online <service> [超时秒数，默认 120]       等新实例的 agent 就绪
 unit-coverage <service> <version> <jacoco.xml> [--group 模块]   构建流水线：送单测报告
@@ -543,8 +544,8 @@ predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。
 **不需要拿到构建产物。** v1.1.0 起 class 由 agent 自己落盘（`classDumpDir`），出报告用的
 就是运行时那一份 —— 指纹必然匹配，不需要被测项目的构建流水线配合。
 
-只有一种情况仍需构建产物：想在报告里**下钻到源码行**，那还要配 `sourcefiles` 指向
-对应版本的源码（Step 8）。只看类和方法级别的覆盖数字则不需要。
+只有一种情况还要构建侧配合：想在报告里**下钻到源码行**、在看板上看新增代码的整个文件，
+得让流水线按版本把源码传给 hub（Step 8，一条命令）。只看类和方法级别的覆盖数字则不需要。
 
 ### Step 2 · 选通道
 
@@ -631,7 +632,7 @@ python3 covhub.py service add order-service --channel push --includes 'com.examp
 | `excludes` | 否 | 同上，反向。被排除的类连数据都不产生，**事后找不回**，改了要重启服务 |
 | `classDumpDir` | 强烈建议 | **被测端**路径。agent 把加载到的每个 class 落在这里，文件名自带指纹（`OrderService.3f2a91c4e8b70d15.class`）。不配就得靠构建期归档 class，见 §6 |
 | `classfiles` | 是 | **hub 上**出报告用的 class 目录（可多个），必须是运行中那一份产物。走 `upload-classes --retarget` 会自动填成 `data/order-service/artifacts/<版本>/` |
-| `sourcefiles` | 否 | **hub 上**的源码根目录（`src/main/java` 那一级），配了才能下钻到行 |
+| `sourcefiles` | 否 | **hub 本机**的源码根目录（`src/main/java` 那一级）。只在该版本没 `upload-sources` 时兜底，且只对当前版本生效；独立部署用 Step 8 的上传即可 |
 | `reportExcludes` | 否 | 报告端过滤，Ant 路径风格用 `/`：`**` 跨目录、`*` 不跨目录。只影响统计口径，改了跑一次 `report` 即可 |
 | `sourceEncoding` | 否 | 默认 `UTF-8`。源码页乱码时看这里 |
 | `dumpRetry` | 否 | 默认 3。传给 `jacococli dump --retry`，服务刚起来端口还没监听时多试几次 |
@@ -900,30 +901,39 @@ covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
 
 ### Step 8 · 可选：让报告能下钻到源码行
 
-不配 `sourcefiles` 时，报告到方法级别为止，类页面显示「Source file ... was not found」。
-要看到具体哪一行被执行过，hub 上得有**对应版本**的源码：
+hub 上没有源码时，报告到方法级别为止，类页面显示「Source file ... was not found」；看板的
+「新增代码」也只有行号。hub 是独立部署的，**不去拉代码仓库** —— 由构建流水线按版本把源码传上来。
+在构建这一版的同一个 checkout 里（行号才对得上）：
 
 ```bash
-# hub 上
-sudo mkdir -p /opt/src && cd /opt/src
-git clone <order-service 仓库> order-service
-cd order-service && git checkout v1.4.2        # 版本要和线上的一致，否则行号错位
+covhub-client.sh upload-sources order-service 1.4.2
 ```
 
-配置里指向 `src/main/java` 那一级（多模块项目每个模块一条）：
+它在当前 git 仓库里打包受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`，路径相对仓库根，
+和 git diff 一致）再 POST 给 hub；也可以给一个现成的 tar.gz / zip 作第三个参数。Jenkins 里是
+`covhub.uploadSources(service:, version:)`（`Jenkinsfile.build` 的 `Push to covhub` 阶段已带上）。
 
-```yaml
-    sourcefiles:
-      - /opt/src/order-service/order-api/src/main/java
-      - /opt/src/order-service/order-core/src/main/java
-```
+hub 存到 `data/order-service/sources/1.4.2/`，按每个文件的 `package` 声明识别源码根 ——
+多模块、非标准目录、sources.jar 平铺都不用另外配置。之后：
 
-`retarget` 也能改这一项（`--sourcefiles`），发版流水线里可以在 checkout 新版本源码后
-一并更新。源码是 Lombok 生成的 getter/setter 这类，报告里会标在 `@Data` 那一行，属正常。
+- 出报告时按服务当前 `version` 找源码，类页面有逐行红绿标记。HTML 生成时就把源码内嵌进去，
+  归档报告不依赖这个目录；
+- 看板「新增代码」点开能「展开全文」，服务发了新版本之后旧版本的也照样对得上；
+- 该版本已有 diff 时，新增行附近的片段顺手补进 `incremental.json`。
 
-`sourcefiles` 同时喂给看板的「新增代码 → 看源码」视图。结算归档时 hub 会把新增行附近的源码
-片段一起存进归档，所以**历史版本**的源码视图不要求这个目录还停在旧版本 —— 只要当前周期
-的 `sourcefiles` 指向的就是当前版本即可。
+几点要知道：
+
+- **版本串要和服务的 `version` 一致**（同 §5.6）。先传源码、后 `retarget` 是常态：返回体的
+  `matchesCurrentVersion: false` 只是说「retarget 到这一版后才会用上」。
+- 已经在跑的周期传完源码后，下一轮采集自然带上；要立即看到就 `covhub-client.sh report <svc>`。
+- hub **只收源码文件**，配置文件之类即便混进包里也不落盘；`sources/` 目录不经静态路径外发，
+  只通过报告与源码视图接口出去（都要令牌）。
+- 源码是 Lombok 生成的 getter/setter 这类，报告里会标在 `@Data` 那一行，属正常。
+
+**兜底：hub 本机的源码目录。** 老的 `sourcefiles` 配置仍然有效：某个版本没传过源码时，出报告和
+看源码会去读它。但它是一个会跟着发版改掉的目录，所以**只对服务当前的 `version` 生效** —— 拿它去
+对旧版本的行号只会错位。本机已经 checkout 好的，也可以用 hub 上的 CLI 转成按版本存：
+`python covhub.py upload-sources order-service 1.4.2 /opt/src/order-service`。
 
 ### Step 9 · 验证接入
 
@@ -1144,7 +1154,7 @@ push 通道下滚动发版中途新旧副本同时在线，hub 会检出「混�
 
 ### 5.6 构建流水线：单测覆盖率与新增代码覆盖率
 
-这两个数不需要被测服务做任何事，只要构建流水线在 `mvn verify` 之后多两条 curl：
+这两个数不需要被测服务做任何事，只要构建流水线在 `mvn verify` 之后多两条 curl（第三条传源码，见 Step 8）：
 
 ```bash
 # 1. 单测报告（要先加聚合模块，见 §6；没有的话跳过这一条）
@@ -1158,10 +1168,13 @@ git fetch --unshallow --tags 2>/dev/null || git fetch --tags
 git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR \
     "$BASE"..HEAD -- '*.java' '*.kt' > covhub.diff
 covhub-client.sh diff order-service "$VERSION" covhub.diff --base "$(git rev-parse "$BASE")" --head "$(git rev-parse HEAD)"
+
+# 3. 这一版的源码（报告下钻到行、新增代码看整个文件）
+covhub-client.sh upload-sources order-service "$VERSION"
 ```
 
-`Jenkinsfile.build` 里的 `Push to covhub` 阶段就是这两步（`covhub.pushUnitCoverage` /
-`covhub.pushDiff`，hub 停机时只警告不卡构建 —— 单测报告下次构建还会有，这点和 `predeploy` 不同）。
+`Jenkinsfile.build` 里的 `Push to covhub` 阶段就是这三步（`covhub.pushUnitCoverage` /
+`covhub.pushDiff` / `covhub.uploadSources`，hub 停机时只警告不卡构建 —— 单测报告下次构建还会有，这点和 `predeploy` 不同）。
 
 三件事要知道：
 
@@ -1210,7 +1223,7 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 - [ ] `covhub-client.sh dump <service>` 能出数字，触达类不为 0
 - [ ] 手工操作几个页面后再 dump，覆盖率**有明显上涨**
 - [ ] `covhub-client.sh diagnose <service>` 指纹匹配接近 100%、判定为「正常」
-- [ ] 看板上所属项目（或「未分组」）里能看到该服务；配了 `sourcefiles` 的话 JaCoCo 报告里能看到绿色行标记
+- [ ] 看板上所属项目（或「未分组」）里能看到该服务；流水线传过源码（`upload-sources`）的话 JaCoCo 报告里能看到绿色行标记
 - [ ] class 产物已传到 hub，配置里 `classfiles` 指向 `data/<service>/artifacts/<版本>/`
 - [ ] 被测端的 `classDumpDir` 传完已清理
 - [ ] 发版流水线里 `predeploy` 排在停服之前，`upload-classes --retarget` 排在起服之后
@@ -1221,6 +1234,7 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 - [ ] 运维知道 stderr 会多一行 `Picked up JAVA_TOOL_OPTIONS`，不会当成告警
 - [ ] 看板上能找到该服务，详情页四个环形指标里至少「运行时 · 总覆盖」有值
 - [ ] （要单测 / 新增代码覆盖率的话）构建流水线已加 `unit-coverage` 与 `diff` 两步，详情页「新增代码明细」有文件列表
+- [ ] （要看源码的话）构建流水线已加 `upload-sources`，新增代码点开能「展开全文」
 
 ### 看板每一块数据从哪来
 
@@ -1230,18 +1244,18 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 |---|---|---|
 | 运行时 · 总覆盖、趋势图、在线状态 | hub 轮询 agent | §3 接入 + hub 带 `--with-watch` 起 |
 | 运行时 · 新增代码、「新增代码」页签 | 运行时报告 ∩ 这一版的 git diff | 构建流水线推 `diff`（§5.6），**版本串与服务的 `version` 一致** |
-| 「新增代码」里点开看源码 | `sourcefiles` 指向的源码目录 | Step 8 配 `sourcefiles`（当前版本的源码；历史版本用结算时存下的片段） |
+| 「新增代码」里点开看源码、展开全文 | 按版本上传的源码 | Step 8 流水线 `upload-sources`（历史版本同样按它；早于上传的归档用结算时存下的片段） |
 | 单测 · 总覆盖、「单测覆盖率」页签 | 构建流水线推的 jacoco.xml | §6 加聚合模块 + §5.6 推 `unit-coverage` |
 | 单测 · 新增代码 | 单测 XML ∩ git diff | 上面两条都做 |
 | 已结算版本、版本下拉（历史版本） | 每次 `predeploy` 的归档 | 发版流程排进 `predeploy`（§5），每发一版多一条 |
 | 历史对比 | 两个归档 / 当前周期的 jacoco.xml | 至少结算过一版；比对的是运行时指令覆盖 |
 | 触达类、指纹匹配率、`diagnose` | exec 与 class 指纹 | Step 7 `upload-classes --retarget`（或 `classDumpDir`） |
-| JaCoCo 原生报告下钻到行 | `sourcefiles` | Step 8 |
+| JaCoCo 原生报告下钻到行 | 按版本上传的源码（兜底：`sourcefiles`） | Step 8 |
 | 项目卡片、项目报表、侧栏项目 | 服务归属项目 | Step 3 `--project` 或看板里「添加服务」 |
 | 报表里的「期间结算版本 / 单测报告」 | archives / unit_reports 表 | 同上两行：有 `predeploy`、有 `unit-coverage` |
 | 断代记录 | hub 自动检测 | 不用做，pull 通道自动；push 只告警混版本 |
 
-一句话：**运行时靠接入，新增代码靠 diff，单测靠 XML，历史靠 predeploy，源码靠 sourcefiles，分组靠 project**。
+一句话：**运行时靠接入，新增代码靠 diff，单测靠 XML，历史靠 predeploy，源码靠 upload-sources，分组靠 project**。
 前三样以外都是可选的，缺哪块看板就在哪块显示「—」，不会报错。
 
 ---
@@ -1290,7 +1304,7 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 
 | 改了什么 | 要做什么 |
 |---|---|
-| `reportExcludes` / `sourcefiles` / `sourceEncoding` | 不用重启任何东西，`covhub-client.sh report <svc>` 重出报告 |
+| `reportExcludes` / `sourcefiles` / `sourceEncoding`，或刚 `upload-sources` | 不用重启任何东西，`covhub-client.sh report <svc>` 重出报告（不跑也行，下一轮采集自然带上） |
 | `includes` / `excludes` / `classDumpDir` / `bindAddress` / `port` | 重新取 `agent-opts`，**重启被测服务**。改了 `includes` 之后 class 集合变了，记得重传 class |
 | `address` / `version` / `classfiles` / `project` | 不用重启，下一轮采集 / 下一次刷新看板生效 |
 | `serve.token` / `serve.webDir` | 不用重启，下一次请求就生效（配置文件每个请求重读）。令牌走环境变量 `COVHUB_TOKEN` 的话要重启进程 |
@@ -1370,9 +1384,9 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 | 部分类始终 0 | 看 `excludes` | 采集阶段就没插桩，改配置并**重启服务** |
 | 报告分母比预期大很多 | 看报告的包列表 | `reportExcludes` 没配，dto / mapper / config 都算进去了；或 `includes` 开太大把框架类也算了 |
 | 报告里有些类根本不出现 | `ls classDumpDir` 里有没有它 | 传 class 时那个类还没被加载过。调一次相关功能后重传 |
-| 源码页显示「Source file ... was not found」 | —— | 没配 `sourcefiles`，或路径没指到 `src/main/java` 那一级 |
+| 源码页显示「Source file ... was not found」 | 看板详情页有没有「该版本没传源码」提示 | 这一版没跑 `upload-sources`，或上传的版本串和服务的 `version` 不一致；传完跑一次 `report` 立即生效 |
 | 源码页乱码 | —— | `sourceEncoding` 没设成 `UTF-8` |
-| 源码页绿色标记打在错误的行上 | hub 上 `git -C /opt/src/... describe` | 源码版本和线上的不一致 |
+| 源码页绿色标记打在错误的行上 | 上传源码时用的版本串 / commit | 源码版本和线上的不一致：`upload-sources` 要在构建这一版的同一个 checkout 里跑 |
 | 覆盖率只涨不跌，跨了好几个版本 | `diagnose` 的会话数和断代记录 | 发版时没跑 `predeploy`。hub 会自动检测重启并结算，但重启前最后一个轮询周期的数据丢了 |
 | 看板上莫名多出一个版本归档 | `diagnose` 的「断代记录」 | 自动断代：hub 发现被测进程重启过（手工重启、OOM、驱逐），替你结算了上一周期 |
 | 归档目录名带 `-2` 后缀 | —— | 同一版本号结算了两次。归档不可覆盖，宁可多一个目录 |

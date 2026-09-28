@@ -2,7 +2,7 @@
 # covhub 远程客户端 —— 发版节点 / 被测机器上用这个，不需要装 Python、java，
 # 也不需要配置文件。全部动作由 hub 那一个服务端完成，这里只发 HTTP 请求。
 #
-# 依赖：curl。就这一个（fetch-classes 另需 tar）。
+# 依赖：curl。就这一个（fetch-classes 另需 tar；upload-sources 不给包时另需 git 与 tar）。
 #
 # 配置（环境变量）：
 #   COVHUB_URL       hub 地址，如 http://covhub.internal:8900   （必填）
@@ -22,6 +22,7 @@
 #   covhub-client.sh retarget <service> <version> [classfiles[,更多]]
 #   covhub-client.sh upload-classes <service> <version> <包路径> [--retarget]
 #   covhub-client.sh fetch-classes <service> <version> <目标目录>
+#   covhub-client.sh upload-sources <service> <version> [包路径]   不给包就在当前 git 仓库里打
 #   covhub-client.sh wait-online <service> [超时秒数，默认 120]
 #   covhub-client.sh unit-coverage <service> <version> <jacoco.xml> [--group 模块名]
 #   covhub-client.sh diff <service> <version> <diff文件> --base <基线> [--head <本次>]
@@ -185,6 +186,31 @@ upload-classes)
         *)          die "未知参数：$4" 2 ;;
     esac
     request POST "/api/upload-classes?$QS" "$3"
+    ;;
+
+upload-sources)
+    # 按版本把源码传给 hub —— hub 独立部署、本机没有源码时，JaCoCo 报告靠它下钻到行，
+    # 看板的「新增代码」靠它看整个文件，历史版本也对得上。
+    # 不给包路径就在当前 git 仓库里现打：受版本控制的 .java/.kt/.groovy/.scala、去掉 src/test/，
+    # 路径相对仓库根（和 git diff 一致）。打的是工作区，流水线里 checkout 完就跑即可。
+    # hub 那边也只收源码文件，配置文件之类即便混进包里也不落盘。
+    need "${2:-}" "用法：$0 upload-sources <service> <version> [包路径]"
+    QS="service=$(enc "$1")&version=$(enc "$2")"
+    if [ -n "${3:-}" ]; then
+        request POST "/api/upload-sources?$QS" "$3"
+    else
+        command -v git > /dev/null 2>&1 || die "不给包路径时要用 git 打包，找不到 git" 2
+        _top=$(git rev-parse --show-toplevel 2> /dev/null) || die "当前目录不在 git 仓库里：先 cd 进仓库，或给出源码包路径" 2
+        _list="${TMPDIR:-/tmp}/covhub-sources-$$.lst"
+        _pkg="${TMPDIR:-/tmp}/covhub-sources-$$.tar.gz"
+        trap 'rm -f "$_list" "$_pkg"' EXIT
+        git -C "$_top" -c core.quotepath=false ls-files -- '*.java' '*.kt' '*.groovy' '*.scala' \
+            | grep -v -e '^src/test/' -e '/src/test/' > "$_list" || true
+        [ -s "$_list" ] || die "仓库里没有受版本控制的源码文件（$_top）" 2
+        tar czf "$_pkg" -C "$_top" -T "$_list" || die "打包失败" 2
+        echo "[covhub] 打包 $(wc -l < "$_list" | tr -d ' ') 个源码文件（$_top）" >&2
+        request POST "/api/upload-sources?$QS" "$_pkg"
+    fi
     ;;
 
 unit-coverage)

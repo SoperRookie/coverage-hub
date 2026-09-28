@@ -192,8 +192,8 @@ JaCoCo 用类的 CRC64 指纹（class id）把 exec 数据和 class 文件对应
 
 ## 二、构建期：单测覆盖率与新增代码覆盖率
 
-看板上的「单测」两列和「新增代码」两列来自构建流水线送进 hub 的两样东西。两步都是
-一条 curl，`Jenkinsfile.build` 里有现成的阶段（`Push to covhub`）。
+看板上的「单测」两列和「新增代码」两列来自构建流水线送进 hub 的两样东西；第三样（源码）让报告能下钻到行。
+每步都是一条 curl，`Jenkinsfile.build` 里有现成的阶段（`Push to covhub`）。
 
 ### 1. 单测覆盖率：把 jacoco.xml 传给 hub
 
@@ -237,6 +237,25 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 **diff 里有、报告里没有的源码文件**（被 agent 的 `excludes` 排掉，或不在 `classfiles` 里）会单独列在
 `unmatched` 里，看板上有中性提示 —— 它们从分母里消失比算错更糟。
 
+### 3. 源码：让报告下钻到行、新增代码看整个文件
+
+hub 独立部署，本机没有源码。流水线按版本把源码传上来，在仓库里（checkout 完）一条命令：
+
+```bash
+covhub-client.sh upload-sources order-service 1.4.3        # 当前 git 仓库里现打；也可以给现成的 tar.gz / zip
+```
+
+它打的是受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`），路径相对仓库根、和 git diff 一致。
+hub 存到 `data/<svc>/sources/<版本>/`，按每个文件的 `package` 声明识别源码根（多模块、非标准布局都行），之后：
+
+- **JaCoCo 报告**出报告时按版本带上源码，类页面能看到逐行的红绿标记。HTML 生成时把源码内嵌进去，归档报告不再依赖它；
+- **看板「新增代码」**能看整个文件（「展开全文」），服务发了新版本之后，旧版本的也照样对得上；
+- 该版本已有 diff 时顺手把新增行附近的片段补进 `incremental.json`。
+
+hub 只收源码文件，配置文件之类即便混进包里也不落盘；`sources/` 目录**不经静态路径外发**，只通过报告与
+源码视图接口出去（都要令牌）。版本串同样要和 `predeploy` / `retarget` 用的一致 —— 出报告按服务当前
+`version` 找源码。
+
 ---
 
 ## 三、Jenkins 接入
@@ -269,6 +288,7 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 | `/api/retarget?service=X&version=V&classfiles=/a,/b` | POST | 更新版本与 class 产物路径 |
 | `/api/upload-classes?service=X&version=V[&retarget=1]` | POST | 上传 class 产物压缩包（tar.gz / zip，正文为二进制） |
 | `/api/classes?service=X&version=V` | GET | 把该版本的 class 产物打成 tar.gz 回传 |
+| `/api/upload-sources?service=X&version=V` | POST | 上传该版本的源码压缩包（tar.gz / zip，正文为二进制），报告下钻到行、新增代码看全文用 |
 | `/api/unit-coverage?service=X&version=V[&group=M]` | POST | 上传单测 jacoco.xml（正文为文件） |
 | `/api/diff?service=X&version=V&base=B[&head=H]` | POST | 上传 git diff（正文为文件） |
 | `/api/recompute?service=X[&version=V]` | POST | 按已有 diff 重算新增代码覆盖 |
@@ -278,7 +298,7 @@ hub 记下每个源码文件的新增行号；之后**每次运行时快照**都
 | `/api/import` | POST | 导入项目与服务配置（旧 targets.yaml 或 export 的输出）及 data/*/state.json 里的历史 |
 | `/api/overview` | GET | 看板首页数据 |
 | `/api/services/{name}/detail[?version=D]` | GET | 服务详情页数据；带 `version`（归档目录名）时看那个历史版本 |
-| `/api/services/{name}/source?file=F[&kind=unit][&version=D]` | GET | 某个文件新增代码的源码与逐行覆盖状态 |
+| `/api/services/{name}/source?file=F[&kind=unit][&version=D][&full=1]` | GET | 某个文件新增代码的源码与逐行覆盖状态；`full=1` 给整个文件（该版本传过源码时） |
 | `/api/services/{name}/compare?a=A&b=B` | GET | 两个版本的对比（`current` 或归档目录名）：总量差 + 按源码文件的指令覆盖差 |
 | `/api/services/{name}/versions` | GET | 最近结算的版本与 diff 的 head（流水线定基线用） |
 | `/api/projects/{name}/report[?days=30]` | GET | 项目报表：各服务现状 + 时间范围内的结算版本与单测报告（`days=0` 不限） |
@@ -426,7 +446,7 @@ COVHUB_DATABASE_URL=mysql+pymysql://...covhub python covhub.py import services.y
 | `classDumpDir` | 让 agent 把实际加载的 class 落到这个目录（**被测端路径**） |
 | `classfiles` | 出报告用的 class（**hub 上**的路径），必须与运行中的服务是同一份产物。用 `upload-classes --retarget` 传上来会自动指过去 |
 | `reportExcludes` | **报告端过滤**，Ant 风格路径（用 `/`），随时可改重出报告 |
-| `sourcefiles` | 可选，hub 上的源码路径，配了才能在报告里下钻到源码行 |
+| `sourcefiles` | 可选，**hub 本机**的源码路径，只在该版本没经 `upload-sources` 传过源码时兜底（且只对当前版本生效）。独立部署推荐流水线按版本上传，见「三、构建期」 |
 | `sourceEncoding` | 默认 UTF-8 |
 | `dumpRetry` | 可选，默认 3，服务刚起来时端口可能还没监听 |
 
@@ -456,6 +476,7 @@ COVHUB_DATABASE_URL=mysql+pymysql://...covhub python covhub.py import services.y
 | `retarget <service> --version V [--classfiles ...]` | 发版后把服务指向新版本产物 |
 | `unit-coverage <service> [version] <jacoco.xml> [--group M]` | 收一份单测报告 |
 | `diff <service> [version] <file> --base B [--head H]` | 收一份 git diff |
+| `upload-sources <service> [version] <包或目录>` | 收一份某版本的源码（hub 本机 checkout 的目录也能转成按版本存） |
 | `recompute <service> [--version V]` | 按已有 diff 重算新增代码覆盖 |
 | `openapi [--out docs/openapi.json] [--check]` | 导出 / 校验接口文档 |
 | `watch [--interval N]` | 守护进程，定时轮询全部目标 |
@@ -506,6 +527,7 @@ data/
     classes/                    按 reportExcludes 过滤后的 class 副本
     unit/<版本>/                 单测 jacoco.xml + incremental.json
     diff/<版本>.diff、.lines.json  git diff 原文与新增行号
+    sources/<版本>/              经 upload-sources 传上来的源码（仓库相对路径 + .roots.json），不经静态路径外发
 ```
 
 `data/<service>/versions/` 下的 exec 是**不可再生**的真实执行轨迹。需要长期留存的话请归档到对象存储或制品库，别指望 git。
