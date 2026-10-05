@@ -1,5 +1,28 @@
 # 更新日志
 
+## v2.5.0（2026-10-05）
+
+**diff 由 hub 比对两版源码生成，流水线不再在构建节点上算 git diff。** 原来构建节点要有
+上一版 commit 的历史：Jenkins `cleanWs` 过的工作区、浅克隆、只拉一个 tag，`rev-parse` 就找不到
+基线，diff 静默变空、新增代码覆盖率永远算不出来。hub 手里按版本存着 `upload-sources` 传来的
+源码，两棵树一比就是 diff，和历史深度、工作区死活都没关系。
+
+- `POST /api/upload-sources` 存好源码后默认就生成这一版的 diff（`git diff --no-index -M`，识别重命名，
+  输出与流水线那条命令同形，剥掉路径里的版本目录、丢掉 `.roots.json`）；加 `diff=skip` 只存源码，
+  `base=<版本>` 指定基线。返回体多 `diff` / `diffReason`。生成不了（第一次接入没有基线、hub 没装 git）
+  不算上传失败，`diffReason` 说原因。**hub 机器要装 git**。
+- `POST /api/diff` 加 `from=sources`（不读正文）：显式让 hub 比对、指定基线或重做；`base` 改为可选
+  （上传 git diff 时仍必填，缺了 400）。返回体多 `baseReason`。
+- 基线自动定：服务当前 `version`（线上跑着的那版）→ 最近结算的版本 → 最近上传过源码的版本，取第一个
+  传过源码的。
+- `diffs` 表加 `origin`（`upload` / `sources`，迁移 `0003`）：**自动生成的不覆盖流水线上传的**，显式
+  `from=sources` 才覆盖。DBA 建表 SQL 同步。
+- CLI：`diff <svc> [ver] --from-sources [--base V]`、`upload-sources ... [--base V] [--no-diff]`；
+  `covhub-client.sh` 同样；groovy `covhub.pushDiff(fromSources: true, base:)`、
+  `covhub.uploadSources(base:, diff:)`。`Jenkinsfile.build` 去掉整段 git diff，只剩 `uploadSources`。
+  `DIFF_BASE` 的含义从 commit 变成版本号。
+- `lastVersion` / `last-version` / `GET /api/services/{name}/versions` 保留，给仍自己算 git diff 的项目定基线。
+
 ## v2.4.0（2026-09-28）
 
 **源码按版本上传。** hub 独立部署后本机没有源码，原来只能在 hub 上 checkout 仓库、把
