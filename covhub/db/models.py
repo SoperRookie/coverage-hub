@@ -262,5 +262,8 @@ class Diff(Base):
     at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     files: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     added_lines: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # upload：流水线传上来的 git diff；sources：hub 比对两版已上传的源码自己生成的。
+    # 自动生成的不许覆盖人工上传的（反过来可以），所以得记住是谁生成的
+    origin: Mapped[str] = mapped_column(String(20), nullable=False, default="upload")
 
     __table_args__ = (UniqueConstraint("service_id", "version", name="uq_diffs_service_version"),)

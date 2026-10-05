@@ -549,10 +549,11 @@ def unit_history(name, limit=40):
 
 def _diff_dict(row):
     return {"id": row.id, "version": row.version, "base": row.base, "head": row.head,
-            "at": _iso(row.at), "files": row.files, "addedLines": row.added_lines}
+            "at": _iso(row.at), "files": row.files, "addedLines": row.added_lines,
+            "origin": row.origin}
 
 
-def upsert_diff(name, version, base, head, files, added_lines):
+def upsert_diff(name, version, base, head, files, added_lines, origin="upload"):
     with session_scope() as s:
         svc = _get(s, name)
         row = s.scalar(select(Diff).where(Diff.service_id == svc.id, Diff.version == version))
@@ -562,6 +563,7 @@ def upsert_diff(name, version, base, head, files, added_lines):
         row.base, row.head = base, head
         row.at = datetime.now().replace(microsecond=0)
         row.files, row.added_lines = files, added_lines
+        row.origin = origin
         s.flush()
         return _diff_dict(row)
 

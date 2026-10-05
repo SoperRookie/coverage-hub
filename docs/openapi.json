@@ -2447,8 +2447,8 @@
         "tags": [
           "构建期"
         ],
-        "summary": "收一份 git diff，用于新增代码覆盖率",
-        "description": "推荐的生成命令：\n`git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt'`。\n\nhub 记下每个源码文件的新增行号，之后每次快照都按它算**新增代码的运行时覆盖率**；\n该版本已有的快照与单测报告立刻重算一遍。分母是新增行里 JaCoCo 有探针的行。\n返回体里的 `matchesCurrentVersion` 为 false 说明版本串对不上服务当前 version ——\n运行时快照按 version 找 diff，对不上就永远算不出新增覆盖。",
+        "summary": "该版本的 diff：由 hub 比对两版源码生成（from=sources），或收流水线上传的 git diff",
+        "description": "两种来源，效果一样：hub 记下每个源码文件的新增行号，之后每次快照都按它算**新增代码的\n运行时覆盖率**，该版本已有的快照与单测报告立刻重算一遍。分母是新增行里 JaCoCo 有探针的行。\n\n**from=sources（推荐）**：两版源码都经 upload-sources 传上来后由 hub 比对，构建节点不需要\n基线 commit 的历史（浅克隆、清过的工作区都无所谓）。upload-sources 默认就会做这一步，这个\n接口用于显式指定基线或重做。\n\n**上传 git diff**：推荐的生成命令\n`git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt'`。\n流水线上传的 diff 优先：之后 upload-sources 不会用自动生成的覆盖它。\n\n返回体里的 `matchesCurrentVersion` 为 false 说明版本串对不上服务当前 version ——\n运行时快照按 version 找 diff，对不上就永远算不出新增覆盖。",
         "operationId": "push_diff_api_diff_post",
         "security": [
           {
@@ -2519,13 +2519,20 @@
           {
             "name": "base",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": "string",
-              "description": "基线：上一版的 commit / tag（建议传 rev-parse 后的 SHA）",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "基线。上传 git diff 时必填，是上一版的 commit / tag（建议传 rev-parse 后的 SHA）；from=sources 时是基线的**版本标识**，不给则 hub 自动定：服务当前 version → 最近结算的版本 → 最近上传过源码的版本",
               "title": "Base"
             },
-            "description": "基线：上一版的 commit / tag（建议传 rev-parse 后的 SHA）"
+            "description": "基线。上传 git diff 时必填，是上一版的 commit / tag（建议传 rev-parse 后的 SHA）；from=sources 时是基线的**版本标识**，不给则 hub 自动定：服务当前 version → 最近结算的版本 → 最近上传过源码的版本"
           },
           {
             "name": "head",
@@ -2540,10 +2547,28 @@
                   "type": "null"
                 }
               ],
-              "description": "本次的 commit",
+              "description": "本次的 commit（上传 git diff 时）",
               "title": "Head"
             },
-            "description": "本次的 commit"
+            "description": "本次的 commit（上传 git diff 时）"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "填 sources：不读正文，由 hub 比对该版本与基线版本经 upload-sources 传上来的源码生成 diff（git diff --no-index -M，识别重命名）",
+              "title": "From"
+            },
+            "description": "填 sources：不读正文，由 hub 比对该版本与基线版本经 upload-sources 传上来的源码生成 diff（git diff --no-index -M，识别重命名）"
           }
         ],
         "responses": {
@@ -2599,7 +2624,7 @@
           }
         },
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/octet-stream": {
               "schema": {
@@ -2618,7 +2643,7 @@
               }
             }
           },
-          "description": "`git diff <基线>..<本次>` 的输出。curl 用 --data-binary @file"
+          "description": "`git diff <基线>..<本次>` 的输出。curl 用 --data-binary @file。from=sources 时不读正文"
         }
       }
     },
@@ -2628,7 +2653,7 @@
           "构建期"
         ],
         "summary": "上传该版本的源码（报告下钻到行、新增代码看源码）",
-        "description": "hub 独立部署时本机没有源码：流水线按版本把源码传上来，存在 `data/<svc>/sources/<版本>/`。\n出报告按版本取（JaCoCo HTML 生成时把源码内嵌进类页面，归档后不再依赖它），新增代码视图\n能看整个文件，历史版本也对得上。\n\n只收 `.java/.kt/.groovy/.scala` 且丢掉 `src/test/`，其余文件（配置、密钥）一律不落盘；\n源码根按每个文件的 `package` 声明识别，与目录布局无关。同版本重传整份替换。\n这个目录**不经静态路径外发**，只通过报告与源码视图接口出去。",
+        "description": "hub 独立部署时本机没有源码：流水线按版本把源码传上来，存在 `data/<svc>/sources/<版本>/`。\n出报告按版本取（JaCoCo HTML 生成时把源码内嵌进类页面，归档后不再依赖它），新增代码视图\n能看整个文件，历史版本也对得上。\n\n**顺带生成这一版的 diff**（新增代码覆盖率的依据）：hub 拿基线版本的源码和这一份比对，构建\n节点不需要有基线 commit 的历史。生成不了（第一次接入没有基线、hub 没装 git）不算失败，\n返回体 `diff` 为 null、`diffReason` 说明原因。\n\n只收 `.java/.kt/.groovy/.scala` 且丢掉 `src/test/`，其余文件（配置、密钥）一律不落盘；\n源码根按每个文件的 `package` 声明识别，与目录布局无关。同版本重传整份替换。\n这个目录**不经静态路径外发**，只通过报告与源码视图接口出去。",
         "operationId": "upload_sources_api_upload_sources_post",
         "security": [
           {
@@ -2695,6 +2720,36 @@
               "title": "Version"
             },
             "description": "版本标识，不给则取服务当前 version"
+          },
+          {
+            "name": "diff",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "auto：存好源码后由 hub 比对基线版本的源码生成这一版的 diff（已有流水线上传的 diff 时不覆盖）；skip：不生成",
+              "default": "auto",
+              "title": "Diff"
+            },
+            "description": "auto：存好源码后由 hub 比对基线版本的源码生成这一版的 diff（已有流水线上传的 diff 时不覆盖）；skip：不生成"
+          },
+          {
+            "name": "base",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "生成 diff 时的基线版本标识，不给则 hub 自动定：服务当前 version → 最近结算的版本 → 最近上传过源码的版本",
+              "title": "Base"
+            },
+            "description": "生成 diff 时的基线版本标识，不给则 hub 自动定：服务当前 version → 最近结算的版本 → 最近上传过源码的版本"
           }
         ],
         "responses": {
@@ -3699,6 +3754,11 @@
           "addedLines": {
             "type": "integer",
             "title": "Addedlines"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin",
+            "description": "upload：流水线上传的 git diff；sources：hub 比对两版已上传的源码生成"
           }
         },
         "type": "object",
@@ -3708,7 +3768,8 @@
           "base",
           "at",
           "files",
-          "addedLines"
+          "addedLines",
+          "origin"
         ],
         "title": "DiffOut"
       },
@@ -3725,6 +3786,18 @@
           },
           "diff": {
             "$ref": "#/components/schemas/DiffOut"
+          },
+          "baseReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basereason",
+            "description": "from=sources 时基线取自哪里（调用方指定 / 服务当前 version / 最近结算的版本 / 最近上传过源码的版本）"
           },
           "matchesCurrentVersion": {
             "type": "boolean",
@@ -5064,6 +5137,29 @@
             ],
             "title": "Currentversion"
           },
+          "diff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiffOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "该版本现在的 diff：默认由 hub 比对基线版本的源码生成；已有流水线上传的则保留；null 表示没有"
+          },
+          "diffReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diffreason",
+            "description": "没有生成 diff 时的原因（第一次接入没有基线、hub 没装 git、调用方 diff=skip……）"
+          },
           "runtime": {
             "anyOf": [
               {
@@ -5073,7 +5169,7 @@
                 "type": "null"
               }
             ],
-            "description": "该版本有 diff 时，补上片段后重算的运行时新增覆盖"
+            "description": "该版本有 diff 时重算的运行时新增覆盖"
           },
           "unit": {
             "anyOf": [

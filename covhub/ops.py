@@ -200,9 +200,12 @@ def unit_coverage(cfg, name, version, xml_path, group=None):
     return {"report": row, "incremental": build._brief(result) if result else None}
 
 
-def upload_sources(cfg, name, version, src):
-    """收一份某版本的源码（压缩包或目录），按版本存下；该版本有 diff 时把新增代码的片段补上。
+def upload_sources(cfg, name, version, src, diff="auto", base=None):
+    """收一份某版本的源码（压缩包或目录），按版本存下，然后（默认）由 hub 比对基线版本的
+    源码生成这一版的 diff —— 流水线不必再在构建节点上 git diff。
 
+    diff="skip" 不生成；该版本已有流水线上传的 diff 时也不覆盖（人工给的优先）。生成不了
+    （没基线、hub 没 git）不算上传失败：源码已经存好，返回体 diffReason 说明原因。
     报告里的源码行在下一次出报告时带上（采集轮询会做，急的话跑一次 report）；已经归档的
     报告不重出 —— 归档报告对应的是当时那批 exec，重出是 report 的事，这里不越权。
     """
@@ -210,6 +213,8 @@ def upload_sources(cfg, name, version, src):
     version = version or svc.get("version")
     if not version:
         raise CovhubError("没给 version，服务 %s 也没配 version" % name)
+    if diff not in ("auto", "skip"):
+        raise CovhubError("diff 只能是 auto 或 skip")
     stored = store_sources(cfg, svc, version, src)
     current = svc.get("version")
     if current != version:
@@ -218,8 +223,25 @@ def upload_sources(cfg, name, version, src):
     else:
         log("  当前周期的报告下一次采集时带上源码；要立即生效就跑一次 report")
     out = {"version": version, "sources": stored, "matchesCurrentVersion": current == version,
-           "currentVersion": current, "runtime": None, "unit": None}
+           "currentVersion": current, "runtime": None, "unit": None,
+           "diff": repo.get_diff(name, version), "diffReason": None}
+
+    reason = None
+    if diff == "skip":
+        reason = "调用方要求不生成"
+    elif out["diff"] and out["diff"]["origin"] == build.DIFF_ORIGIN_UPLOAD:
+        reason = "该版本已有流水线上传的 diff，不覆盖；要换成源码比对的结果就调一次 diff 接口（from=sources）"
+    else:
+        try:
+            r = diff_from_sources(cfg, name, version, base)
+            out.update(diff=r["diff"], runtime=r["runtime"], unit=r["unit"])
+            return out
+        except CovhubError as exc:
+            reason = str(exc)
+    log("  没有生成 diff：%s" % reason)
+    out["diffReason"] = reason
     if build.load_diff_lines(cfg, svc, version) is not None:
+        # 已有 diff：把新增行附近的源码片段补进明细
         recomputed = build.recompute(cfg, svc, version)
         out.update(runtime=recomputed["runtime"], unit=recomputed["unit"])
     return out
@@ -236,6 +258,30 @@ def push_diff(cfg, name, version, base, text, head=None):
     row, lines = build.store_diff(cfg, svc, version, base, head, text)
     recomputed = build.recompute(cfg, svc, version)
     return {"diff": row, "matchesCurrentVersion": svc.get("version") == version,
+            "currentVersion": svc.get("version"), "runtime": recomputed["runtime"],
+            "unit": recomputed["unit"]}
+
+
+def diff_from_sources(cfg, name, version=None, base=None):
+    """由 hub 比对两版已上传的源码生成 diff，代替流水线上传 git diff；之后同样重算新增覆盖。
+
+    base 是基线的**版本标识**（不是 commit），不给就自动定（见 build.pick_diff_base）。
+    这是显式调用，已有的 diff 不管谁生成的都覆盖。
+    """
+    svc = find_service(cfg, name)
+    version = version or svc.get("version")
+    if not version:
+        raise CovhubError("没给 version，服务 %s 也没配 version" % name)
+    why = "调用方指定"
+    if not base:
+        base, why = build.pick_diff_base(cfg, svc, version)
+        if not base:
+            raise CovhubError("定不出基线：%s" % why)
+    text = build.diff_from_sources(cfg, svc, version, base)
+    log("%s：比对已上传的源码 %s → %s（基线取自：%s）" % (name, base, version, why))
+    row, _ = build.store_diff(cfg, svc, version, base, version, text, origin=build.DIFF_ORIGIN_SOURCES)
+    recomputed = build.recompute(cfg, svc, version)
+    return {"diff": row, "baseReason": why, "matchesCurrentVersion": svc.get("version") == version,
             "currentVersion": svc.get("version"), "runtime": recomputed["runtime"],
             "unit": recomputed["unit"]}
 

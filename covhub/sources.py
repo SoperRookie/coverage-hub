@@ -106,7 +106,7 @@ def unpack(blob, dest, keep=None, strip=True):
 
 # ---- 存 ----
 
-def _is_main_source(rel):
+def is_main_source(rel):
     """源码扩展名，且不是测试代码 —— 测试代码不进覆盖率统计，diff 解析也同样丢掉它。"""
     rel = rel.replace("\\", "/")
     if not rel.lower().endswith(SOURCE_EXTS):
@@ -121,7 +121,7 @@ def _copy_tree(src_dir, dest):
         for name in files:
             full = os.path.join(dirpath, name)
             rel = os.path.relpath(full, src_dir).replace("\\", "/")
-            if not _is_main_source(rel):
+            if not is_main_source(rel):
                 continue
             target = os.path.join(dest, rel)
             os.makedirs(os.path.dirname(target), exist_ok=True)
@@ -177,7 +177,7 @@ def store_sources(cfg, svc, version, src):
         if os.path.isdir(src):
             count = _copy_tree(src, tmp)
         else:
-            count = unpack(src, tmp, keep=_is_main_source, strip=False)
+            count = unpack(src, tmp, keep=is_main_source, strip=False)
         if not count:
             raise CovhubError("包里一个源码文件（%s，测试代码除外）都没有，检查打包方式"
                               % " / ".join(SOURCE_EXTS))
@@ -201,6 +201,26 @@ def store_sources(cfg, svc, version, src):
 
 
 # ---- 取 ----
+
+def uploaded_versions(cfg, svc):
+    """上传过源码的版本（目录名）按上传时间倒序，最新在前。自动定 diff 基线时兜底用。"""
+    parent = os.path.join(svc_dir(cfg, svc), "sources")
+    out = []
+    try:
+        names = os.listdir(parent)
+    except OSError:
+        return out
+    for name in names:
+        try:
+            with open(os.path.join(parent, name, ROOTS_FILE), encoding="utf-8") as f:
+                info = json.load(f)
+        except (OSError, ValueError):
+            continue
+        out.append({"version": name, "files": info.get("files", 0),
+                    "uploadedAt": info.get("uploadedAt") or ""})
+    out.sort(key=lambda v: (v["uploadedAt"], v["version"]), reverse=True)
+    return out
+
 
 def sources_dir(cfg, svc, version):
     """该版本上传过源码就返回目录，否则 None。版本串拼不成目录名（auto_version 之类）也是 None。"""

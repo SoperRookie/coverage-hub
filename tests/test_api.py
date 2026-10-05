@@ -4,6 +4,7 @@
 """
 import json
 import os
+import shutil
 
 import pytest
 from fastapi.testclient import TestClient
@@ -518,3 +519,83 @@ def test_project_report(hub, tmp_path):
     assert [v["version"] for v in hub.get("/api/projects/shop/report?days=3650", headers=H).json()["services"][0]["versions"]] == ["1.9"]
     assert hub.get("/api/projects/nosuch/report", headers=H).status_code == 404
     assert hub.get("/api/projects/__unassigned/report", headers=H).json()["services"] == []
+
+
+# ---- hub 比对两版源码生成 diff ----
+
+V10 = {"src/main/java/probe/Main.java": "package probe;\n\nclass Main {\n    static void tick() { }\n}\n",
+       "src/main/java/probe/Old.java": "package probe;\n\nclass Old {\n    int a() { return 1; }\n    int b() { return 2; }\n"
+                                       "    int c() { return 3; }\n    int d() { return 4; }\n}\n"}
+V11 = {"src/main/java/probe/Main.java": "package probe;\n\nclass Main {\n    static void tick() { }\n    static void tock() { }\n}\n",
+       # Old → Moved：挪代码不算新代码，只有改掉的那一行算
+       "src/main/java/probe/Moved.java": "package probe;\n\nclass Moved {\n    int a() { return 1; }\n    int b() { return 2; }\n"
+                                         "    int c() { return 3; }\n    int d() { return 4; }\n}\n",
+       "src/main/java/probe/Fresh.java": "package probe;\n\nclass Fresh {\n}\n",
+       "src/test/java/probe/MainTest.java": "package probe;\nclass MainTest {}\n"}
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="hub 侧比对源码要 git")
+def test_upload_sources_generates_diff_on_hub(hub, tmp_path):
+    """源码按版本传上来之后，diff 由 hub 比对两棵源码树生成：构建节点不需要基线 commit 的历史。"""
+    hub.post("/api/services", headers=H, json=dict(PULL, version="1.0"))
+    # 第一次接入：还没有基线，源码照收，diff 为空并说明原因
+    r = hub.post("/api/upload-sources?service=svc&version=1.0", headers=H, content=_src_tar(V10))
+    assert r.status_code == 200, r.text
+    assert r.json()["diff"] is None and "基线" in r.json()["diffReason"]
+
+    # 第二版：基线 = 服务当前 version（1.0）
+    r = hub.post("/api/upload-sources?service=svc&version=1.1", headers=H, content=_src_tar(V11))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["diffReason"] is None
+    d = body["diff"]
+    assert d["origin"] == "sources" and d["base"] == "1.0" and d["head"] == "1.1" and d["version"] == "1.1"
+    # Main 加一行、Moved 改一行（类名）、Fresh 整个 4 行；.roots.json 与测试代码不算
+    assert d["files"] == 3 and d["addedLines"] == 6
+    lines = json.loads((tmp_path / "data" / "svc" / "diff" / "1.1.lines.json").read_text(encoding="utf-8"))
+    assert lines == {"src/main/java/probe/Main.java": [5], "src/main/java/probe/Moved.java": [3],
+                     "src/main/java/probe/Fresh.java": [1, 2, 3, 4]}
+    raw = (tmp_path / "data" / "svc" / "diff" / "1.1.diff").read_text(encoding="utf-8")
+    # 落盘的 diff 路径是仓库相对的（版本目录名已剥掉），和流水线传的同形
+    assert "--- a/src/main/java/probe/Main.java\n+++ b/src/main/java/probe/Main.java\n" in raw
+    assert "rename from src/main/java/probe/Old.java\nrename to src/main/java/probe/Moved.java\n" in raw
+    assert "1.0/" not in raw and "1.1/" not in raw and ".roots.json" not in raw
+
+    # 显式重做：指定基线
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources&base=1.0", headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["baseReason"] == "调用方指定" and r.json()["diff"]["addedLines"] == 6
+    # 不给基线就自动定
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources", headers=H)
+    assert r.status_code == 200 and r.json()["baseReason"] == "服务当前 version"
+    # 基线没传过源码
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources&base=0.9", headers=H)
+    assert r.status_code == 400 and "0.9" in r.json()["error"]
+
+    # 流水线上传的 diff 优先：之后再传源码不会被自动生成的覆盖，但显式 from=sources 可以
+    hub.post("/api/diff?service=svc&version=1.1&base=abc123", headers=H, content=DIFF.encode())
+    r = hub.post("/api/upload-sources?service=svc&version=1.1", headers=H, content=_src_tar(V11))
+    assert r.json()["diff"]["origin"] == "upload" and "不覆盖" in r.json()["diffReason"]
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources", headers=H)
+    assert r.json()["diff"]["origin"] == "sources"
+
+    # 调用方要求不生成
+    r = hub.post("/api/upload-sources?service=svc&version=1.2&diff=skip", headers=H, content=_src_tar(V11))
+    assert r.status_code == 200 and r.json()["diff"] is None and "不生成" in r.json()["diffReason"]
+
+    # 坏参数：from / diff 的取值、上传 git diff 不给 base
+    assert hub.post("/api/diff?service=svc&version=1.1&from=git", headers=H).status_code == 400
+    assert hub.post("/api/upload-sources?service=svc&version=1.1&diff=maybe", headers=H, content=_src_tar(V11)).status_code == 400
+    r = hub.post("/api/diff?service=svc&version=1.1", headers=H, content=DIFF.encode())
+    assert r.status_code == 400 and "base" in r.json()["error"]
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="hub 侧比对源码要 git")
+def test_auto_diff_base_falls_back_to_last_uploaded_sources(hub):
+    """服务当前 version 没传过源码时，退到最近上传过源码的版本做基线。"""
+    hub.post("/api/services", headers=H, json=dict(PULL, version="9.9"))
+    hub.post("/api/upload-sources?service=svc&version=1.0", headers=H, content=_src_tar(V10))
+    r = hub.post("/api/upload-sources?service=svc&version=1.1", headers=H, content=_src_tar(V11))
+    assert r.status_code == 200 and r.json()["diff"]["base"] == "1.0"
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources", headers=H)
+    assert r.json()["baseReason"] == "最近上传过源码的版本"

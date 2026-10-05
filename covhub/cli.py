@@ -246,13 +246,23 @@ def cmd_unit_coverage(cfg, args):
 
 
 def cmd_diff(cfg, args):
+    if args.from_sources:
+        if args.file:
+            die("--from-sources 不接 diff 文件：hub 自己比对已上传的源码")
+        _print_service(ops.diff_from_sources(cfg, args.service, args.version, args.base))
+        return
+    if not args.file:
+        die("要么给 diff 文件（配 --base <commit>），要么 --from-sources 让 hub 比对源码")
+    if not args.base:
+        die("上传 git diff 需要 --base <基线的 commit / tag>")
     with open(args.file, encoding="utf-8", errors="replace") as f:
         text = f.read()
     _print_service(ops.push_diff(cfg, args.service, args.version, args.base, text, head=args.head))
 
 
 def cmd_upload_sources(cfg, args):
-    _print_service(ops.upload_sources(cfg, args.service, args.version, args.src))
+    _print_service(ops.upload_sources(cfg, args.service, args.version, args.src,
+                                      diff="skip" if args.no_diff else "auto", base=args.base))
 
 
 def cmd_recompute(cfg, args):
@@ -387,17 +397,22 @@ def main():
     p.add_argument("xml", help="jacoco.xml 路径（jacoco-aggregate 的也行）")
     p.add_argument("--group", help="聚合报告里只取这个模块（<group name=artifactId>）")
 
-    p = sub.add_parser("diff", help="收一份 git diff，用于算新增代码的覆盖率")
+    p = sub.add_parser("diff", help="某版本的 diff（新增代码覆盖率的依据）：hub 比对两版源码生成，或收流水线的 git diff")
     p.add_argument("service")
     p.add_argument("version", nargs="?", help="版本标识，缺省取服务当前 version")
-    p.add_argument("file", help="git diff 输出文件")
-    p.add_argument("--base", required=True, help="基线（上一版的 commit / tag）")
-    p.add_argument("--head", help="本次的 commit")
+    p.add_argument("file", nargs="?", help="git diff 输出文件（--from-sources 时不给）")
+    p.add_argument("--from-sources", action="store_true",
+                   help="由 hub 比对该版本与基线版本经 upload-sources 传上来的源码生成，不需要 diff 文件")
+    p.add_argument("--base", help="基线：上传 git diff 时是上一版的 commit / tag；--from-sources 时是基线的版本标识，"
+                                  "缺省自动定（服务当前 version → 最近结算的版本 → 最近上传过源码的版本）")
+    p.add_argument("--head", help="本次的 commit（上传 git diff 时）")
 
-    p = sub.add_parser("upload-sources", help="收一份某版本的源码（报告下钻到行、新增代码看源码）")
+    p = sub.add_parser("upload-sources", help="收一份某版本的源码（报告下钻到行、新增代码看源码），并顺带生成这一版的 diff")
     p.add_argument("service")
     p.add_argument("version", nargs="?", help="版本标识，缺省取服务当前 version")
     p.add_argument("src", help="源码压缩包（tar.gz / zip），或一个源码目录（如 hub 上 checkout 的仓库）")
+    p.add_argument("--base", help="生成 diff 时的基线版本标识，缺省自动定")
+    p.add_argument("--no-diff", action="store_true", help="只存源码，不生成 diff")
 
     p = sub.add_parser("recompute", help="按已有 diff 重算某版本的新增代码覆盖")
     p.add_argument("service")

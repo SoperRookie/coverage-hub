@@ -226,6 +226,7 @@ class DiffOut(BaseModel):
     at: str
     files: int
     addedLines: int
+    origin: str = Field(description="upload：流水线上传的 git diff；sources：hub 比对两版已上传的源码生成")
 
 
 class SourcesStored(BaseModel):
@@ -241,7 +242,9 @@ class SourcesUploadResult(BaseModel):
     sources: SourcesStored
     matchesCurrentVersion: bool = Field(description="与服务当前 version 是否一致；不一致时出报告用不上这一份，retarget 后才用")
     currentVersion: str | None = None
-    runtime: IncrementalBrief | None = Field(default=None, description="该版本有 diff 时，补上片段后重算的运行时新增覆盖")
+    diff: DiffOut | None = Field(default=None, description="该版本现在的 diff：默认由 hub 比对基线版本的源码生成；已有流水线上传的则保留；null 表示没有")
+    diffReason: str | None = Field(default=None, description="没有生成 diff 时的原因（第一次接入没有基线、hub 没装 git、调用方 diff=skip……）")
+    runtime: IncrementalBrief | None = Field(default=None, description="该版本有 diff 时重算的运行时新增覆盖")
     unit: IncrementalBrief | None = None
     log: str
 
@@ -250,6 +253,7 @@ class DiffResult(BaseModel):
     ok: bool = True
     service: str
     diff: DiffOut
+    baseReason: str | None = Field(default=None, description="from=sources 时基线取自哪里（调用方指定 / 服务当前 version / 最近结算的版本 / 最近上传过源码的版本）")
     matchesCurrentVersion: bool = Field(description="diff 的版本与服务当前 version 是否一致；不一致时运行时快照算不出新增覆盖")
     currentVersion: str | None = None
     runtime: IncrementalBrief | None = Field(default=None, description="重算后的运行时新增覆盖（该版本还没有快照时为 null）")
