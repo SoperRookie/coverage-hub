@@ -6,7 +6,7 @@
 |---|---|
 | `vars/covhub.groovy` | Shared Library，把 covhub 命令封装成 pipeline 步骤 |
 | `vars/deployTarget.groovy` | Shared Library，五种部署方式的实现 |
-| `Jenkinsfile.build` | 构建期：跑测试 → 聚合报告 → **推单测报告与 git diff 给 hub** → 归档 class 产物（聚合模块**要改研发的 pom**，不能改就跳过聚合与单测那几步，diff 那一步不需要 pom） |
+| `Jenkinsfile.build` | 构建期：跑测试 → 聚合报告 → **推单测报告与源码给 hub**（diff 由 hub 比对两版源码生成）→ 归档 class 产物（聚合模块**要改研发的 pom**，不能改就跳过聚合与单测那几步，源码那一步不需要 pom） |
 | `Jenkinsfile.deploy` | 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复 |
 
 ## 一、安装 Shared Library
@@ -34,7 +34,7 @@
 | 凭据（可选） | hub 配了 `serve.token` 时，建一个 Secret text 凭据存令牌，把 ID 填进 `COVHUB_TOKEN_ID` |
 | Jenkins 插件 | Pipeline Utility Steps（`covhub.diagnose` 用它的 `readJSON`）、Copy Artifacts；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
 | Config File Provider | 提供 Maven `settings.xml`，`fileId` 按你们实际的改 |
-| 构建节点的 git | `Jenkinsfile.build` 要 `git diff <上一版>..HEAD`，浅克隆（`depth 1`、不拉 tags）找不到基线 —— 检出配置里关掉浅克隆，或流水线先 `git fetch --unshallow --tags` |
+| 构建节点的 git | 只用来打源码包（`git ls-files`），不需要历史：浅克隆、`cleanWs` 过的工作区都行。diff 由 hub 比对两版上传的源码生成，**hub 机器**要有 git |
 
 发版节点**不需要**能连到被测服务的 agent 端口 —— 连 agent 的是 hub。它只要能连上 hub 的 8900。
 也**不需要**本地的 class 产物库：新产物传给 hub，旧产物要用时
@@ -53,10 +53,13 @@
 
 `API_VERSION=1.44` 这一条针对用 Testcontainers 的项目：Docker Engine 29+ 的最低 API 版本是 1.40，而 Testcontainers 1.21.x 内置的 docker-java 默认用 1.32，会被服务端以 HTTP 400 拒绝，症状是 `Could not find a valid Docker environment`。注意属性名是 `api.version`，不是 docker CLI 的 `DOCKER_API_VERSION`（后者设了完全无效）。
 
-**`Push to covhub` 阶段：单测报告 + git diff。** 版本串（`REVISION`）必须和发版流水线 `predeploy` /
-`retarget` 用的一致，hub 才能把 diff 和运行时快照对上。基线默认问 hub「上一次结算的版本对应哪个
-commit」（`covhub.lastVersion`），问不到退回 `origin/main`；`DIFF_BASE` 可以写死。这两步用
-`failOnError: false`（默认）—— hub 停机不该卡住所有构建，单测报告下次构建还会有；这和 `predeploy`
+**`Push to covhub` 阶段：单测报告 + 源码。** 版本串（`REVISION`）必须和发版流水线 `predeploy` /
+`retarget` 用的一致，hub 才能把 diff 和运行时快照对上。diff 不在构建节点上算：源码传上去之后 hub
+拿基线版本的源码比对生成（`git diff --no-index -M`，识别重命名），所以浅克隆、`cleanWs`、找不到
+上一版 commit 都不影响。基线默认由 hub 定（服务当前 version → 最近结算的版本 → 最近上传过源码的
+版本），`DIFF_BASE` 可以写死成某个版本号。第一次接入没有基线，diff 为空属正常。仍想自己算 git diff
+的话 `covhub.pushDiff(file:, base:)` 还在，而且人工上传的优先，不会被自动生成的覆盖。这两步用
+`failOnError: false`（默认）—— hub 停机不该卡住所有构建，下次构建还会有；这和 `predeploy`
 必须卡住不同，exec 不会再有第二次。
 
 **归档 class 产物那一步现在是可选的。** 运行期出报告时 `--classfiles` 必须是当时运行的那份 class（JaCoCo 按 CRC64 class id 匹配，对不上报告全是"未覆盖"），但 v1.1.0 起这份 class 由 agent 的 `classDumpDir` 在运行期自己交出，不再需要构建流水线配合。
@@ -145,9 +148,9 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 | `covhub.requireMatch(service:, min:)` | 指纹匹配率低于 `min`（默认 90）就让流水线失败 |
 | `covhub.fetchReport(service:, version:, dest:)` | 从 hub 取回某版本的 `jacoco.xml` |
 | `covhub.pushUnitCoverage(service:, version:, xml:, group:, failOnError:)` | 把单测 jacoco.xml 传给 hub（`services: 'a,b'` 一份落多个服务） |
-| `covhub.pushDiff(service:, version:, base:, head:, file:, failOnError:)` | 把 git diff 传给 hub，用于新增代码覆盖率 |
-| `covhub.uploadSources(service:, version:, archive:, failOnError:)` | 按版本把源码传给 hub（不给 `archive` 就在工作区 git 仓库里现打），报告下钻到行、新增代码看全文用 |
-| `covhub.lastVersion(service:)` | 问 hub 最近结算的版本与其 diff 的 head，用来定 diff 基线 |
+| `covhub.pushDiff(service:, version:, fromSources: true, base:, failOnError:)` | 让 hub 比对该版本与基线版本的源码生成 diff（`uploadSources` 默认已做，这里用于指定基线或重做）；传 `file:` + `base:`（commit）则是上传自己算的 git diff |
+| `covhub.uploadSources(service:, version:, archive:, base:, diff:, failOnError:)` | 按版本把源码传给 hub（不给 `archive` 就在工作区 git 仓库里现打），并由 hub 生成这一版的 diff；`diff: 'skip'` 只存源码 |
+| `covhub.lastVersion(service:)` | 问 hub 最近结算的版本与其 diff 的 head，自己算 git diff 时定基线用 |
 
 除 `agentOpts` / `online` / `status` / `pushUnitCoverage` / `pushDiff` / `uploadSources`（默认只警告）外，任何一步在
 hub 返回非 2xx 时都会让流水线失败 —— 覆盖率结算失败必须停住发版，而不是带着已丢失的数据继续。

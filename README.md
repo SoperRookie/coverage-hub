@@ -1,8 +1,8 @@
 # coverage-hub v2.2.1
 
 通用 JaCoCo 覆盖率方案：**运行期**随服务启动自动采集、发版前自动结算；**构建期**的单测
-覆盖率与 git diff 由流水线送进来；一个 Vue 看板按项目 → 服务展示**总覆盖率**与**本版本新增
-代码的覆盖率**（运行时、单测各一份）。
+覆盖率与源码由流水线送进来，hub 比对两版源码得出 diff；一个 Vue 看板按项目 → 服务展示**总覆盖率**
+与**本版本新增代码的覆盖率**（运行时、单测各一份）。
 
 与被测服务无关 —— 任何 Java 服务只要能加 JVM 参数就能接入，不需要改被测项目的代码或 pom。
 
@@ -192,8 +192,9 @@ JaCoCo 用类的 CRC64 指纹（class id）把 exec 数据和 class 文件对应
 
 ## 二、构建期：单测覆盖率与新增代码覆盖率
 
-看板上的「单测」两列和「新增代码」两列来自构建流水线送进 hub 的两样东西；第三样（源码）让报告能下钻到行。
-每步都是一条 curl，`Jenkinsfile.build` 里有现成的阶段（`Push to covhub`）。
+看板上的「单测」两列和「新增代码」两列来自构建流水线送进 hub 的两样东西：单测 `jacoco.xml` 和源码。
+源码传上去之后 hub 自己比对两个版本得出 diff，报告也靠它下钻到行。每步都是一条 curl，
+`Jenkinsfile.build` 里有现成的阶段（`Push to covhub`）。
 
 ### 1. 单测覆盖率：把 jacoco.xml 传给 hub
 
@@ -208,44 +209,51 @@ hub 解析计数器入库（指令 / 分支 / 行 / 类），XML 原文留在 `d
 一个仓库多个服务时一份报告可以落多个服务（`services=a,b`），或用 `--group <artifactId>`
 只取聚合报告里的一个模块。
 
-### 2. 新增代码覆盖率：把 git diff 传给 hub
+### 2. 新增代码覆盖率：源码传给 hub，diff 由 hub 比对两版源码生成
 
-hub 不碰代码仓库。流水线算好 diff 传上来：
-
-```bash
-git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR \
-    "$BASE".."$HEAD" -- '*.java' '*.kt' > covhub.diff
-covhub-client.sh diff order-service 1.4.3 covhub.diff --base "$BASE" --head "$HEAD"
-```
-
-hub 记下每个源码文件的新增行号；之后**每次运行时快照**都按它算「本版本新增行的覆盖」，单测报告
-到达时也算一份。三个数据（快照、单测 XML、diff）到达顺序不限，晚到的会把已有的重算一遍，
-已归档的版本也会回写。
-
-**分母口径**：diff 新增行里 **JaCoCo 有探针记录的行**（空行、注释、import、纯声明没有探针，本来
-就不参与覆盖率），分子是其中被执行到的行（含部分覆盖，和 LINE 计数器同口径）。删除的行、只改
-不增的行不参与。没有可覆盖的新增行时显示「无新增」而不是 0% 或 100%。
-
-**基线怎么定**：`$BASE` 是上一版的 commit / tag，由流水线决定。先问 hub 上一次结算的版本对应的 `head`
-（`covhub-client.sh last-version <svc> --plain | cut -f2`，groovy 里是 `covhub.lastVersion`，接口是
-`GET /api/services/<svc>/versions`），问不到（第一次接入）就退回 `origin/main`。浅克隆要先 `git fetch --unshallow --tags`。
-
-**版本串必须一致**：构建时给的 `version`、发版时 `predeploy` / `retarget` 用的 `version`、快照里记的
-`version` 三处要是同一个字符串，hub 才能把 diff 和快照对上。`POST /api/diff` 的返回体里
-`matchesCurrentVersion` 为 false 就是在提醒这件事。
-
-**diff 里有、报告里没有的源码文件**（被 agent 的 `excludes` 排掉，或不在 `classfiles` 里）会单独列在
-`unmatched` 里，看板上有中性提示 —— 它们从分母里消失比算错更糟。
-
-### 3. 源码：让报告下钻到行、新增代码看整个文件
-
-hub 独立部署，本机没有源码。流水线按版本把源码传上来，在仓库里（checkout 完）一条命令：
+hub 不碰代码仓库，也不要构建节点有 git 历史。流水线在仓库里（checkout 完）一条命令把这一版的源码传上来：
 
 ```bash
 covhub-client.sh upload-sources order-service 1.4.3        # 当前 git 仓库里现打；也可以给现成的 tar.gz / zip
 ```
 
-它打的是受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`），路径相对仓库根、和 git diff 一致。
+hub 存好源码后，拿**基线版本**的源码和它做 `git diff --no-index -M`（识别重命名，挪代码不算新代码），
+得到和流水线 `git diff` 同形的 diff，记下每个源码文件的新增行号；之后**每次运行时快照**都按它算
+「本版本新增行的覆盖」，单测报告到达时也算一份。三个数据（快照、单测 XML、源码）到达顺序不限，
+晚到的会把已有的重算一遍，已归档的版本也会回写。
+
+这样做是因为在构建节点上 `git diff <上一版>..HEAD` 的前提常常不成立：Jenkins `cleanWs` 过的工作区、
+浅克隆、只拉一个 tag，都让 `rev-parse` 找不到上一版的 commit，diff 静默变空。hub 手里按版本存着
+源码，两棵树一比就是 diff。**hub 机器要装 git**。
+
+仍想自己算 git diff 的项目可以继续传（`diff <svc> <ver> covhub.diff --base <commit>`，推荐命令见
+`covhub-client.sh` 的注释），而且人工上传的优先：之后 `upload-sources` 不会用自动生成的覆盖它。
+要换回 hub 比对的结果就显式调一次：
+
+```bash
+covhub-client.sh diff order-service 1.4.3 --from-sources [--base 1.4.2]
+```
+
+**分母口径**：diff 新增行里 **JaCoCo 有探针记录的行**（空行、注释、import、纯声明没有探针，本来
+就不参与覆盖率），分子是其中被执行到的行（含部分覆盖，和 LINE 计数器同口径）。删除的行、只改
+不增的行不参与。没有可覆盖的新增行时显示「无新增」而不是 0% 或 100%。
+
+**基线怎么定**：基线是一个**版本**，不给时 hub 按「服务当前 `version`（线上跑着的那版）→ 最近结算的版本
+→ 最近上传过源码的版本」找第一个传过源码的。第一次接入时还没有基线，源码照收、diff 为空（返回体
+`diffReason` 说明原因），下一版就有了。`--base 1.4.2` 可以显式指定。自己算 git diff 的项目仍可用
+`covhub-client.sh last-version <svc> --plain | cut -f2` 问上一次结算的版本对应的 commit。
+
+**版本串必须一致**：构建时给的 `version`、发版时 `predeploy` / `retarget` 用的 `version`、快照里记的
+`version` 三处要是同一个字符串，hub 才能把 diff 和快照对上。`upload-sources` / `diff` 的返回体里
+`matchesCurrentVersion` 为 false 就是在提醒这件事。
+
+**diff 里有、报告里没有的源码文件**（被 agent 的 `excludes` 排掉，或不在 `classfiles` 里）会单独列在
+`unmatched` 里，看板上有中性提示 —— 它们从分母里消失比算错更糟。
+
+### 3. 源码还让报告下钻到行、新增代码看整个文件
+
+同一份上传的源码还有第二个用处：hub 独立部署，本机没有源码，JaCoCo 报告和看板都靠它。
+`upload-sources` 打的是受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`），路径相对仓库根。
 hub 存到 `data/<svc>/sources/<版本>/`，按每个文件的 `package` 声明识别源码根（多模块、非标准布局都行），之后：
 
 - **JaCoCo 报告**出报告时按版本带上源码，类页面能看到逐行的红绿标记。HTML 生成时把源码内嵌进去，归档报告不再依赖它；
@@ -288,9 +296,10 @@ hub 只收源码文件，配置文件之类即便混进包里也不落盘；`sou
 | `/api/retarget?service=X&version=V&classfiles=/a,/b` | POST | 更新版本与 class 产物路径 |
 | `/api/upload-classes?service=X&version=V[&retarget=1]` | POST | 上传 class 产物压缩包（tar.gz / zip，正文为二进制） |
 | `/api/classes?service=X&version=V` | GET | 把该版本的 class 产物打成 tar.gz 回传 |
-| `/api/upload-sources?service=X&version=V` | POST | 上传该版本的源码压缩包（tar.gz / zip，正文为二进制），报告下钻到行、新增代码看全文用 |
+| `/api/upload-sources?service=X&version=V[&base=B][&diff=skip]` | POST | 上传该版本的源码压缩包（tar.gz / zip，正文为二进制），hub 顺带比对基线版本的源码生成这一版的 diff；报告下钻到行、新增代码看全文也靠它 |
 | `/api/unit-coverage?service=X&version=V[&group=M]` | POST | 上传单测 jacoco.xml（正文为文件） |
-| `/api/diff?service=X&version=V&base=B[&head=H]` | POST | 上传 git diff（正文为文件） |
+| `/api/diff?service=X&version=V&from=sources[&base=B]` | POST | 让 hub 比对该版本与基线版本已上传的源码生成 diff（不读正文） |
+| `/api/diff?service=X&version=V&base=B[&head=H]` | POST | 上传流水线自己算的 git diff（正文为文件），优先于自动生成的 |
 | `/api/recompute?service=X[&version=V]` | POST | 按已有 diff 重算新增代码覆盖 |
 | `/api/services`、`/api/services/{name}` | GET / POST / PUT / PATCH / DELETE | 服务配置的增删改查 |
 | `/api/projects`、`/api/projects/{name}` | GET / POST / PATCH / DELETE | 项目（服务分组）的增删改查 |
@@ -475,8 +484,9 @@ COVHUB_DATABASE_URL=mysql+pymysql://...covhub python covhub.py import services.y
 | `diagnose <service> [--version V]` | 诊断 exec 与 class 产物是否对得上 |
 | `retarget <service> --version V [--classfiles ...]` | 发版后把服务指向新版本产物 |
 | `unit-coverage <service> [version] <jacoco.xml> [--group M]` | 收一份单测报告 |
-| `diff <service> [version] <file> --base B [--head H]` | 收一份 git diff |
-| `upload-sources <service> [version] <包或目录>` | 收一份某版本的源码（hub 本机 checkout 的目录也能转成按版本存） |
+| `diff <service> [version] --from-sources [--base V]` | 比对该版本与基线版本已上传的源码生成 diff |
+| `diff <service> [version] <file> --base B [--head H]` | 收一份流水线算好的 git diff |
+| `upload-sources <service> [version] <包或目录> [--base V] [--no-diff]` | 收一份某版本的源码并生成这一版的 diff（hub 本机 checkout 的目录也能转成按版本存） |
 | `recompute <service> [--version V]` | 按已有 diff 重算新增代码覆盖 |
 | `openapi [--out docs/openapi.json] [--check]` | 导出 / 校验接口文档 |
 | `watch [--interval N]` | 守护进程，定时轮询全部目标 |

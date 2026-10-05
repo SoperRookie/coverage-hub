@@ -306,23 +306,39 @@ String pushUnitCoverage(Map args) {
 }
 
 /**
- * 把 git diff 传给 hub，之后每次采集都能算出「本版本新增代码」的覆盖率。
- *   service / services、version 同上
- *   base      基线：上一版的 commit / tag（建议 git rev-parse 后的 SHA）
- *   head      可选，本次的 commit
- *   file      diff 文件。推荐生成命令：
+ * 这一版的 diff，之后每次采集都能算出「本版本新增代码」的覆盖率。两种来源：
+ *
+ *   fromSources: true   hub 比对该版本与基线版本经 uploadSources 传上来的源码（推荐；
+ *                       uploadSources 默认已经做了，这里用于指定基线或重做）。
+ *                       base 可选，是基线的**版本标识**，不给由 hub 自动定。
+ *   file                流水线自己算的 git diff；base 必填，是上一版的 commit / tag
+ *                       （建议 git rev-parse 后的 SHA），head 可选。推荐生成命令：
  *             git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 \
  *                 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt' > covhub.diff
- *   failOnError  默认 false
+ *
+ *   service / services、version 同上；failOnError 默认 false
  */
 String pushDiff(Map args) {
     assert (args.service || args.services) : 'pushDiff 需要 service'
     assert args.version : 'pushDiff 需要 version'
-    assert args.base : 'pushDiff 需要 base（基线的 commit / tag）'
-    assert args.file : 'pushDiff 需要 file（diff 文件路径）'
     assert hubUrl(args) : 'pushDiff 需要 hub（或环境变量 COVHUB_URL）'
     String qs = (args.services ? "services=${enc(args.services)}" : "service=${enc(args.service)}") +
-                "&version=${enc(args.version)}&base=${enc(args.base)}"
+                "&version=${enc(args.version)}"
+    if (args.fromSources) {
+        if (args.base) { qs += "&base=${enc(args.base)}" }
+        try {
+            String out = http(args, 'POST', "/api/diff?${qs}&from=sources")
+            echo out
+            return out
+        } catch (err) {
+            if (args.failOnError) { throw err }
+            echo "[covhub] 生成 diff 失败（不阻断构建）：${err}"
+            return null
+        }
+    }
+    assert args.base : 'pushDiff 需要 base（基线的 commit / tag）'
+    assert args.file : 'pushDiff 需要 file（diff 文件路径）'
+    qs += "&base=${enc(args.base)}"
     if (args.head) { qs += "&head=${enc(args.head)}" }
     return httpUpload(args, "/api/diff?${qs}", args.file as String, '推送 git diff',
                       args.failOnError ? true : false)
@@ -330,12 +346,17 @@ String pushDiff(Map args) {
 
 /**
  * 按版本把源码传给 hub：JaCoCo 报告下钻到行、看板「新增代码」看整个文件都靠它，
- * hub 上不用 checkout 源码，历史版本也对得上。
+ * hub 上不用 checkout 源码，历史版本也对得上。存好之后 hub 顺带比对基线版本的源码生成
+ * 这一版的 diff（新增代码覆盖率的依据）—— 构建节点不需要 git 历史，浅克隆、清过的
+ * 工作区都无所谓。
  *   service / services、version 同上
  *   archive   可选，现成的源码包（tar.gz / zip，比如 *-sources.jar 以外自己打的）。
  *             不给就在当前工作区的 git 仓库里现打：受版本控制的 .java/.kt/.groovy/.scala，
- *             去掉 src/test/，路径相对仓库根（和 git diff 一致）
- *   failOnError  默认 false：源码只影响看源码，不影响覆盖率数字，不该卡住构建
+ *             去掉 src/test/，路径相对仓库根
+ *   base      可选，生成 diff 的基线版本标识；不给由 hub 自动定
+ *             （服务当前 version → 最近结算的版本 → 最近上传过源码的版本）
+ *   diff      可选，'skip' 则只存源码不生成 diff
+ *   failOnError  默认 false：hub 停机不该卡住所有构建，下次构建还会有
  * hub 那边只收源码文件，配置文件之类即便混进包里也不落盘。
  */
 String uploadSources(Map args) {
@@ -358,6 +379,8 @@ String uploadSources(Map args) {
     }
     String qs = (args.services ? "services=${enc(args.services)}" : "service=${enc(args.service)}") +
                 "&version=${enc(args.version)}"
+    if (args.base) { qs += "&base=${enc(args.base)}" }
+    if (args.diff) { qs += "&diff=${enc(args.diff)}" }
     try {
         return httpUpload(args, "/api/upload-sources?${qs}", archive, '上传源码',
                           args.failOnError ? true : false)
@@ -367,7 +390,8 @@ String uploadSources(Map args) {
 }
 
 /**
- * 问 hub「上一版是谁」：最近结算的版本及其 diff 的 head，流水线用它定 git diff 的基线。
+ * 问 hub「上一版是谁」：最近结算的版本及其 diff 的 head，流水线自己算 git diff 时用它定基线。
+ * 让 hub 比对源码生成 diff（uploadSources 的默认行为）的话用不着。
  * 返回 Map（latest 为 null 表示还没结算过任何版本）。
  */
 Map lastVersion(Map args) {

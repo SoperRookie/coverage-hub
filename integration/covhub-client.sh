@@ -22,11 +22,13 @@
 #   covhub-client.sh retarget <service> <version> [classfiles[,更多]]
 #   covhub-client.sh upload-classes <service> <version> <包路径> [--retarget]
 #   covhub-client.sh fetch-classes <service> <version> <目标目录>
-#   covhub-client.sh upload-sources <service> <version> [包路径]   不给包就在当前 git 仓库里打
+#   covhub-client.sh upload-sources <service> <version> [包路径] [--base <基线版本>] [--no-diff]
+#                                                      不给包就在当前 git 仓库里打；hub 顺带比对基线版本的源码生成 diff
 #   covhub-client.sh wait-online <service> [超时秒数，默认 120]
 #   covhub-client.sh unit-coverage <service> <version> <jacoco.xml> [--group 模块名]
-#   covhub-client.sh diff <service> <version> <diff文件> --base <基线> [--head <本次>]
-#   covhub-client.sh last-version <service> [--plain]  最近结算的版本与其 diff 的 head（定 diff 基线用）
+#   covhub-client.sh diff <service> <version> --from-sources [--base <基线版本>]   hub 比对两版已上传的源码
+#   covhub-client.sh diff <service> <version> <diff文件> --base <基线commit> [--head <本次>]   上传流水线算好的 git diff
+#   covhub-client.sh last-version <service> [--plain]  最近结算的版本与其 diff 的 head（自己算 git diff 时定基线用）
 #   covhub-client.sh recompute <service> [version]     按已有 diff 重算新增代码覆盖
 #
 # 退出码：0 成功；1 hub 返回非 2xx（业务失败，响应体里的 log 有原因）；2 连不上 hub / 参数错。
@@ -191,13 +193,26 @@ upload-classes)
 upload-sources)
     # 按版本把源码传给 hub —— hub 独立部署、本机没有源码时，JaCoCo 报告靠它下钻到行，
     # 看板的「新增代码」靠它看整个文件，历史版本也对得上。
+    # 存好之后 hub 顺带比对基线版本的源码生成这一版的 diff（新增代码覆盖率的依据）——
+    # 本机不需要 git 历史，浅克隆、清过的工作区都无所谓。基线不给由 hub 自动定
+    # （服务当前 version → 最近结算的版本 → 最近上传过源码的版本）；--no-diff 只存源码。
     # 不给包路径就在当前 git 仓库里现打：受版本控制的 .java/.kt/.groovy/.scala、去掉 src/test/，
-    # 路径相对仓库根（和 git diff 一致）。打的是工作区，流水线里 checkout 完就跑即可。
+    # 路径相对仓库根。打的是工作区，流水线里 checkout 完就跑即可。
     # hub 那边也只收源码文件，配置文件之类即便混进包里也不落盘。
-    need "${2:-}" "用法：$0 upload-sources <service> <version> [包路径]"
+    need "${2:-}" "用法：$0 upload-sources <service> <version> [包路径] [--base <基线版本>] [--no-diff]"
     QS="service=$(enc "$1")&version=$(enc "$2")"
-    if [ -n "${3:-}" ]; then
-        request POST "/api/upload-sources?$QS" "$3"
+    shift 2
+    PKG=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --base) need "${2:-}" "--base 后面要跟基线版本"; QS="$QS&base=$(enc "$2")"; shift 2 ;;
+            --no-diff) QS="$QS&diff=skip"; shift ;;
+            -*) die "未知参数：$1" 2 ;;
+            *) PKG=$1; shift ;;
+        esac
+    done
+    if [ -n "$PKG" ]; then
+        request POST "/api/upload-sources?$QS" "$PKG"
     else
         command -v git > /dev/null 2>&1 || die "不给包路径时要用 git 打包，找不到 git" 2
         _top=$(git rev-parse --show-toplevel 2> /dev/null) || die "当前目录不在 git 仓库里：先 cd 进仓库，或给出源码包路径" 2
@@ -227,27 +242,40 @@ unit-coverage)
     ;;
 
 diff)
-    # 把 git diff 传给 hub，之后每次采集都能算出「本版本新增代码」的覆盖率。推荐：
-    #   git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 \
-    #       --diff-filter=AMR "$BASE".."$HEAD" -- '*.java' '*.kt' > v.diff
-    # 空 diff（这一版没改 Java 代码）也照传：hub 会记成「无新增」，看板不会显示「—」。
-    need "${3:-}" "用法：$0 diff <service> <version> <diff文件> --base <基线> [--head <本次>]"
+    # 这一版的 diff，之后每次采集都能算出「本版本新增代码」的覆盖率。两种来源：
+    #   --from-sources   hub 比对该版本与基线版本经 upload-sources 传上来的源码（推荐；
+    #                    upload-sources 默认已经做了，这里用于指定基线或重做）
+    #   <diff文件>       流水线自己算的 git diff，推荐：
+    #                    git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 \
+    #                        --diff-filter=AMR "$BASE".."$HEAD" -- '*.java' '*.kt' > v.diff
+    #                    空 diff（这一版没改 Java 代码）也照传：hub 会记成「无新增」。
+    need "${2:-}" "用法：$0 diff <service> <version> --from-sources [--base <基线版本>] | <diff文件> --base <基线commit> [--head <本次>]"
     QS="service=$(enc "$1")&version=$(enc "$2")"
-    FILE=$3; shift 3
-    BASE=""
+    shift 2
+    FILE=""; BASE=""; FROM=""
     while [ $# -gt 0 ]; do
         case "$1" in
+            --from-sources) FROM=1; shift ;;
             --base) need "${2:-}" "--base 后面要跟基线"; BASE=$2; shift 2 ;;
             --head) need "${2:-}" "--head 后面要跟本次的 commit"; QS="$QS&head=$(enc "$2")"; shift 2 ;;
-            *) die "未知参数：$1" 2 ;;
+            -*) die "未知参数：$1" 2 ;;
+            *) FILE=$1; shift ;;
         esac
     done
-    need "$BASE" "diff 需要 --base <基线的 commit / tag>"
-    request POST "/api/diff?$QS&base=$(enc "$BASE")" "$FILE"
+    if [ -n "$FROM" ]; then
+        [ -z "$FILE" ] || die "--from-sources 不接 diff 文件：hub 自己比对已上传的源码" 2
+        [ -n "$BASE" ] && QS="$QS&base=$(enc "$BASE")"
+        request POST "/api/diff?$QS&from=sources"
+    else
+        need "$FILE" "要么给 diff 文件（配 --base <commit>），要么 --from-sources 让 hub 比对源码"
+        need "$BASE" "上传 git diff 需要 --base <基线的 commit / tag>"
+        request POST "/api/diff?$QS&base=$(enc "$BASE")" "$FILE"
+    fi
     ;;
 
 last-version)
-    # 流水线定 diff 基线：问 hub「上一次结算的是哪个版本、它的 diff 到哪个 commit」。
+    # 流水线自己算 git diff 时定基线：问 hub「上一次结算的是哪个版本、它的 diff 到哪个 commit」。
+    # 让 hub 比对源码生成 diff（默认）的话用不着这一步。
     # --plain 只打一行 "<version>\t<head>"（没有归档时打空行，退出码仍为 0），
     # 方便 shell 里 read：  read -r LAST_VER LAST_HEAD <<EOF ... 或 cut -f2
     need "${1:-}" "用法：$0 last-version <service> [--plain]"

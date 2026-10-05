@@ -29,8 +29,8 @@
 原生报告，并在看板上展示。发版前 hub 把这一版的数据结算归档，新版本从零开始。
 
 构建流水线另外送两样东西给 hub（可选，各一条 curl）：`mvn verify` 产出的单测 jacoco.xml，
-和这一版的 git diff。有了它们，看板上每个服务就有四个数：运行时总覆盖、运行时**新增代码**
-覆盖、单测总覆盖、单测新增代码覆盖。
+和这一版的源码（hub 拿它和上一版比对得出 diff）。有了它们，看板上每个服务就有四个数：运行时总覆盖、
+运行时**新增代码**覆盖、单测总覆盖、单测新增代码覆盖。
 
 接口文档在 hub 的 `/docs`（自带 Swagger UI），本机试玩可用 `tools/seed_demo.py` 灌一套演示数据。
 
@@ -512,12 +512,14 @@ report <service>                               用已有 exec 重出报告
 diagnose <service> [version]                   exec 与 class 指纹是否对得上
 retarget <service> <version> [classfiles,...]  改配置里的版本与 class 路径
 upload-classes <service> <version> <包> [--retarget]  上传 class 产物
-upload-sources <service> <version> [包]          上传该版本源码（不给包就在当前 git 仓库里打）
+upload-sources <service> <version> [包] [--base <基线版本>] [--no-diff]
+                                               上传该版本源码（不给包就在当前 git 仓库里打），hub 顺带比对基线版本生成 diff
 fetch-classes <service> <version> <目标目录>     取回某版本的 class 产物
 wait-online <service> [超时秒数，默认 120]       等新实例的 agent 就绪
 unit-coverage <service> <version> <jacoco.xml> [--group 模块]   构建流水线：送单测报告
-diff <service> <version> <diff文件> --base <基线> [--head <本次>] 构建流水线：送 git diff
-last-version <service> [--plain]               上一次结算的版本与其 diff 的 head（定 diff 基线）
+diff <service> <version> --from-sources [--base <基线版本>]   让 hub 比对两版已上传的源码生成 diff（指定基线 / 重做）
+diff <service> <version> <diff文件> --base <基线commit> [--head <本次>]   送流水线自己算的 git diff
+last-version <service> [--plain]               上一次结算的版本与其 diff 的 head（自己算 git diff 时定基线）
 recompute <service> [version]                  按已有 diff 重算新增代码覆盖
 ```
 
@@ -909,9 +911,10 @@ hub 上没有源码时，报告到方法级别为止，类页面显示「Source 
 covhub-client.sh upload-sources order-service 1.4.2
 ```
 
-它在当前 git 仓库里打包受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`，路径相对仓库根，
-和 git diff 一致）再 POST 给 hub；也可以给一个现成的 tar.gz / zip 作第三个参数。Jenkins 里是
+它在当前 git 仓库里打包受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`，路径相对仓库根）
+再 POST 给 hub；也可以给一个现成的 tar.gz / zip 作第三个参数。Jenkins 里是
 `covhub.uploadSources(service:, version:)`（`Jenkinsfile.build` 的 `Push to covhub` 阶段已带上）。
+存好之后 hub 顺带拿基线版本的源码和它比对，生成这一版的 diff（§5.6）。
 
 hub 存到 `data/order-service/sources/1.4.2/`，按每个文件的 `package` 声明识别源码根 ——
 多模块、非标准目录、sources.jar 平铺都不用另外配置。之后：
@@ -1154,36 +1157,38 @@ push 通道下滚动发版中途新旧副本同时在线，hub 会检出「混�
 
 ### 5.6 构建流水线：单测覆盖率与新增代码覆盖率
 
-这两个数不需要被测服务做任何事，只要构建流水线在 `mvn verify` 之后多两条 curl（第三条传源码，见 Step 8）：
+这两个数不需要被测服务做任何事，只要构建流水线在 `mvn verify` 之后多两条 curl：
 
 ```bash
 # 1. 单测报告（要先加聚合模块，见 §6；没有的话跳过这一条）
 covhub-client.sh unit-coverage order-service "$VERSION" \
     coverage-report/target/site/jacoco-aggregate/jacoco.xml
 
-# 2. 这一版的 git diff。基线是上一版的 commit / tag：先问 hub 上一次结算的版本对应的 commit
-BASE=$(covhub-client.sh last-version order-service --plain | cut -f2)   # 第一次接入时为空
-BASE=${BASE:-origin/main}
-git fetch --unshallow --tags 2>/dev/null || git fetch --tags
-git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR \
-    "$BASE"..HEAD -- '*.java' '*.kt' > covhub.diff
-covhub-client.sh diff order-service "$VERSION" covhub.diff --base "$(git rev-parse "$BASE")" --head "$(git rev-parse HEAD)"
-
-# 3. 这一版的源码（报告下钻到行、新增代码看整个文件）
+# 2. 这一版的源码（Step 8 那一条）。hub 存好后拿基线版本的源码和它比对，生成这一版的 diff
 covhub-client.sh upload-sources order-service "$VERSION"
 ```
 
-`Jenkinsfile.build` 里的 `Push to covhub` 阶段就是这三步（`covhub.pushUnitCoverage` /
-`covhub.pushDiff` / `covhub.uploadSources`，hub 停机时只警告不卡构建 —— 单测报告下次构建还会有，这点和 `predeploy` 不同）。
+diff **不在构建节点上算**：以前要 `git diff <上一版>..HEAD`，Jenkins `cleanWs` 过的工作区、浅克隆、
+只拉一个 tag 都会让 `rev-parse` 找不到上一版的 commit，diff 静默变空。hub 手里按版本存着源码，两棵树
+一比就是 diff（`git diff --no-index -M`，识别重命名，挪代码不算新代码），所以 **hub 机器要装 git**，
+构建节点只要能打包当前 checkout。基线由 hub 自动定：服务当前 `version`（线上跑着的那版）→ 最近结算的
+版本 → 最近上传过源码的版本，取第一个传过源码的；`--base 1.4.1` 可以指定。第一次接入还没有基线，
+源码照收、diff 为空（返回体 `diffReason` 说明原因），下一版就有了。
+
+`Jenkinsfile.build` 里的 `Push to covhub` 阶段就是这两步（`covhub.pushUnitCoverage` /
+`covhub.uploadSources`，hub 停机时只警告不卡构建 —— 下次构建还会有，这点和 `predeploy` 不同）。
+仍想自己算 git diff 的项目：`covhub-client.sh diff <svc> <ver> covhub.diff --base <commit>`
+（groovy `covhub.pushDiff(file:, base:)`）还在，而且人工上传的优先，不会被自动生成的覆盖；想换回 hub 比对
+的结果就 `covhub-client.sh diff <svc> <ver> --from-sources`。
 
 三件事要知道：
 
 - **版本串必须一致。** 构建时给的 `$VERSION`、发版时 `predeploy` / `retarget` 用的版本、
   服务配置里的 `version` 得是同一个字符串，hub 才能把 diff 和运行时快照对上。
-  `diff` 命令的返回体里 `matchesCurrentVersion: false` 就是在提醒这件事。
+  `upload-sources` / `diff` 的返回体里 `matchesCurrentVersion: false` 就是在提醒这件事。
 - **分母只算 JaCoCo 有探针的行。** 空行、注释、import、纯声明不参与；一次全文件格式化会让
   整个文件算成新增。没有可覆盖的新增行时看板显示「无新增」。
-- **顺序不限。** diff、单测 XML、运行时快照哪个先到都行，晚到的会把已有的重算一遍，已归档
+- **顺序不限。** 源码（diff）、单测 XML、运行时快照哪个先到都行，晚到的会把已有的重算一遍，已归档
   的版本也会回写。
 
 ## 6. 构建期覆盖率（可选，要改 pom）
@@ -1243,10 +1248,10 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 | 看板上的东西 | 数据来源 | 要做到的事 |
 |---|---|---|
 | 运行时 · 总覆盖、趋势图、在线状态 | hub 轮询 agent | §3 接入 + hub 带 `--with-watch` 起 |
-| 运行时 · 新增代码、「新增代码」页签 | 运行时报告 ∩ 这一版的 git diff | 构建流水线推 `diff`（§5.6），**版本串与服务的 `version` 一致** |
+| 运行时 · 新增代码、「新增代码」页签 | 运行时报告 ∩ 这一版的 diff（hub 比对两版源码得出） | 构建流水线 `upload-sources`（§5.6），**版本串与服务的 `version` 一致** |
 | 「新增代码」里点开看源码、展开全文 | 按版本上传的源码 | Step 8 流水线 `upload-sources`（历史版本同样按它；早于上传的归档用结算时存下的片段） |
 | 单测 · 总覆盖、「单测覆盖率」页签 | 构建流水线推的 jacoco.xml | §6 加聚合模块 + §5.6 推 `unit-coverage` |
-| 单测 · 新增代码 | 单测 XML ∩ git diff | 上面两条都做 |
+| 单测 · 新增代码 | 单测 XML ∩ 这一版的 diff | 上面两条都做 |
 | 已结算版本、版本下拉（历史版本） | 每次 `predeploy` 的归档 | 发版流程排进 `predeploy`（§5），每发一版多一条 |
 | 历史对比 | 两个归档 / 当前周期的 jacoco.xml | 至少结算过一版；比对的是运行时指令覆盖 |
 | 触达类、指纹匹配率、`diagnose` | exec 与 class 指纹 | Step 7 `upload-classes --retarget`（或 `classDumpDir`） |
