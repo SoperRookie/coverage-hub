@@ -136,7 +136,7 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 
 | 步骤 | 用途 |
 |---|---|
-| `covhub.agentOpts(service:)` | 取该服务应注入的 `-javaagent` 参数串 |
+| `covhub.agentOpts(service:)` | 取该服务应注入的 `-javaagent` 参数串（push 通道是空格隔开的两个，拼进 `JAVA_TOOL_OPTIONS` 时带引号） |
 | `covhub.predeploy(service:, version:, allowMissing:)` | 结算并归档，**停服之前**调用 |
 | `covhub.dump(service:)` | 拉一次快照（累加） |
 | `covhub.status([service:])` | 打印连通性与最新覆盖率 |

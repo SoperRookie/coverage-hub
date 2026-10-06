@@ -511,7 +511,7 @@ export COVHUB_TOKEN=<serve.token>
 ```
 health                                         存活探测
 status [service]                               连通性与最新覆盖率
-agent-opts <service>                           打印 -javaagent 参数串
+agent-opts <service>                           打印 -javaagent 参数串（push 通道是空格隔开的两个）
 fetch-agent [目标路径]                          下载 jacocoagent.jar（默认存到 ./jacocoagent.jar）
 fetch-covhub-agent [目标路径]                   下载 covhub-agent.jar（push 通道用，默认存到 ./covhub-agent.jar）
 dump <service>                                 拉一次快照（累加）
@@ -1001,7 +1001,8 @@ covhub-client.sh diagnose order-service
 # {"ok": true, "matchRate": 100.0, "verdict": "正常", ...}
 
 # 4. 看板
-#   打开 http://<hub>:8900/?token=<令牌>，在所属项目的卡片里（没配 project 就在「未分组」）应看到 order-service
+#   打开看板（分离部署是 nginx 的地址，配了 serve.webDir 则是 http://<hub>:8900/），在弹窗里填令牌；
+#   在所属项目的卡片里（没配 project 就在「未分组」）应看到 order-service
 ```
 
 刚启动的服务覆盖率通常在 1% 左右、触达类却有六七成 —— 这是正常的：Spring 把 Bean
@@ -1100,7 +1101,8 @@ classfiles  /opt/coverage-hub/data/order-service/artifacts/1.4.2
 判定        正常
 ```
 
-浏览器打开 `http://10.0.0.5:8900/?token=xxxx`，在项目 `shop` 的卡片里看到 `order-service`，
+浏览器打开看板（分离部署是 nginx 的地址；配了 `serve.webDir` 让 hub 自托管的话就是 `http://10.0.0.5:8900/`），
+在弹窗里填令牌，在项目 `shop` 的卡片里看到 `order-service`，
 点进去是服务详情（四个环形指标、趋势图），右上角「JaCoCo 报告」是原生报告。再去页面上点几个
 功能，点「立即采集」（或等一个轮询周期），覆盖率应该涨。**到这里接入完成**，接下来把 §5 排进发版流程。
 

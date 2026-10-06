@@ -13,7 +13,7 @@ dataDir 路径可枚举；反过来一个叫 assets 的服务会把面板打瘸�
 生的 exec。`?token=` 种 Cookie 再 302 的逻辑两边都保留 —— 直接分享出去的报告链接还
 靠它（看板自己的登录走 POST /api/login）。
 
-不给未知路径回落到 index.html：push-runtime.sh、Jenkins 库用 curl -sSf 取
+不给未知路径回落到 index.html：covhub-client.sh、Jenkins 库用 curl -sSf 取
 /<svc>/versions/<v>/jacoco.xml，404 才是它们要的失败信号。
 """
 

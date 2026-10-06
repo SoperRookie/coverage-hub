@@ -10,6 +10,7 @@
 `mysql-02-建表.sql` 与 `covhub/db/models.py`、Alembic 迁移 `0001` + `0002` + `0003` **完全等价**（列、类型、约束、索引、外键删除规则逐项比对过），
 末尾写入 `alembic_version = 0003`，所以之后跑 `covhub db upgrade` / `db current` 会认为结构已是最新，不会重复建表。
 **两条路只能走一条**：表已存在时再让 hub 自动建表会因为「表已存在」失败。
+最新迁移 `0003` 是 2.5.0 加的（`diffs.origin`）；**2.6.0 没有表结构变更**，走方式 B 的库升级到 2.6.0 不用执行任何 SQL。
 
 ```bash
 mysql -u root -p < mysql-01-建库建用户.sql          # 先改脚本里的密码和主机

@@ -1,4 +1,4 @@
--- covhub 2.1 · MySQL 8 建表
+-- covhub 2.6 · MySQL 8 建表（表结构自 2.5.0 的迁移 0003 起未变）
 -- 与 covhub/db/models.py 及 Alembic 迁移 0001 + 0002 + 0003 完全等价（列、约束、索引、外键均一致）。
 -- 最后写入 alembic_version = 0003，之后 hub 启动时的 `covhub db upgrade` 会认为结构已是最新，
 -- 不会再重复建表；将来升级 covhub 时照常 `covhub db upgrade` 即可。
@@ -189,7 +189,7 @@ CREATE TABLE IF NOT EXISTS `diffs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='git diff 摘要';
 
 -- ---------------------------------------------------------------------------
--- Alembic 版本标记：告诉 covhub 表结构已经是 0003（2.5.0 的最新迁移）
+-- Alembic 版本标记：告诉 covhub 表结构已经是 0003（2.5.0 加的，到 2.6.0 仍是最新迁移）
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `alembic_version` (
   `version_num` VARCHAR(32) NOT NULL,

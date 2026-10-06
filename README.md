@@ -294,8 +294,8 @@ hub 只收源码文件，配置文件之类即便混进包里也不落盘；`sou
 
 见 `integration/jenkins/`：一个 Shared Library（`vars/covhub.groovy`）加两条流水线模板。
 
-- `Jenkinsfile.build` —— 构建期：跑测试 → 聚合报告 → **推单测报告与 diff 给 hub** → 归档 class 产物（可选）
-- `Jenkinsfile.deploy` —— 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复
+- `Jenkinsfile.build` —— 构建期：跑测试 → 聚合报告 → **推单测报告与源码给 hub**（diff 由 hub 比对得出）→ 归档 class 产物（可选）
+- `Jenkinsfile.deploy` —— 发版：结算旧版本 → 部署（agent jar 从 hub 取，push 通道两个都取）→ 指向新产物 → 确认采集恢复
 
 安装步骤、节点前置条件与各步骤的注意事项见 `integration/jenkins/README.md`。
 
