@@ -410,9 +410,26 @@ Map lastVersion(Map args) {
 String fetchAgent(Map args) {
     String dest = args.dest ?: "${pwd()}/jacocoagent.jar"
     assert hubUrl(args) : 'fetchAgent 需要 hub（或环境变量 COVHUB_URL）'
+    return fetchJar(args, '/api/agent.jar', dest)
+}
+
+/**
+ * 从 hub 下载 covhub-agent.jar 到本节点。
+ *
+ * push 通道的薄 agent：与 jacocoagent.jar 并列挂在被测 JVM 上，负责连 hub、断线重连。
+ * 只有 agentOpts() 返回的参数串里有两个 -javaagent 时才需要它（hub 配了 covhubAgent 的 push 服务），
+ * 放到与 jacocoagent.jar 相同的目录即可（hub 配置里两项通常同目录）。
+ */
+String fetchCovhubAgent(Map args) {
+    String dest = args.dest ?: "${pwd()}/covhub-agent.jar"
+    assert hubUrl(args) : 'fetchCovhubAgent 需要 hub（或环境变量 COVHUB_URL）'
+    return fetchJar(args, '/api/covhub-agent.jar', dest)
+}
+
+private String fetchJar(Map args, String path, String dest) {
     String script = """
         set -e
-        curl -sSf -H "X-Covhub-Token: \${COVHUB_TOKEN:-}" -o '${dest}' '${hubUrl(args)}/api/agent.jar'
+        curl -sSf -H "X-Covhub-Token: \${COVHUB_TOKEN:-}" -o '${dest}' '${hubUrl(args)}${path}'
     """
     if (args.tokenCredentialsId) {
         withCredentials([string(credentialsId: args.tokenCredentialsId, variable: 'COVHUB_TOKEN')]) {
@@ -421,7 +438,7 @@ String fetchAgent(Map args) {
     } else {
         sh script
     }
-    echo "[covhub] agent 已下载到 ${dest}"
+    echo "[covhub] ${path} 已下载到 ${dest}"
     return dest
 }
 

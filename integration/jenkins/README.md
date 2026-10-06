@@ -103,7 +103,8 @@
 `docker` 和 `compose` 会把宿主机的 `AGENT_LIB_DIR` 挂到容器内（默认 `/opt/jacoco`）。
 此时 **hub 配置里的 `jacocoAgent` 必须写成容器内路径**（如
 `/opt/jacoco/jacocoagent.jar`），因为 agent 是在容器里被 JVM 加载的；而 `jacocoCli`
-仍然是执行采集那台机器上的路径。两者不在同一个文件系统里。
+仍然是执行采集那台机器上的路径。两者不在同一个文件系统里。push 通道的 `covhubAgent` 同理
+（`/opt/jacoco/covhub-agent.jar`）—— `AGENT_LIB_DIR` 留空时流水线会把两个 jar 都下到同一个目录。
 
 另外 `AGENT_PORT` 必须映射出来，否则 covhub 连不到 agent —— 且配置里
 该服务的 `bindAddress` 要是 `0.0.0.0`，绑回环地址时容器外无法访问。
@@ -111,7 +112,7 @@
 ### K8s 的两点额外要求
 
 **一、agent jar 要能进 Pod。** 业务镜像不方便改时，标准做法是给 Deployment 加一个
-initContainer，把 `jacocoagent.jar` 拷进 `emptyDir` 共享卷。清单片段见
+initContainer，把 `jacocoagent.jar`（push 通道还有 `covhub-agent.jar`）拷进 `emptyDir` 共享卷。清单片段见
 `../deployment-snippets.md`。这属于 Deployment 的一次性改造，不在流水线范围内。
 
 **二、结算必须在滚动更新之前。** 滚动更新直接杀旧 Pod，`preStop` 钩子来不及做完整的
@@ -143,6 +144,7 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 | `covhub.retarget(service:, version:, classfiles:)` | 更新 hub 配置里的版本与 class 路径 |
 | `covhub.uploadClasses(service:, version:, archive:, retarget:)` | 把 class 产物压缩包传给 hub |
 | `covhub.fetchAgent(dest:)` | 从 hub 下载 `jacocoagent.jar` |
+| `covhub.fetchCovhubAgent(dest:)` | 从 hub 下载 `covhub-agent.jar`（push 通道、参数串里有两个 `-javaagent` 时才需要） |
 | `covhub.fetchClasses(service:, version:, dest:)` | 从 hub 取回某版本的 class 产物并解包，返回目录 |
 | `covhub.diagnose(service:, version:)` | 诊断 exec 与 class 是否对得上，返回含 `matchRate` / `verdict` 的 Map |
 | `covhub.requireMatch(service:, min:)` | 指纹匹配率低于 `min`（默认 90）就让流水线失败 |

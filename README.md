@@ -8,7 +8,7 @@
 
 **整套方案只部署一个服务端。** 被测服务所在的机器、发版节点都不装 Python、不装
 java、不放配置文件 —— 它们只需要 `curl`，以及被测 JVM 里挂的那个
-`jacocoagent.jar`（还能直接从 hub 下载）。
+`jacocoagent.jar`（push 通道再加一个 `covhub-agent.jar`；都能直接从 hub 下载）。
 
 > **要接入一个新服务，直接看 [ONBOARDING.md](ONBOARDING.md)** —— 从搭建到验收的完整步骤、
 > 四种部署方式的注入方法、验收清单和常见问题。本文说明的是设计与命令细节。
@@ -162,8 +162,30 @@ covhub service add order-service --channel push --includes 'com.example.order.*'
     --class-dump-dir /tmp/covhub-classes/order-service --classfiles ./data/order-service/artifacts/current
 ```
 
-`agent-opts` 会相应生成 `output=tcpclient`。**多副本天然汇聚**：每个副本各连一条，hub 每轮向所有
-在线实例各取一次数，出报告时一起合并；副本扩缩不用改任何配置。
+**多副本天然汇聚**：每个副本各连一条，hub 每轮向所有在线实例各取一次数，出报告时一起合并；
+副本扩缩不用改任何配置。
+
+push 通道下 `agent-opts` 给出的是**空格隔开的两个 `-javaagent`**（整串照旧塞进 `JAVA_TOOL_OPTIONS`）：
+
+```
+-javaagent:/opt/jacoco/jacocoagent.jar=output=none,includes=com.example.order.*,excludes=covhub.agent.*:org.jacoco.agent.rt.*,classdumpdir=/tmp/covhub-classes/order-service,sessionid=order-service -javaagent:/opt/jacoco/covhub-agent.jar=address=covhub.internal,port=6400,idle=900
+```
+
+JaCoCo 只插桩不联网（`output=none`），连 hub 的事交给 **`covhub-agent.jar`**（配置项 `covhubAgent`，
+`covhub-client.sh fetch-covhub-agent` 下载）。不直接用 JaCoCo 自带的 `output=tcpclient`，是因为它有
+两个改不了的行为：
+
+| | `output=tcpclient` | `covhub-agent.jar` |
+|---|---|---|
+| 启动时 hub 不可达 | agent 初始化抛异常，**被测 JVM 起不来** | 照常启动，后台退避重试（1 秒起、30 秒封顶），只在第一次失败时打一行日志 |
+| hub 重启 / 连接断开 | **不再重连**，要等被测服务重启 | 自己连回来 |
+| 收不到 FIN 的断线（hub 掉电、NAT 回收空闲连接） | 永远挂着 | `idle` 秒没收到指令就重连（`agent-opts` 按三轮轮询间隔给，不低于 180 秒） |
+
+它是 `agent/` 下的一个类（零依赖、Java 8 字节码），数据经 JaCoCo 的公开入口 `org.jacoco.agent.rt.RT`
+取，线上说的仍是 JaCoCo 的 remote control 协议 —— hub 的收集端不用区分对面是谁，JaCoCo 的 jar 也不用改。
+任何失败都只打日志（前缀 `[covhub-agent]`），不影响被测应用。**没配 `covhubAgent` 的老部署原样是
+`output=tcpclient`**；配上之后重新取 `agent-opts`、下次重启被测服务时换上即可。进程退出前那一小段
+数据仍然要靠 `predeploy` 结算，它不会在退出时主动推数据。
 
 三个限制：**push 通道要求 `serve --with-watch`**（连接握在收集端手上，另起的 `watch` 进程够不着）；
 **收集端口没有认证**，靠网络策略限制来源；push 下断代检测抓的是**混版本**（滚动发版中途新旧副本
@@ -289,6 +311,7 @@ hub 只收源码文件，配置文件之类即便混进包里也不落盘；`sou
 | `/api/status[?service=X]` | GET | 连通性与最新覆盖率（JSON） |
 | `/api/agent-opts?service=X` | GET | 该服务应注入的 `-javaagent` 参数串（加 `&format=text` 出纯文本） |
 | `/api/agent.jar` | GET | 下载 `jacocoagent.jar` |
+| `/api/covhub-agent.jar` | GET | 下载 `covhub-agent.jar`（push 通道连 hub、断线重连的薄 agent；没配 `covhubAgent` 时 404） |
 | `/api/diagnose?service=X[&version=V]` | GET | 诊断 exec 与 class 是否对得上 |
 | `/api/dump?service=X` | POST | 拉一次快照（累加） |
 | `/api/predeploy?service=X&version=V` | POST | 结算并归档；加 `&allowMissing=1` 允许目标已离线 |
@@ -397,6 +420,8 @@ agent 的 tcpserver 端口和 push 通道的收集端口（`collect.port`）**�
 
 ```yaml
 jacocoAgent: ./lib/jacocoagent.jar   # 被测端能看到的路径，容器场景写容器内路径
+covhubAgent: ./lib/covhub-agent.jar  # 同上。push 通道用它连 hub（hub 不在也能启动、断线自己重连）；
+                                     # 不配则退回 JaCoCo 自带的 output=tcpclient
 jacocoCli: ./lib/jacococli.jar
 dataDir: ./data
 
@@ -476,7 +501,7 @@ COVHUB_DATABASE_URL=mysql+pymysql://...covhub python covhub.py import services.y
 | `service list / show / add / update / remove / template` | 服务配置（存数据库） |
 | `export [--out FILE] [--json]` | 把库里的项目与服务配置导成文件（换库、备份用） |
 | `import [文件] [--dry-run] [--overwrite]` | 导入项目与服务配置（旧 `targets.yaml` 或 `export` 的输出）与 `data/*/state.json` 的历史，幂等 |
-| `agent-opts <service>` | 打印启动时应注入的 `-javaagent` 参数串 |
+| `agent-opts <service>` | 打印启动时应注入的 `-javaagent` 参数串（push 通道配了 `covhubAgent` 时是空格隔开的两个） |
 | `status [service]` | 目标连通性与最新覆盖率 |
 | `dump <service>` | 拉一次快照并出报告（累加，不清零） |
 | `predeploy <service> [--version V]` | 发版/重启前结算：`dump --reset` + 归档 |

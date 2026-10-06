@@ -44,7 +44,7 @@ pipeline {
         string(name: 'CONTAINER_NAME', defaultValue: 'my-service', description: 'docker：容器名')
         string(name: 'APP_PORT',       defaultValue: '8080:8080',  description: 'docker：业务端口映射')
         string(name: 'AGENT_PORT',     defaultValue: '6300:6300',  description: 'docker / compose：agent 端口映射，必须映射出来否则连不上')
-        string(name: 'AGENT_LIB_DIR',  defaultValue: '', description: 'docker / compose：宿主机上 jacocoagent.jar 所在目录。留空则从 hub 下载到工作区')
+        string(name: 'AGENT_LIB_DIR',  defaultValue: '', description: 'docker / compose：宿主机上 jacocoagent.jar（push 通道还有 covhub-agent.jar）所在目录。留空则从 hub 下载到工作区')
 
         // --- compose ---
         string(name: 'COMPOSE_FILE',   defaultValue: 'docker-compose.yml', description: 'compose：主 compose 文件')
@@ -128,6 +128,13 @@ pipeline {
                         covhub.fetchAgent(hub: env.COVHUB_URL,
                                           tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
                                           dest: "${WORKSPACE}/.covhub-lib/jacocoagent.jar")
+                        // push 通道且 hub 配了 covhubAgent 时参数串里有两个 -javaagent，
+                        // 第二个（连 hub、断线重连的薄 agent）也得在同一个目录里
+                        if (agentOpts.contains(' -javaagent:')) {
+                            covhub.fetchCovhubAgent(hub: env.COVHUB_URL,
+                                                    tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                                                    dest: "${WORKSPACE}/.covhub-lib/covhub-agent.jar")
+                        }
                         agentLibDir = "${WORKSPACE}/.covhub-lib"
                     }
 

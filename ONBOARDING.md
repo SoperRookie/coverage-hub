@@ -43,7 +43,7 @@
 |---|---|---|
 | **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里，`web/dist`） |
 | **看板那一台**（可以就是 hub 那台） | nginx 之类的静态服务器 + `web/dist` 的内容（模板见 `integration/nginx/covhub.conf`）。不想单独部署就配 `serve.webDir`，让 hub 一起托管 | Node、Python |
-| **被测服务所在机器** | `jacocoagent.jar`（`covhub-client.sh fetch-agent` 下载）；pull 通道要能被 hub 连上 agent 端口 | Python、covhub、配置文件 |
+| **被测服务所在机器** | `jacocoagent.jar`（`covhub-client.sh fetch-agent` 下载）；push 通道再加 `covhub-agent.jar`（`fetch-covhub-agent`）；pull 通道要能被 hub 连上 agent 端口 | Python、covhub、配置文件 |
 | **发版节点 / 流水线** | `curl`（用 `integration/covhub-client.sh` 包一层） | Python、java、配置文件、历史 class 产物 |
 | **被测项目本身** | **什么都不用改** | 代码、pom、Dockerfile、启动脚本 |
 
@@ -88,6 +88,7 @@
 | 配置项 | 在哪台机器上 | 为什么 | 容器场景写什么 |
 |---|---|---|---|
 | `jacocoAgent` | **被测端** | 它只用来拼进 `-javaagent:` 参数串，jar 是被测 JVM 加载的 | 容器内路径，如 `/opt/jacoco/jacocoagent.jar` |
+| `covhubAgent` | **被测端** | 同上，push 通道的第二个 `-javaagent:`（连 hub、断线重连） | 容器内路径，如 `/opt/jacoco/covhub-agent.jar` |
 | `classDumpDir` | **被测端** | agent 把加载到的 class 落在这里 | 容器内路径，取的时候 `docker cp` / `kubectl cp` |
 | `jacocoCli` | hub | hub 自己跑 `java -jar` 出报告 | hub 本机路径 |
 | `dataDir` | hub | 采集产物全在这 | hub 本机路径 |
@@ -99,6 +100,7 @@
 
 一个小验证：`jacocoAgent` 填的路径 hub 本机不存在也没关系 —— `agent-opts` 照样输出
 正确的参数串；只有 `fetch-agent`（从 hub 下载 agent）会因为找不到文件而 404。
+`covhubAgent` 与 `fetch-covhub-agent` 同理。
 
 ### 1.3 网络放行清单
 
@@ -216,6 +218,7 @@ GRANT ALL ON covhub.* TO 'covhub'@'%';
 
 ```yaml
 jacocoAgent: ./lib/jacocoagent.jar      # 被测端路径！容器场景改成容器内路径（§1.2）
+covhubAgent: ./lib/covhub-agent.jar     # 同上。push 通道连 hub 用（Step 2）；不用 push 可以不管它
 jacocoCli: ./lib/jacococli.jar
 dataDir: ./data
 
@@ -243,7 +246,7 @@ collect:                                # 只有要用 push 通道才需要；�
 > 目录相同」时能用。绝大多数场景要改成被测端的绝对路径，例如
 > `/opt/jacoco-lib/jacocoagent.jar`（裸机）或 `/opt/jacoco/jacocoagent.jar`（容器内）。
 > 不同服务放在不同位置时，以多数为准，个别服务在注入时手工改参数串里的 jar 路径即可
-> —— 参数串里只有这一项是可以手改的。
+> —— 参数串里只有这一项是可以手改的。`covhubAgent` 同理，通常和 `jacocoAgent` 放同一个目录。
 
 `database.url` 留空则用配置文件旁边的 SQLite 文件 `covhub.db`——只适合单机试用。它故意
 **不放在 `dataDir` 里**：那是看板的静态目录，放进去等于把整个库开放下载。
@@ -295,7 +298,7 @@ nohup python3 covhub.py serve --with-watch --port 8900 > covhub.log 2>&1 &
 
 ```
 [10:00:01] 数据库：mysql+pymysql://covhub:***@10.0.0.6:3306/covhub?charset=utf8mb4
-[10:00:01] push 收集端已监听 0.0.0.0:6400（等待 output=tcpclient 的 agent 连入）   ← 配了 collect.port 才有
+[10:00:01] push 收集端已监听 0.0.0.0:6400（等待被测端的 agent 连入）   ← 配了 collect.port 才有
 [10:00:01] 采集线程已启动，每 300 秒轮询一次
 [10:00:01] covhub 2.3.1 已启动： http://127.0.0.1:8900/  （根目录 /opt/coverage-hub/data）
 [10:00:01] 控制 API： http://127.0.0.1:8900/api/health
@@ -506,6 +509,7 @@ health                                         存活探测
 status [service]                               连通性与最新覆盖率
 agent-opts <service>                           打印 -javaagent 参数串
 fetch-agent [目标路径]                          下载 jacocoagent.jar（默认存到 ./jacocoagent.jar）
+fetch-covhub-agent [目标路径]                   下载 covhub-agent.jar（push 通道用，默认存到 ./covhub-agent.jar）
 dump <service>                                 拉一次快照（累加）
 predeploy <service> [version] [--allow-missing] 结算归档，停服之前调
 report <service>                               用已有 exec 重出报告
@@ -554,8 +558,9 @@ predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。
 | | pull（默认） | push |
 |---|---|---|
 | 方向 | hub 主动连 agent | agent 主动连回 hub |
-| agent 输出 | `output=tcpserver` | `output=tcpclient` |
+| agent 输出 | `output=tcpserver` | `output=none` + `covhub-agent.jar`（两个 `-javaagent`） |
 | 被测端要开端口 | 要（6300） | 不要 |
+| hub 不在 / 重启时 | 被测服务不受影响，hub 回来后接着拉 | 被测服务不受影响，`covhub-agent` 后台重连 |
 | 多副本 | 每个副本要配一条 | 天然汇聚，扩缩容不用改配置 |
 | 断代检测抓的是 | 进程重启（自动结算上一周期） | 混版本（只告警不结算） |
 | CLI 单独跑 `status` | 能看到 | 看不到（显示 `?`，要看 API 或看板） |
@@ -563,6 +568,12 @@ predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。
 
 拿不准就用 pull；K8s 多副本直接用 push。**通道只在 hub 配置里定**（`channel:`），
 被测端的注入方式两者完全一样，参数串由 `agent-opts` 自动切换。
+
+> **push 通道多一个 jar。** JaCoCo 自带的 `output=tcpclient` 启动时连不上 hub 会让被测 JVM 直接
+> 起不来，hub 重启后也不会重连。所以 hub 配了 `covhubAgent`（`init` 的模板默认带）时，push 服务的
+> 参数串是两个 `-javaagent`：JaCoCo 只插桩（`output=none`），`covhub-agent.jar` 负责连 hub ——
+> 连不上就后台重试，断了自己连回来，任何失败都不影响被测应用。被测端要多放这一个 jar
+> （`fetch-covhub-agent`）。删掉 `covhubAgent` 那一行则退回 `output=tcpclient`。
 
 ### Step 3 · 在 hub 上登记这个服务
 
@@ -688,14 +699,27 @@ covhub-client.sh agent-opts order-service
 # -javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*,classdumpdir=/tmp/covhub-classes/order-service,sessionid=1.4.2
 ```
 
+push 通道的服务（hub 配了 `covhubAgent`）要多取一个 jar，参数串是**空格隔开的两个** `-javaagent`，
+整串一起塞进 `JAVA_TOOL_OPTIONS`：
+
+```bash
+covhub-client.sh fetch-covhub-agent /opt/jacoco-lib/covhub-agent.jar
+# [covhub] 已下载 covhub-agent -> /opt/jacoco-lib/covhub-agent.jar
+
+covhub-client.sh agent-opts order-service
+# -javaagent:/opt/jacoco-lib/jacocoagent.jar=output=none,includes=com.example.order.*,excludes=covhub.agent.*:org.jacoco.agent.rt.*,classdumpdir=/tmp/covhub-classes/order-service,sessionid=order-service -javaagent:/opt/jacoco-lib/covhub-agent.jar=address=covhub.internal,port=6400,idle=900
+```
+
 参数串里各段的含义：
 
 | 段 | 来自配置 | 说明 |
 |---|---|---|
 | `-javaagent:<路径>` | `jacocoAgent` | 被测端的 jar 路径。不对就改配置，或**只改这一段** |
-| `output=tcpserver` / `tcpclient` | `channel` | 通道 |
-| `address` / `port` | pull：`bindAddress` / `port`；push：`collect.advertiseAddress` / `collect.port` | 两个通道里含义相反：pull 是自己监听在哪，push 是连去哪 |
-| `includes` / `excludes` | 同名 | 多项用 `:` 拼 |
+| `output=tcpserver` / `none` / `tcpclient` | `channel` | 通道。pull 是 `tcpserver`；push 是 `none`（连 hub 交给第二个 agent），没配 `covhubAgent` 时是 `tcpclient` |
+| `address` / `port` | pull：`bindAddress` / `port`；push：`collect.advertiseAddress` / `collect.port` | 两个通道里含义相反：pull 是自己监听在哪，push 是连去哪（push 下这两项在第二个 `-javaagent` 里） |
+| 第二个 `-javaagent:<路径>` | `covhubAgent` | 只有 push 通道有。被测端的 `covhub-agent.jar` 路径 |
+| `idle` | `watch.intervalSeconds` × 3，不低于 180 | 只有 push 通道有。这么多秒没收到 hub 的指令就当连接已死、重连 |
+| `includes` / `excludes` | 同名 | 多项用 `:` 拼。push 下 `excludes` 末尾会自动追加两条（`covhub.agent.*`、`org.jacoco.agent.rt.*`），免得 agent 自己被算进覆盖率 |
 | `classdumpdir` | `classDumpDir` | 落盘目录 |
 | `sessionid` | pull：`version`；push：`name` | push 通道靠它认领连接，**不能手改** |
 
@@ -735,7 +759,7 @@ docker run -d --name order-service \
 
 三个必须注意的点：
 
-1. agent jar 要**挂进容器**，且 hub 配置里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
+1. agent jar 要**挂进容器**，且 hub 配置里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的。push 通道的 `covhubAgent` 同理，两个 jar 放同一个目录一起挂进去
 2. `classDumpDir` 同理是容器内路径，取的时候 `docker cp`
 3. pull 通道下 `bindAddress` 必须 `0.0.0.0`，且 **6300 要映射出来**；push 通道这两条都不需要
 
@@ -778,7 +802,8 @@ spec:
       initContainers:
         - name: fetch-agent
           image: curlimages/curl:latest
-          command: ["sh","-c","curl -sSf -H 'X-Covhub-Token: $(COVHUB_TOKEN)' -o /shared/jacocoagent.jar http://covhub.internal:8900/api/agent.jar"]
+          # 两个 jar：JaCoCo agent + push 通道连 hub 用的 covhub-agent（pull 通道只要第一个）
+          command: ["sh","-c","curl -sSf -H 'X-Covhub-Token: $(COVHUB_TOKEN)' -o /shared/jacocoagent.jar http://covhub.internal:8900/api/agent.jar && curl -sSf -H 'X-Covhub-Token: $(COVHUB_TOKEN)' -o /shared/covhub-agent.jar http://covhub.internal:8900/api/covhub-agent.jar"]
           env:
             - name: COVHUB_TOKEN
               valueFrom: { secretKeyRef: { name: covhub, key: token } }
@@ -1311,6 +1336,7 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 |---|---|
 | `reportExcludes` / `sourcefiles` / `sourceEncoding`，或刚 `upload-sources` | 不用重启任何东西，`covhub-client.sh report <svc>` 重出报告（不跑也行，下一轮采集自然带上） |
 | `includes` / `excludes` / `classDumpDir` / `bindAddress` / `port` | 重新取 `agent-opts`，**重启被测服务**。改了 `includes` 之后 class 集合变了，记得重传 class |
+| `covhubAgent` / `collect.advertiseAddress` / `collect.port`（影响 push 服务的参数串） | 重新取 `agent-opts`，**重启被测服务**才换上（`collect.port` 还要重启 hub）。已经在跑的实例按旧参数继续工作 |
 | `address` / `version` / `classfiles` / `project` | 不用重启，下一轮采集 / 下一次刷新看板生效 |
 | `serve.token` / `serve.webDir` | 不用重启，下一次请求就生效（配置文件每个请求重读）。令牌走环境变量 `COVHUB_TOKEN` 的话要重启进程 |
 | `serve.port` / `watch.intervalSeconds` / `collect.*` / `database.*` | **重启 hub**（这几项在启动时读一次） |
@@ -1342,9 +1368,10 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 
 ### 8.7 升级 JaCoCo
 
-被测服务升到了 agent 不支持的 Java 版本时才需要。换 `lib/` 下的两个 jar（取法见
-`CLAUDE.md`），重启 hub；**被测端的 agent jar 也要换**（重新 `fetch-agent` 并重启服务）。
-两边版本不一致时 exec 格式通常仍兼容，但别指望，换就一起换。
+被测服务升到了 agent 不支持的 Java 版本时才需要。换 `lib/` 下 JaCoCo 的两个 jar
+（`jacocoagent.jar` / `jacococli.jar`，取法见 `CLAUDE.md`），重启 hub；**被测端的 agent jar 也要换**
+（重新 `fetch-agent` 并重启服务）。两边版本不一致时 exec 格式通常仍兼容，但别指望，换就一起换。
+`covhub-agent.jar` 不用跟着换：它对 JaCoCo 只走公开入口、用反射调用，不绑定 JaCoCo 版本。
 
 ### 8.8 hub 迁移
 
@@ -1367,16 +1394,20 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 | 启动日志没有 `Picked up JAVA_TOOL_OPTIONS` | `docker inspect` / `systemctl show -p Environment` 看变量到底有没有传到进程 | 环境变量没设到目标 JVM：compose override 没生效、drop-in 文件名不是 `.conf`、K8s `set env` 打到了别的容器 |
 | `Picked up` 后面跟着 `Error opening zip file or JAR manifest missing` | 到被测端看参数串里的 jar 路径存不存在 | `jacocoAgent` 配的路径在被测端不存在，或容器没挂进去 |
 | `Picked up` 后面跟着 `Unsupported class file major version` | `java -version` | 被测服务的 Java 比 `lib/` 里的 JaCoCo 新，换 jar（§8.7） |
-| 服务起来了但 `ss -lnt` 没有 6300 | 看启动日志有没有 agent 异常；确认 `output=tcpserver` | 参数串是 push 的（`tcpclient`）却按 pull 配；端口被占；agent 没起来 |
+| 服务起来了但 `ss -lnt` 没有 6300 | 看启动日志有没有 agent 异常；确认 `output=tcpserver` | 参数串是 push 的（`output=none` / `tcpclient`）却按 pull 配；端口被占；agent 没起来 |
 | `classDumpDir` 是空的 | 等服务完全起来再看；确认参数串里有 `classdumpdir=` | 手写参数串漏了；目录没写权限；`includes` 写错了什么都没匹配上 |
 | `status` 里 `"online": false` / 连通列是 `--` | 从 hub 上 `nc -zv <address> <port>` | 服务没起；`bindAddress` 绑了 `127.0.0.1` 但要跨机访问；容器端口没映射；防火墙；`address` 写成了容器 IP |
+| push：被测服务起不来，启动日志里有 JaCoCo 的 `ConnectException` | 看参数串是不是 `output=tcpclient` | 用的是 JaCoCo 自带的 tcpclient，启动时连不上 hub 就拒绝启动。hub 配上 `covhubAgent`，重新取 `agent-opts`（§Step 2） |
+| push：hub 重启后实例数掉到 0 再没回来 | hub 启动日志有没有「未配置 covhubAgent」告警；被测端日志有没有 `[covhub-agent]` | 同上：tcpclient 断了不重连。换成 `covhub-agent` 之前只能重启被测服务 |
+| push：被测端日志 `[covhub-agent] not started: JaCoCo agent not found` | 看参数串是不是两个 `-javaagent` 都在 | 只挂了 `covhub-agent.jar`，没挂 `jacocoagent.jar`（手工拆过参数串） |
+| push：被测端日志 `[covhub-agent] cannot reach ...` 之后一直没有 `connected to` | 被测端 `nc -zv <advertiseAddress> 6400` | hub 没起、收集端没配（`collect.port`）、地址不可达。应用本身不受影响，通了会自己连上 |
 | push：日志说「匹配不到任何服务」 | 比对参数串里的 `sessionid` 和配置里的 `name` | 手工改了 `sessionid`。用 `agent-opts` 生成就不会错 |
 | push：实例连上了但没数据 | hub 启动日志有没有「没带 --with-watch」告警 | hub 没带 `--with-watch`，收集端起了但没人取数 |
 | push：`status` 显示 `?` | 改用 API 或看板 | 你在**另一个进程**里跑的 CLI，看不到收集端手上的连接 —— 那是「不知道」不是「离线」 |
 | push：agent 端日志反复重连 | 被测端 `nc -zv <advertiseAddress> 6400` | `advertiseAddress` 配成了 hub 自己的监听地址（`0.0.0.0` / `127.0.0.1`）或容器外不可达的地址 |
 | 客户端报 `HTTP 401` | —— | `COVHUB_TOKEN` 没设或和 `serve.token` 对不上 |
 | 客户端报「连不上 hub」 | `curl -v $COVHUB_URL/api/health` | `COVHUB_URL` 写错；hub 没起；8900 被防火墙挡了 |
-| `fetch-agent` 报 404 | hub 上看 `jacocoAgent` 指的文件在不在 | `jacocoAgent` 配的是被测端路径，hub 本机不存在这个文件。改回 `./lib/jacocoagent.jar` 下载一次，或直接从版本库 `lib/` 拷 |
+| `fetch-agent` / `fetch-covhub-agent` 报 404 | hub 上看 `jacocoAgent` / `covhubAgent` 指的文件在不在 | 配的是被测端路径，hub 本机不存在这个文件（或 `covhubAgent` 根本没配）。改回 `./lib/` 下的默认值下载一次，或直接从版本库 `lib/` 拷 |
 | `upload-classes` 返回「已接收 0 个」 | `tar tzf cls.tgz \| head` | 包里没有 `.class`：打错了目录，或服务还没加载任何匹配 `includes` 的类 |
 
 ### 数据阶段
@@ -1437,8 +1468,8 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 撤之前先跑一次 `predeploy` 把最后一段数据结算掉。push 通道的服务撤下时，被测进程
 一停连接自然断开，hub 侧无需操作。
 
-被测机器上再删掉 `/opt/jacoco-lib/jacocoagent.jar` 和 `classDumpDir` 指向的目录就
-干净了 —— 从头到尾这台机器上就只多过这一个文件。
+被测机器上再删掉 `/opt/jacoco-lib/` 下的 jar（`jacocoagent.jar`，push 通道还有
+`covhub-agent.jar`）和 `classDumpDir` 指向的目录就干净了 —— 从头到尾这台机器上就只多过这一两个文件。
 
 hub 配置里那条 service 可以留着（看板上会显示离线），也可以删掉；`data/<service>/`
 里的归档不会自动删，需要的话手工搬走。

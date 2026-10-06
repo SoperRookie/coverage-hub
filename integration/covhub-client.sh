@@ -13,8 +13,9 @@
 # 用法：
 #   covhub-client.sh health
 #   covhub-client.sh status [service]
-#   covhub-client.sh agent-opts <service>             打印 -javaagent 参数串
+#   covhub-client.sh agent-opts <service>             打印 -javaagent 参数串（push 通道可能是空格隔开的两个）
 #   covhub-client.sh fetch-agent [目标路径]            下载 jacocoagent.jar
+#   covhub-client.sh fetch-covhub-agent [目标路径]     下载 covhub-agent.jar（push 通道连 hub、断线重连用）
 #   covhub-client.sh dump <service>
 #   covhub-client.sh predeploy <service> [version] [--allow-missing]
 #   covhub-client.sh report <service>
@@ -128,6 +129,14 @@ fetch-agent)
     DEST=${1:-jacocoagent.jar}
     download "/api/agent.jar" "$DEST"
     echo "[covhub] 已下载 agent -> $DEST"
+    ;;
+
+fetch-covhub-agent)
+    # push 通道的薄 agent，和 jacocoagent.jar 并列挂在被测 JVM 上（agent-opts 给出的参数串里
+    # 有两个 -javaagent 时才需要它）。放到 hub 配置 covhubAgent 写的那个被测端路径。
+    DEST=${1:-covhub-agent.jar}
+    download "/api/covhub-agent.jar" "$DEST"
+    echo "[covhub] 已下载 covhub-agent -> $DEST"
     ;;
 
 diagnose)
