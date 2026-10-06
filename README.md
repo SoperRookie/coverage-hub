@@ -57,7 +57,8 @@ java、不放配置文件 —— 它们只需要 `curl`，以及被测 JVM 里�
 
 ### 1. 服务启动时开始采集
 
-给被测服务注入 agent，`output=tcpserver` 模式。**用环境变量注入，不需要改镜像、不需要改启动类**：
+给被测服务注入 agent（默认的 pull 通道是 `output=tcpserver`，hub 连过去取数；push 通道见下面第 5 节）。
+**用环境变量注入，不需要改镜像、不需要改启动类**：
 
 ```bash
 export JAVA_TOOL_OPTIONS="$(covhub-client.sh agent-opts my-service)"
@@ -71,6 +72,7 @@ export JAVA_TOOL_OPTIONS="$(covhub-client.sh agent-opts my-service)"
 ```
 
 `JAVA_TOOL_OPTIONS` 是 JVM 标准环境变量，`java -jar`、Spring Boot、Tomcat、`run-java.sh`、K8s 都认，无需关心服务是怎么启动的。
+push 通道的参数串是**空格隔开的两个 `-javaagent`**，所以赋值时整串要像上面那样用双引号包住。
 
 ### 2. 重启 / 发版前自动 dump
 
@@ -518,7 +520,8 @@ COVHUB_DATABASE_URL=mysql+pymysql://...covhub python covhub.py import services.y
 | `serve [--port N] [--with-watch]` | HTTP 服务：看板 + 控制 API，`--with-watch` 顺带在同进程里采集（push 通道必须） |
 
 依赖：Python 3.12、`java` 8+、FastAPI + uvicorn、SQLAlchemy 2 + Alembic、pydantic v2、PyYAML、PyMySQL
-（`pip install .`；PostgreSQL 加 `[postgres]`）。**uvicorn 必须单 worker**：收集端握着长连接、采集线程
+（`pip install .`；PostgreSQL 加 `[postgres]`）。`lib/` 下三个 jar 都在版本库里：JaCoCo 的 `jacocoagent.jar` /
+`jacococli.jar`，和自带的 `covhub-agent.jar`（源码在 `agent/`）—— hub 机器只要 JRE，不需要 JDK。**uvicorn 必须单 worker**：收集端握着长连接、采集线程
 和 API 共用一把进程锁，多 worker 就是多份收集端抢端口、多份采集重复取数。
 
 ---
@@ -542,6 +545,16 @@ COVHUB_DATABASE_URL=mysql+pymysql://...covhub python covhub.py import services.y
 6. 起 `serve --with-watch`。旧看板 `data/index.html` 会被自动改名 `.legacy`。
 7. 发版流水线不用改：接口路径与返回体和 1.x 逐字段兼容。想要单测 / 新增代码覆盖率再给构建流水线
    加 `Push to covhub` 那一步。
+
+### 从 2.5 及更早升级到 2.6（只关系到 push 通道）
+
+升级本身不用做任何事：没配 `covhubAgent` 的 hub 照旧给 push 服务生成 `output=tcpclient`，已经在跑的实例
+不受影响（hub 启动时会提醒一行）。要换上 `covhub-agent`（hub 不在也能启动、断线自己重连）：
+
+1. `covhub.yaml` 加一行 `covhubAgent: <被测端路径>`，通常和 `jacocoAgent` 同目录（配置每次请求重读，不用重启 hub）。
+2. 被测端取 jar：`covhub-client.sh fetch-covhub-agent <同一个路径>`（容器场景放进挂载目录 / initContainer 多下一个）。
+3. 重新取 `agent-opts`，下次重启被测服务时生效 —— 参数串变成两个 `-javaagent`，**拼 `JAVA_TOOL_OPTIONS`
+   的地方要带引号**（仓库里的模板都带了；自己写的部署脚本检查一下）。
 
 ---
 
@@ -577,4 +590,7 @@ data/
 - **性能开销通常在个位数百分比**，可用于测试环境常驻，但不建议长期挂在生产上。
 - **归档不会被覆盖。** 同名版本已有归档时会自动存成 `<版本>-2`。
 - **改前端要在开发机构建**：`cd web && npm ci && npm run build`，产物 `web/dist` 和源码一起提交；hub / nginx 机器不需要 Node。
+- **改 covhub-agent 也在开发机构建**：`sh agent/build.sh`（要 JDK 9+），产物 `lib/covhub-agent.jar` 和源码一起提交；
+  被测端要重新 `fetch-covhub-agent` 并重启服务才换上新的。它对 JaCoCo 只用反射，换 JaCoCo 版本不用重编。
+- **covhub-agent 不在进程退出时推数据。** 被测服务停掉前的最后一段覆盖率仍然只有 `predeploy` 能留下。
 - **覆盖率不是质量指标。** 它只说明代码被执行过，不说明断言是否有效。分支覆盖率通常比指令覆盖率更有参考价值。

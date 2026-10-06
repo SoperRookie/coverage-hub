@@ -70,9 +70,14 @@ class AgentOpts(BaseModel):
     ok: bool = True
     service: str
     agentOpts: str = Field(
-        description="塞进被测服务 JAVA_TOOL_OPTIONS 的参数串",
+        description="塞进被测服务 JAVA_TOOL_OPTIONS 的参数串。push 通道且 hub 配了 covhubAgent 时是"
+                    "空格隔开的两个 -javaagent（JaCoCo 只插桩，covhub-agent 连 hub 并断线重连），"
+                    "赋值时整串要带引号",
         examples=["-javaagent:/opt/jacoco/jacocoagent.jar=output=tcpserver,address=0.0.0.0,"
-                  "port=6300,includes=com.example.*,sessionid=1.4.2"])
+                  "port=6300,includes=com.example.*,sessionid=1.4.2",
+                  "-javaagent:/opt/jacoco/jacocoagent.jar=output=none,includes=com.example.*,"
+                  "excludes=covhub.agent.*:org.jacoco.agent.rt.*,sessionid=order-service "
+                  "-javaagent:/opt/jacoco/covhub-agent.jar=address=covhub.internal,port=6400,idle=900"])
 
 
 class Session(BaseModel):

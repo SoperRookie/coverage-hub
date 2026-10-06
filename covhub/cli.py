@@ -343,7 +343,7 @@ def main():
     p.add_argument("--json", action="store_true",
                    help="生成 covhub.json（默认生成 YAML，YAML 需要 PyYAML）")
 
-    p = sub.add_parser("agent-opts", help="打印启动时应注入的 -javaagent 参数")
+    p = sub.add_parser("agent-opts", help="打印启动时应注入的 -javaagent 参数（push 通道可能是空格隔开的两个）")
     p.add_argument("service")
 
     p = sub.add_parser("status", help="查看目标连通性与最新覆盖率")
