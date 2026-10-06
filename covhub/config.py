@@ -78,7 +78,7 @@ def load_config(path):
     # 目录与文件路径记进 cfg：retarget 要回写文件，服务入库后相对路径也按这里展开。
     cfg["baseDir"] = base
     cfg["configPath"] = os.path.abspath(path)
-    for key in ("jacocoCli", "jacocoAgent", "dataDir"):
+    for key in ("jacocoCli", "jacocoAgent", "covhubAgent", "dataDir"):
         if cfg.get(key) and not os.path.isabs(cfg[key]):
             cfg[key] = os.path.normpath(os.path.join(base, cfg[key]))
     # serve.webDir 同样相对配置文件解析 —— 它是磁盘路径，跟着进程 CWD 走的话
@@ -145,6 +145,9 @@ CONFIG_TEMPLATE_YAML = """\
 # 服务配置不在这里 —— 它们在数据库里，用 covhub service add 登记，
 # 或者 covhub import 从旧的 targets.yaml 一次性导入。
 jacocoAgent: ./lib/jacocoagent.jar   # 被测端能看到的路径，容器场景写容器内路径
+covhubAgent: ./lib/covhub-agent.jar  # 同上，也是被测端路径。push 通道用它连 hub：hub 不在时被测
+                                     # JVM 照常启动，hub 重启后自己重连。删掉这一行则退回 JaCoCo
+                                     # 自带的 output=tcpclient（没有这两条保证）
 jacocoCli: ./lib/jacococli.jar
 dataDir: ./data
 
@@ -173,6 +176,7 @@ collect:                     # push 通道的收集端，只有配了 port，ser
 
 CONFIG_TEMPLATE_JSON = {
     "jacocoAgent": "./lib/jacocoagent.jar",
+    "covhubAgent": "./lib/covhub-agent.jar",
     "jacocoCli": "./lib/jacococli.jar",
     "dataDir": "./data",
     "database": {"url": "", "autoUpgrade": True},

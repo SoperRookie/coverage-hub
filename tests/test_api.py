@@ -178,6 +178,37 @@ def test_agent_opts_text_and_jar(hub):
     assert r.text.startswith("-javaagent:") and "sessionid=svc" in r.text
     r = hub.get("/api/agent.jar", headers=H)
     assert r.status_code == 200 and r.headers["content-type"] == "application/java-archive"
+    # 这个 hub 没配 covhubAgent：薄 agent 的下载是 404，并说清原因
+    r = hub.get("/api/covhub-agent.jar", headers=H)
+    assert r.status_code == 404 and "covhubAgent" in r.json()["error"]
+
+
+def test_push_with_covhub_agent(tmp_path, monkeypatch, db_url_for_app):
+    """配了 covhubAgent：push 服务的参数串是两个 -javaagent，薄 agent 能从 hub 下载。"""
+    cfg = {"jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
+           "covhubAgent": os.path.join(ROOT, "lib", "covhub-agent.jar"),
+           "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
+           "dataDir": str(tmp_path / "data"), "database": {"url": db_url_for_app},
+           "serve": {"token": "secret"},
+           "collect": {"advertiseAddress": "covhub.internal"}}
+    cfg_path = tmp_path / "covhub.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.delenv("COVHUB_TOKEN", raising=False)
+    monkeypatch.delenv("COVHUB_DATABASE_URL", raising=False)
+    with TestClient(create_app(str(cfg_path)), base_url="http://hub") as client:
+        assert client.get("/api/covhub-agent.jar").status_code == 401      # 和别的接口一样要令牌
+        r = client.get("/api/covhub-agent.jar", headers=H)
+        assert r.status_code == 200 and r.headers["content-type"] == "application/java-archive"
+        assert r.content[:2] == b"PK"
+        client.post("/api/services", headers=H, json={"name": "svc", "channel": "push"})
+        r = client.get("/api/agent-opts?service=svc&format=text", headers=H)
+        jacoco, thin = r.text.strip().split(" ")
+        assert "output=none" in jacoco and "sessionid=svc" in jacoco
+        assert thin.endswith("covhub-agent.jar=address=covhub.internal,port=6400,idle=900")
+        # pull 服务不受影响：仍是一个 -javaagent
+        client.post("/api/services", headers=H, json=dict(PULL, name="pulled"))
+        r = client.get("/api/agent-opts?service=pulled&format=text", headers=H)
+        assert " " not in r.text.strip() and "output=tcpserver" in r.text
 
 
 def test_services_crud(hub):

@@ -149,6 +149,24 @@ def agent_jar(cfg: dict = Depends(get_cfg)):
     return FileResponse(jar, media_type="application/java-archive", filename="jacocoagent.jar")
 
 
+@router.get("/api/covhub-agent.jar", tags=["查询"], summary="下载 covhub-agent.jar",
+            responses={**ERR, 200: {"description": "jar 文件",
+                                         "content": {"application/java-archive":
+                                                     {"schema": {"type": "string", "format": "binary"}}}},
+                                   404: {"model": schemas.Error,
+                                         "description": "没配 covhubAgent，或它指向的文件在 hub 上不存在"}})
+def covhub_agent_jar(cfg: dict = Depends(get_cfg)):
+    """push 通道的薄 agent：与 jacocoagent.jar 并列挂在被测 JVM 上，负责连 hub 的收集端、
+    断线重连（agent-opts 在配了 covhubAgent 时会生成两个 -javaagent）。
+    和 /api/agent.jar 一样读的是配置里那一项指向的文件，那一项填的是**被测端**路径。"""
+    jar = cfg.get("covhubAgent")
+    if not jar:
+        return error(404, "没有配置 covhubAgent（push 通道此时用 JaCoCo 自带的 output=tcpclient）")
+    if not os.path.isfile(jar):
+        return error(404, "找不到 " + jar)
+    return FileResponse(jar, media_type="application/java-archive", filename="covhub-agent.jar")
+
+
 @router.get("/api/diagnose", tags=["查询"], summary="诊断 exec 与 class 产物是否对得上",
             response_model=schemas.DiagnoseResponse, responses=ERR)
 def diagnose(service: str = Query(..., description="服务名"),

@@ -334,6 +334,73 @@
         ]
       }
     },
+    "/api/covhub-agent.jar": {
+      "get": {
+        "tags": [
+          "查询"
+        ],
+        "summary": "下载 covhub-agent.jar",
+        "description": "push 通道的薄 agent：与 jacocoagent.jar 并列挂在被测 JVM 上，负责连 hub 的收集端、\n断线重连（agent-opts 在配了 covhubAgent 时会生成两个 -javaagent）。\n和 /api/agent.jar 一样读的是配置里那一项指向的文件，那一项填的是**被测端**路径。",
+        "operationId": "covhub_agent_jar_api_covhub_agent_jar_get",
+        "responses": {
+          "200": {
+            "description": "jar 文件",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/java-archive": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没配 covhubAgent，或它指向的文件在 hub 上不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "hub 内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
+      }
+    },
     "/api/diagnose": {
       "get": {
         "tags": [

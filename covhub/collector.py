@@ -14,7 +14,8 @@ from .locks import LOCK
 from .logbuf import log
 
 # --------------------------------------------------------------------------
-# push 通道：agent 主动连上来（output=tcpclient）
+# push 通道：agent 主动连上来（covhub-agent.jar，或 JaCoCo 自带的 output=tcpclient ——
+# 两者在线上说的是同一套协议，收集端分不出也不需要分）
 #
 # 适用于 pull 够不着的场景：被测端不能开入站端口、容器网络只出不进、多副本还会
 # 自动扩缩 —— 后者用 pull 得给每个副本配一条，用 push 则是副本自己连过来，
@@ -55,7 +56,7 @@ def _sessionid_to_service(cfg, sessionid):
             return svc["name"]
     return None
 class PushCollector:
-    """接收 tcpclient agent 的长连接，并在需要时向它们要数据。"""
+    """接收被测端 agent 的长连接，并在需要时向它们要数据。"""
 
     def __init__(self, cfg_loader):
         # 注入「怎么取当前配置」而不是配置本身：认领连接时要看最新的服务列表
@@ -74,7 +75,7 @@ class PushCollector:
         self.srv.bind((bind, port))
         self.srv.listen(64)
         threading.Thread(target=self._accept_loop, daemon=True).start()
-        log("push 收集端已监听 %s:%d（等待 output=tcpclient 的 agent 连入）" % (bind, port))
+        log("push 收集端已监听 %s:%d（等待被测端的 agent 连入）" % (bind, port))
 
     def _accept_loop(self):
         """accept 循环。除了监听 socket 真的关了，任何错误都不许让它退出。
@@ -178,7 +179,11 @@ class PushCollector:
         return False
 
     def stop(self):
-        """进程退出时收尾：关监听、断掉所有实例。实例那头的 agent 会自己重连。"""
+        """进程退出时收尾：关监听、断掉所有实例。
+
+        实例那头挂的是 covhub-agent 才会自己重连；JaCoCo 自带的 tcpclient 断了就不再连，
+        那些实例要等被测服务重启才回来 —— 这正是 covhub-agent 存在的原因之一。
+        """
         srv, self.srv = self.srv, None
         _close_quietly(srv)
         with self.lock:

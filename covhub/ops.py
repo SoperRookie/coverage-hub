@@ -62,8 +62,9 @@ def dump(cfg, name):
     svc = find_service(cfg, name)
     if not reachable(svc):
         if service_channel(svc) == "push":
-            raise CovhubError("%s 当前没有实例连上来 —— 确认被测端 agent 用的是 "
-                              "output=tcpclient 且能访问到 collect.advertiseAddress" % svc["name"])
+            raise CovhubError("%s 当前没有实例连上来 —— 确认被测端挂的是 agent-opts 给的参数串 "
+                              "（covhub-agent 或 output=tcpclient），且能访问到 "
+                              "collect.advertiseAddress" % svc["name"])
         raise CovhubError("连不上 %s —— 确认服务在跑，且 agent 用的是 output=tcpserver"
                           % endpoint_label(svc))
     entry, _, _ = snapshot(cfg, svc, reset=False, kind="dump")

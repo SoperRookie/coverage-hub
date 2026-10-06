@@ -2,6 +2,9 @@
 # 服务配置不在这里 —— 它们在数据库里，用 covhub service add 登记，
 # 或者 covhub import 从旧的 targets.yaml 一次性导入。
 jacocoAgent: ./lib/jacocoagent.jar   # 被测端能看到的路径，容器场景写容器内路径
+covhubAgent: ./lib/covhub-agent.jar  # 同上，也是被测端路径。push 通道用它连 hub：hub 不在时被测
+                                     # JVM 照常启动，hub 重启后自己重连。删掉这一行则退回 JaCoCo
+                                     # 自带的 output=tcpclient（没有这两条保证）
 jacocoCli: ./lib/jacococli.jar
 dataDir: ./data
 
