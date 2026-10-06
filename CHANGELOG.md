@@ -1,5 +1,31 @@
 # 更新日志
 
+## v2.6.0（2026-10-06）
+
+**push 通道换上自带的薄 agent `covhub-agent.jar`：hub 不在时被测服务照常启动，hub 重启后自己重连。**
+JaCoCo 自带的 `output=tcpclient` 有两个改不了的行为 —— 启动时连不上收集端，agent 初始化抛异常，
+**被测 JVM 直接起不来**（hub 停机维护期间谁都发不了版）；连接断了之后**不再重连**，hub 一重启，
+所有 push 实例此后的覆盖率都取不到，直到被测服务各自重启。
+
+- 新增 `lib/covhub-agent.jar`（源码 `agent/`，一个类、零依赖、Java 8 字节码，`agent/build.sh` 构建，产物进
+  版本库）。它与 `jacocoagent.jar` **并列挂在被测 JVM 上**：JaCoCo 改用 `output=none` 只插桩，`covhub-agent`
+  在 daemon 线程里连 hub 的收集端，数据经 JaCoCo 的公开入口 `org.jacoco.agent.rt.RT` 取（只用反射，不绑定
+  JaCoCo 版本）。线上仍是 JaCoCo 的 remote control 协议 —— **收集端、exec 格式、JaCoCo 的 jar 都没改**。
+- 连不上就后台退避重试（1 秒起、30 秒封顶，只在第一次失败时打一行日志）；断了自己连回来；`idle` 秒没收到
+  hub 的指令也重连，兜住收不到 FIN 的断线（hub 掉电、NAT 回收空闲连接）。任何失败都只打 `[covhub-agent]`
+  前缀的日志，不影响被测应用。
+- 新配置项 `covhubAgent`（和 `jacocoAgent` 一样填**被测端**路径，`init` 的模板默认带）。配了它，push 服务的
+  `agent-opts` 就是**空格隔开的两个 `-javaagent`**，`excludes` 末尾自动追加 `covhub.agent.*` 与
+  `org.jacoco.agent.rt.*`（实测不排除的话这两个类会被插桩、混进 exec）。`idle` 按三轮 `watch.intervalSeconds`
+  给，不低于 180 秒。pull 通道不受影响。
+- 新增 `GET /api/covhub-agent.jar`、`covhub-client.sh fetch-covhub-agent [目标路径]`、groovy
+  `covhub.fetchCovhubAgent(dest:)`；`Jenkinsfile.deploy` 在参数串有两个 `-javaagent` 时把两个 jar 下到同一个目录。
+  K8s initContainer 片段改成下两个 jar。
+- **升级不强制**：没配 `covhubAgent` 的老配置原样生成 `output=tcpclient`，已经在跑的实例不受影响；hub 启动时
+  会提醒一行。要换上：`covhub.yaml` 加一行 `covhubAgent: <被测端路径>`，被测端 `fetch-covhub-agent`，
+  重新取 `agent-opts`，下次重启被测服务时生效。
+- 没做的：进程退出时主动推最后一段数据（仍靠 `predeploy` 在停服前结算）；class / 版本由 agent 自报。
+
 ## v2.5.0（2026-10-05）
 
 **diff 由 hub 比对两版源码生成，流水线不再在构建节点上算 git diff。** 原来构建节点要有
