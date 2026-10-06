@@ -5,6 +5,8 @@
 # 重跑这个脚本，hub 机器和被测机器都不需要 JDK。
 #
 # 依赖：JDK 9+（要 javac --release）。目标字节码是 Java 8，与 jacocoagent.jar 的下限一致。
+#
+# Windows 上没有 sh 的话用同目录的 build.cmd —— 两个脚本做的事完全一样，改一个记得改另一个。
 
 set -e
 

@@ -7,7 +7,7 @@ JaCoCo 自带的 `output=tcpclient` 有两个改不了的行为 —— 启动时
 **被测 JVM 直接起不来**（hub 停机维护期间谁都发不了版）；连接断了之后**不再重连**，hub 一重启，
 所有 push 实例此后的覆盖率都取不到，直到被测服务各自重启。
 
-- 新增 `lib/covhub-agent.jar`（源码 `agent/`，一个类、零依赖、Java 8 字节码，`agent/build.sh` 构建，产物进
+- 新增 `lib/covhub-agent.jar`（源码 `agent/`，一个类、零依赖、Java 8 字节码，`agent/build.sh` 或 Windows 下的 `agent\build.cmd` 构建，产物进
   版本库）。它与 `jacocoagent.jar` **并列挂在被测 JVM 上**：JaCoCo 改用 `output=none` 只插桩，`covhub-agent`
   在 daemon 线程里连 hub 的收集端，数据经 JaCoCo 的公开入口 `org.jacoco.agent.rt.RT` 取（只用反射，不绑定
   JaCoCo 版本）。线上仍是 JaCoCo 的 remote control 协议 —— **收集端、exec 格式、JaCoCo 的 jar 都没改**。

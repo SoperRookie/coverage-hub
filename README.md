@@ -590,7 +590,8 @@ data/
 - **性能开销通常在个位数百分比**，可用于测试环境常驻，但不建议长期挂在生产上。
 - **归档不会被覆盖。** 同名版本已有归档时会自动存成 `<版本>-2`。
 - **改前端要在开发机构建**：`cd web && npm ci && npm run build`，产物 `web/dist` 和源码一起提交；hub / nginx 机器不需要 Node。
-- **改 covhub-agent 也在开发机构建**：`sh agent/build.sh`（要 JDK 9+），产物 `lib/covhub-agent.jar` 和源码一起提交；
+- **改 covhub-agent 也在开发机构建**：`sh agent/build.sh`，Windows 上是 `agent\build.cmd`（都要 JDK 9+，两个脚本等价），
+  产物 `lib/covhub-agent.jar` 和源码一起提交；
   被测端要重新 `fetch-covhub-agent` 并重启服务才换上新的。它对 JaCoCo 只用反射，换 JaCoCo 版本不用重编。
 - **covhub-agent 不在进程退出时推数据。** 被测服务停掉前的最后一段覆盖率仍然只有 `predeploy` 能留下。
 - **覆盖率不是质量指标。** 它只说明代码被执行过，不说明断言是否有效。分支覆盖率通常比指令覆盖率更有参考价值。
