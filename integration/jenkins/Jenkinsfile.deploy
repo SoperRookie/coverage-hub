@@ -10,7 +10,7 @@
  *   2. copy            —— 取新版本的 class 产物压缩包
  *   3. deploy          —— 停旧实例、部署新版本、起新实例
  *   4. upload-classes  —— 产物传给 hub，并把配置指过去（retarget）
- *   5. verify          —— 确认 agent 就绪，并校验 class 指纹确实对得上
+ *   5. verify          —— 确认 agent 就绪 → 打一次基线快照 → 校验 class 指纹确实对得上
  *
  * 第 1 步一旦跑到停服之后，那段运行期覆盖率数据永久丢失 —— agent 随进程消失，
  * tcpserver 端口关闭，没有任何补救手段。
@@ -40,11 +40,11 @@ pipeline {
                description: '部署方式')
 
         // --- docker / compose 共用 ---
-        string(name: 'IMAGE',          defaultValue: 'myrepo/my-service:${NEW_VERSION}', description: 'docker / compose / k8s：镜像')
+        string(name: 'IMAGE',          defaultValue: 'myrepo/my-service', description: 'docker / compose / k8s：镜像；不带 tag 时自动加 :NEW_VERSION')
         string(name: 'CONTAINER_NAME', defaultValue: 'my-service', description: 'docker：容器名')
         string(name: 'APP_PORT',       defaultValue: '8080:8080',  description: 'docker：业务端口映射')
         string(name: 'AGENT_PORT',     defaultValue: '6300:6300',  description: 'docker / compose：agent 端口映射，必须映射出来否则连不上')
-        string(name: 'AGENT_LIB_DIR',  defaultValue: '', description: 'docker / compose：宿主机上 jacocoagent.jar 所在目录。留空则从 hub 下载到工作区')
+        string(name: 'AGENT_LIB_DIR',  defaultValue: '', description: 'docker / compose：宿主机上 jacocoagent.jar（push 通道还有 covhub-agent.jar）所在目录。留空则从 hub 下载到工作区')
 
         // --- compose ---
         string(name: 'COMPOSE_FILE',   defaultValue: 'docker-compose.yml', description: 'compose：主 compose 文件')
@@ -106,7 +106,7 @@ pipeline {
                     optional: false
                 )
                 // 压缩包原样留在工作区，第 4 步整个传给 hub。
-                // 本节点不再囤 class 产物 —— 要用的时候（第 6 步）从 hub 取回。
+                // 本节点不再囤 class 产物 —— 要用的时候用 covhub.fetchClasses 从 hub 取回。
                 sh "ls -l incoming/coverage-classes-${params.NEW_VERSION}.tar.gz"
             }
         }
@@ -128,8 +128,21 @@ pipeline {
                         covhub.fetchAgent(hub: env.COVHUB_URL,
                                           tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
                                           dest: "${WORKSPACE}/.covhub-lib/jacocoagent.jar")
+                        // push 通道且 hub 配了 covhubAgent 时参数串里有两个 -javaagent，
+                        // 第二个（连 hub、断线重连的薄 agent）也得在同一个目录里
+                        if (agentOpts.contains(' -javaagent:')) {
+                            covhub.fetchCovhubAgent(hub: env.COVHUB_URL,
+                                                    tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null,
+                                                    dest: "${WORKSPACE}/.covhub-lib/covhub-agent.jar")
+                        }
                         agentLibDir = "${WORKSPACE}/.covhub-lib"
                     }
+
+                    // 参数默认值里写 ${NEW_VERSION} 不会被 Jenkins 展开（它是字面量），
+                    // 所以镜像名不带 tag 时在这里补上；带了就按填的用。按最后一段判断，
+                    // 别被 registry 的端口号（registry:5000/x）骗了
+                    String image = params.IMAGE.tokenize('/')[-1].contains(':')
+                        ? params.IMAGE : "${params.IMAGE}:${params.NEW_VERSION}"
 
                     deployTarget.run(
                         mode:            params.DEPLOY_MODE,
@@ -138,7 +151,7 @@ pipeline {
                         version:         params.NEW_VERSION,
 
                         // docker
-                        image:          params.IMAGE,
+                        image:          image,
                         containerName:  params.CONTAINER_NAME,
                         appPort:        params.APP_PORT,
                         agentPort:      params.AGENT_PORT,
@@ -185,7 +198,7 @@ pipeline {
         stage('5 · 确认采集恢复并校验产物') {
             steps {
                 script {
-                    // 服务启动需要时间，给 agent 端口一点等待余量
+                    // 服务启动需要时间，给 agent 就绪（pull 是端口监听、push 是连回 hub）一点等待余量
                     timeout(time: 5, unit: 'MINUTES') {
                         waitUntil(initialRecurrencePeriod: 10000) {
                             return covhub.online(hub: env.COVHUB_URL,
@@ -215,8 +228,8 @@ pipeline {
 
     post {
         failure {
-            echo '''发版流水线失败。若失败发生在第 1 步之后、第 3 步之前，
-旧实例可能已停但覆盖率已结算 —— 归档数据是完整的，可在看板查看。'''
+            echo '''发版流水线失败。第 1 步成功后覆盖率已结算归档，数据完整，可在看板查看；
+若失败发生在第 3 步部署过程中或之后，旧实例可能已停，需人工确认服务状态。'''
         }
         always {
             script { covhub.status(hub: env.COVHUB_URL, tokenCredentialsId: env.COVHUB_TOKEN_ID ?: null) }

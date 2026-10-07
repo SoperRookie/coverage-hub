@@ -4,6 +4,7 @@
 """
 import json
 import os
+import shutil
 
 import pytest
 from fastapi.testclient import TestClient
@@ -177,6 +178,37 @@ def test_agent_opts_text_and_jar(hub):
     assert r.text.startswith("-javaagent:") and "sessionid=svc" in r.text
     r = hub.get("/api/agent.jar", headers=H)
     assert r.status_code == 200 and r.headers["content-type"] == "application/java-archive"
+    # 这个 hub 没配 covhubAgent：薄 agent 的下载是 404，并说清原因
+    r = hub.get("/api/covhub-agent.jar", headers=H)
+    assert r.status_code == 404 and "covhubAgent" in r.json()["error"]
+
+
+def test_push_with_covhub_agent(tmp_path, monkeypatch, db_url_for_app):
+    """配了 covhubAgent：push 服务的参数串是两个 -javaagent，薄 agent 能从 hub 下载。"""
+    cfg = {"jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
+           "covhubAgent": os.path.join(ROOT, "lib", "covhub-agent.jar"),
+           "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
+           "dataDir": str(tmp_path / "data"), "database": {"url": db_url_for_app},
+           "serve": {"token": "secret"},
+           "collect": {"advertiseAddress": "covhub.internal"}}
+    cfg_path = tmp_path / "covhub.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.delenv("COVHUB_TOKEN", raising=False)
+    monkeypatch.delenv("COVHUB_DATABASE_URL", raising=False)
+    with TestClient(create_app(str(cfg_path)), base_url="http://hub") as client:
+        assert client.get("/api/covhub-agent.jar").status_code == 401      # 和别的接口一样要令牌
+        r = client.get("/api/covhub-agent.jar", headers=H)
+        assert r.status_code == 200 and r.headers["content-type"] == "application/java-archive"
+        assert r.content[:2] == b"PK"
+        client.post("/api/services", headers=H, json={"name": "svc", "channel": "push"})
+        r = client.get("/api/agent-opts?service=svc&format=text", headers=H)
+        jacoco, thin = r.text.strip().split(" ")
+        assert "output=none" in jacoco and "sessionid=svc" in jacoco
+        assert thin.endswith("covhub-agent.jar=address=covhub.internal,port=6400,idle=900")
+        # pull 服务不受影响：仍是一个 -javaagent
+        client.post("/api/services", headers=H, json=dict(PULL, name="pulled"))
+        r = client.get("/api/agent-opts?service=pulled&format=text", headers=H)
+        assert " " not in r.text.strip() and "output=tcpserver" in r.text
 
 
 def test_services_crud(hub):
@@ -195,6 +227,17 @@ def test_services_crud(hub):
     assert hub.get("/api/services", headers=H).json()["services"][0]["channel"] == "push"
     assert hub.delete("/api/services/svc", headers=H).status_code == 200
     assert hub.get("/api/services/svc", headers=H).status_code == 404
+
+
+def test_export_matches_import_shape(hub):
+    hub.post("/api/projects", headers=H, json={"name": "shop", "title": "商城"})
+    hub.post("/api/services", headers=H, json=dict(PULL, project="shop"))
+    assert hub.get("/api/export").status_code == 401
+    r = hub.get("/api/export", headers=H)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["projects"] == [{"name": "shop", "title": "商城", "description": None}]
+    assert body["services"][0]["project"] == "shop" and "id" not in body["services"][0]
 
 
 def test_docs_page_is_open_and_self_hosted(hub):
@@ -288,6 +331,65 @@ def test_incremental_json_keeps_source_snippets(hub, tmp_path):
     s = hub.get("/api/services/svc/source?file=src/main/java/probe/Main.java&kind=unit", headers=H).json()
     assert s["sourceFound"] is True and [l["nr"] for l in s["lines"]] == [2, 3, 4, 5, 6]
     assert s["lines"][3]["status"] == "covered"
+
+
+def _src_tar(files):
+    import io
+    import tarfile
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, text in files.items():
+            data = text.encode("utf-8")
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tf.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+MAIN_SRC = "package probe;\n\nclass Main {\n\n    static void tick() { }\n}\n"
+
+
+def test_upload_sources_feeds_full_source_view_for_old_versions(hub, tmp_path):
+    """按版本传上来的源码：服务 retarget 到新版本之后，旧版本的新增代码仍能看整个文件。"""
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0"))
+    hub.post("/api/diff?service=svc&version=2.0&base=v1", headers=H, content=DIFF.encode())
+    hub.post("/api/unit-coverage?service=svc&version=2.0", headers=H, content=XML.encode())
+    blob = _src_tar({"src/main/java/probe/Main.java": MAIN_SRC,
+                     "src/main/resources/application.yml": "password: x\n"})
+    r = hub.post("/api/upload-sources?service=svc&version=2.0",
+                 headers={**H, "Content-Type": "application/x-www-form-urlencoded"}, content=blob)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["sources"]["files"] == 1 and body["sources"]["roots"] == ["src/main/java"]
+    assert body["matchesCurrentVersion"] is True and body["unit"]["pct"] == 100.0
+    assert not (tmp_path / "data" / "svc" / "sources" / "2.0" / "src" / "main" / "resources").exists()
+    # 有 diff 时顺手补上了片段
+    stored = json.loads((tmp_path / "data" / "svc" / "unit" / "2.0" / "incremental.json").read_text(encoding="utf-8"))
+    assert stored["files"]["src/main/java/probe/Main.java"]["snippets"]["5"] == "    static void tick() { }"
+
+    # 发了新版本：旧版本的源码视图照样按 2.0 的源码走，还能给全文
+    hub.post("/api/retarget?service=svc&version=3.0", headers=H)
+    s = hub.get("/api/services/svc/source?file=src/main/java/probe/Main.java&kind=unit", headers=H).json()
+    assert s["sourcePath"] == "sources/2.0" and s["sourceVersion"] == "2.0" and s["fullAvailable"] is True
+    assert [l["nr"] for l in s["lines"]] == [2, 3, 4, 5, 6]
+    s = hub.get("/api/services/svc/source?file=src/main/java/probe/Main.java&kind=unit&full=1", headers=H).json()
+    assert s["full"] is True and s["totalLines"] == 6 and [l["nr"] for l in s["lines"]] == [1, 2, 3, 4, 5, 6]
+    # 当前版本 3.0 还没传源码：详情页据此提示
+    assert hub.get("/api/services/svc/detail", headers=H).json()["runtime"]["sourcesUploaded"] is False
+
+    # 源码目录不经静态路径外发，换着写法也绕不过去
+    for path in ("/svc/sources/", "/svc/sources/2.0/src/main/java/probe/Main.java",
+                 "/svc//sources/2.0/", "/svc/current/../sources/2.0/"):
+        assert hub.get(path, headers=H).status_code == 404, path
+
+    # 坏输入：版本串、空正文、没有源码文件、不安全路径
+    assert hub.post("/api/upload-sources?service=svc&version=../x", headers=H, content=blob).status_code == 400
+    assert hub.post("/api/upload-sources?service=svc&version=2.0", headers=H).status_code == 400
+    r = hub.post("/api/upload-sources?service=svc&version=2.0", headers=H, content=_src_tar({"README.md": "x"}))
+    assert r.status_code == 400 and "一个源码文件" in r.json()["error"]
+    r = hub.post("/api/upload-sources?service=svc&version=2.0", headers=H, content=_src_tar({"../Evil.java": "x"}))
+    assert r.status_code == 400
+    assert hub.post("/api/upload-sources?service=nope&version=2.0", headers=H, content=blob).status_code == 404
 
 
 def test_overview_and_detail_shapes(hub):
@@ -448,3 +550,83 @@ def test_project_report(hub, tmp_path):
     assert [v["version"] for v in hub.get("/api/projects/shop/report?days=3650", headers=H).json()["services"][0]["versions"]] == ["1.9"]
     assert hub.get("/api/projects/nosuch/report", headers=H).status_code == 404
     assert hub.get("/api/projects/__unassigned/report", headers=H).json()["services"] == []
+
+
+# ---- hub 比对两版源码生成 diff ----
+
+V10 = {"src/main/java/probe/Main.java": "package probe;\n\nclass Main {\n    static void tick() { }\n}\n",
+       "src/main/java/probe/Old.java": "package probe;\n\nclass Old {\n    int a() { return 1; }\n    int b() { return 2; }\n"
+                                       "    int c() { return 3; }\n    int d() { return 4; }\n}\n"}
+V11 = {"src/main/java/probe/Main.java": "package probe;\n\nclass Main {\n    static void tick() { }\n    static void tock() { }\n}\n",
+       # Old → Moved：挪代码不算新代码，只有改掉的那一行算
+       "src/main/java/probe/Moved.java": "package probe;\n\nclass Moved {\n    int a() { return 1; }\n    int b() { return 2; }\n"
+                                         "    int c() { return 3; }\n    int d() { return 4; }\n}\n",
+       "src/main/java/probe/Fresh.java": "package probe;\n\nclass Fresh {\n}\n",
+       "src/test/java/probe/MainTest.java": "package probe;\nclass MainTest {}\n"}
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="hub 侧比对源码要 git")
+def test_upload_sources_generates_diff_on_hub(hub, tmp_path):
+    """源码按版本传上来之后，diff 由 hub 比对两棵源码树生成：构建节点不需要基线 commit 的历史。"""
+    hub.post("/api/services", headers=H, json=dict(PULL, version="1.0"))
+    # 第一次接入：还没有基线，源码照收，diff 为空并说明原因
+    r = hub.post("/api/upload-sources?service=svc&version=1.0", headers=H, content=_src_tar(V10))
+    assert r.status_code == 200, r.text
+    assert r.json()["diff"] is None and "基线" in r.json()["diffReason"]
+
+    # 第二版：基线 = 服务当前 version（1.0）
+    r = hub.post("/api/upload-sources?service=svc&version=1.1", headers=H, content=_src_tar(V11))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["diffReason"] is None
+    d = body["diff"]
+    assert d["origin"] == "sources" and d["base"] == "1.0" and d["head"] == "1.1" and d["version"] == "1.1"
+    # Main 加一行、Moved 改一行（类名）、Fresh 整个 4 行；.roots.json 与测试代码不算
+    assert d["files"] == 3 and d["addedLines"] == 6
+    lines = json.loads((tmp_path / "data" / "svc" / "diff" / "1.1.lines.json").read_text(encoding="utf-8"))
+    assert lines == {"src/main/java/probe/Main.java": [5], "src/main/java/probe/Moved.java": [3],
+                     "src/main/java/probe/Fresh.java": [1, 2, 3, 4]}
+    raw = (tmp_path / "data" / "svc" / "diff" / "1.1.diff").read_text(encoding="utf-8")
+    # 落盘的 diff 路径是仓库相对的（版本目录名已剥掉），和流水线传的同形
+    assert "--- a/src/main/java/probe/Main.java\n+++ b/src/main/java/probe/Main.java\n" in raw
+    assert "rename from src/main/java/probe/Old.java\nrename to src/main/java/probe/Moved.java\n" in raw
+    assert "1.0/" not in raw and "1.1/" not in raw and ".roots.json" not in raw
+
+    # 显式重做：指定基线
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources&base=1.0", headers=H)
+    assert r.status_code == 200, r.text
+    assert r.json()["baseReason"] == "调用方指定" and r.json()["diff"]["addedLines"] == 6
+    # 不给基线就自动定
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources", headers=H)
+    assert r.status_code == 200 and r.json()["baseReason"] == "服务当前 version"
+    # 基线没传过源码
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources&base=0.9", headers=H)
+    assert r.status_code == 400 and "0.9" in r.json()["error"]
+
+    # 流水线上传的 diff 优先：之后再传源码不会被自动生成的覆盖，但显式 from=sources 可以
+    hub.post("/api/diff?service=svc&version=1.1&base=abc123", headers=H, content=DIFF.encode())
+    r = hub.post("/api/upload-sources?service=svc&version=1.1", headers=H, content=_src_tar(V11))
+    assert r.json()["diff"]["origin"] == "upload" and "不覆盖" in r.json()["diffReason"]
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources", headers=H)
+    assert r.json()["diff"]["origin"] == "sources"
+
+    # 调用方要求不生成
+    r = hub.post("/api/upload-sources?service=svc&version=1.2&diff=skip", headers=H, content=_src_tar(V11))
+    assert r.status_code == 200 and r.json()["diff"] is None and "不生成" in r.json()["diffReason"]
+
+    # 坏参数：from / diff 的取值、上传 git diff 不给 base
+    assert hub.post("/api/diff?service=svc&version=1.1&from=git", headers=H).status_code == 400
+    assert hub.post("/api/upload-sources?service=svc&version=1.1&diff=maybe", headers=H, content=_src_tar(V11)).status_code == 400
+    r = hub.post("/api/diff?service=svc&version=1.1", headers=H, content=DIFF.encode())
+    assert r.status_code == 400 and "base" in r.json()["error"]
+
+
+@pytest.mark.skipif(not shutil.which("git"), reason="hub 侧比对源码要 git")
+def test_auto_diff_base_falls_back_to_last_uploaded_sources(hub):
+    """服务当前 version 没传过源码时，退到最近上传过源码的版本做基线。"""
+    hub.post("/api/services", headers=H, json=dict(PULL, version="9.9"))
+    hub.post("/api/upload-sources?service=svc&version=1.0", headers=H, content=_src_tar(V10))
+    r = hub.post("/api/upload-sources?service=svc&version=1.1", headers=H, content=_src_tar(V11))
+    assert r.status_code == 200 and r.json()["diff"]["base"] == "1.0"
+    r = hub.post("/api/diff?service=svc&version=1.1&from=sources", headers=H)
+    assert r.json()["baseReason"] == "最近上传过源码的版本"

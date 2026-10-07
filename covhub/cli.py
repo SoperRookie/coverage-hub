@@ -246,9 +246,23 @@ def cmd_unit_coverage(cfg, args):
 
 
 def cmd_diff(cfg, args):
+    if args.from_sources:
+        if args.file:
+            die("--from-sources 不接 diff 文件：hub 自己比对已上传的源码")
+        _print_service(ops.diff_from_sources(cfg, args.service, args.version, args.base))
+        return
+    if not args.file:
+        die("要么给 diff 文件（配 --base <commit>），要么 --from-sources 让 hub 比对源码")
+    if not args.base:
+        die("上传 git diff 需要 --base <基线的 commit / tag>")
     with open(args.file, encoding="utf-8", errors="replace") as f:
         text = f.read()
     _print_service(ops.push_diff(cfg, args.service, args.version, args.base, text, head=args.head))
+
+
+def cmd_upload_sources(cfg, args):
+    _print_service(ops.upload_sources(cfg, args.service, args.version, args.src,
+                                      diff="skip" if args.no_diff else "auto", base=args.base))
 
 
 def cmd_recompute(cfg, args):
@@ -258,6 +272,23 @@ def cmd_recompute(cfg, args):
 def cmd_import(cfg, args):
     ops.import_legacy(cfg, args.source or cfg["configPath"],
                       dry_run=args.dry_run, overwrite=args.overwrite)
+
+
+def cmd_export(cfg, args):
+    data = ops.export_config(cfg)
+    if args.json or (args.out and config_format(args.out) == "json"):
+        text = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    else:
+        import yaml
+        # 不排序键，name 在最前面才好读；PyYAML 会给 "1.4" 这种版本串自动加引号
+        text = "# covhub export：项目与服务配置，用 covhub import 本文件 导进另一个库。\n" + \
+            yaml.safe_dump(data, allow_unicode=True, sort_keys=False, default_flow_style=False)
+    if args.out:
+        with open(args.out, "w", encoding="utf-8", newline="\n") as f:
+            f.write(text)
+        log("已导出 %d 个项目、%d 个服务到 %s" % (len(data["projects"]), len(data["services"]), args.out))
+    else:
+        print(text, end="")
 
 
 def cmd_serve(cfg, args):
@@ -312,7 +343,7 @@ def main():
     p.add_argument("--json", action="store_true",
                    help="生成 covhub.json（默认生成 YAML，YAML 需要 PyYAML）")
 
-    p = sub.add_parser("agent-opts", help="打印启动时应注入的 -javaagent 参数")
+    p = sub.add_parser("agent-opts", help="打印启动时应注入的 -javaagent 参数（push 通道可能是空格隔开的两个）")
     p.add_argument("service")
 
     p = sub.add_parser("status", help="查看目标连通性与最新覆盖率")
@@ -366,12 +397,24 @@ def main():
     p.add_argument("xml", help="jacoco.xml 路径（jacoco-aggregate 的也行）")
     p.add_argument("--group", help="聚合报告里只取这个模块（<group name=artifactId>）")
 
-    p = sub.add_parser("diff", help="收一份 git diff，用于算新增代码的覆盖率")
+    p = sub.add_parser("diff", help="某版本的 diff（新增代码覆盖率的依据）：hub 比对两版源码生成，或收流水线的 git diff")
+    p.add_argument("service")
+    # version 不能像 unit-coverage 那样可选：后面的 file 也是可选位置参数，省掉 version 时
+    # argparse 会把文件名当版本、再报「没给 diff 文件」
+    p.add_argument("version", help="版本标识（和 upload-sources / predeploy 用的一致）")
+    p.add_argument("file", nargs="?", help="git diff 输出文件（--from-sources 时不给）")
+    p.add_argument("--from-sources", action="store_true",
+                   help="由 hub 比对该版本与基线版本经 upload-sources 传上来的源码生成，不需要 diff 文件")
+    p.add_argument("--base", help="基线：上传 git diff 时是上一版的 commit / tag；--from-sources 时是基线的版本标识，"
+                                  "缺省自动定（服务当前 version → 最近结算的版本 → 最近上传过源码的版本）")
+    p.add_argument("--head", help="本次的 commit（上传 git diff 时）")
+
+    p = sub.add_parser("upload-sources", help="收一份某版本的源码（报告下钻到行、新增代码看源码），并顺带生成这一版的 diff")
     p.add_argument("service")
     p.add_argument("version", nargs="?", help="版本标识，缺省取服务当前 version")
-    p.add_argument("file", help="git diff 输出文件")
-    p.add_argument("--base", required=True, help="基线（上一版的 commit / tag）")
-    p.add_argument("--head", help="本次的 commit")
+    p.add_argument("src", help="源码压缩包（tar.gz / zip），或一个源码目录（如 hub 上 checkout 的仓库）")
+    p.add_argument("--base", help="生成 diff 时的基线版本标识，缺省自动定")
+    p.add_argument("--no-diff", action="store_true", help="只存源码，不生成 diff")
 
     p = sub.add_parser("recompute", help="按已有 diff 重算某版本的新增代码覆盖")
     p.add_argument("service")
@@ -395,10 +438,14 @@ def main():
     q.add_argument("name")
     q.add_argument("--yes", action="store_true")
 
-    p = sub.add_parser("import", help="把旧 targets.yaml 里的 services 导入数据库")
-    p.add_argument("source", nargs="?", help="旧配置文件路径，缺省用 -c 指向的那个")
+    p = sub.add_parser("import", help="把配置文件里的 projects / services 导入数据库（旧 targets.yaml 或 export 的输出）")
+    p.add_argument("source", nargs="?", help="配置文件路径，缺省用 -c 指向的那个")
     p.add_argument("--dry-run", action="store_true", help="只报告会做什么，不写库")
-    p.add_argument("--overwrite", action="store_true", help="同名服务已存在时覆盖")
+    p.add_argument("--overwrite", action="store_true", help="同名项目 / 服务已存在时覆盖")
+
+    p = sub.add_parser("export", help="把库里的项目与服务配置导出成 import 能吃的文件（换库、备份用）")
+    p.add_argument("--out", metavar="FILE", help="写到文件（按扩展名选 YAML / JSON），不给则打到 stdout")
+    p.add_argument("--json", action="store_true", help="输出 JSON 而不是 YAML")
 
     p = sub.add_parser("db", help="数据库结构维护")
     sp = p.add_subparsers(dest="action", required=True)
@@ -436,21 +483,20 @@ def main():
             cfg = load_runtime(args.config)
     except CovhubError as exc:
         die(str(exc))
-    needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": (), "service": (),
-             "project": (), "import": (), "db": (), "openapi": (), "unit-coverage": (),
-             "diff": (), "recompute": ()}.get(
-        args.cmd, ("jacocoCli", "jacocoAgent"))
-    for key in needs:
-        if not os.path.isfile(cfg.get(key, "")):
-            die("配置项 %s 指向的文件不存在：%s" % (key, cfg.get(key)))
+    # 只有要起 java 出报告的命令才检查 jacocoCli。jacocoAgent / covhubAgent 填的是**被测端**路径，
+    # 只用来拼参数串，hub 本机读它们只在 /api/agent.jar 下载时 —— 这里不检查，否则按文档把它改成
+    # 容器内路径后 serve / dump 都起不来
+    if args.cmd in ("dump", "predeploy", "report", "diagnose", "watch", "serve") \
+            and not os.path.isfile(cfg.get("jacocoCli", "")):
+        die("配置项 jacocoCli 指向的文件不存在：%s" % cfg.get("jacocoCli"))
     os.makedirs(cfg["dataDir"], exist_ok=True)
 
     handlers = {
         "agent-opts": cmd_agent_opts, "status": cmd_status, "dump": cmd_dump,
         "predeploy": cmd_predeploy, "report": cmd_report, "retarget": cmd_retarget,
         "diagnose": cmd_diagnose, "service": cmd_service, "project": cmd_project,
-        "import": cmd_import, "db": cmd_db, "unit-coverage": cmd_unit_coverage,
-        "diff": cmd_diff, "recompute": cmd_recompute,
+        "import": cmd_import, "export": cmd_export, "db": cmd_db, "unit-coverage": cmd_unit_coverage,
+        "diff": cmd_diff, "recompute": cmd_recompute, "upload-sources": cmd_upload_sources,
         "openapi": cmd_openapi, "watch": cmd_watch, "serve": cmd_serve,
     }
     try:

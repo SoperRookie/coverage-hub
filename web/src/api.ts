@@ -142,6 +142,12 @@ export interface SourceView {
   reportFile: string;
   sourceFound: boolean;
   sourcePath: string | null;
+  /** 取的是哪一版的源码（incremental.json 里记的版本） */
+  sourceVersion: string | null;
+  /** 该版本传过源码时才有全文；只有片段时为 false */
+  fullAvailable: boolean;
+  full: boolean;
+  totalLines: number | null;
   covered: number;
   total: number;
   added: number;
@@ -196,6 +202,8 @@ export interface Detail extends StatusFields {
     breaks: BreakRow[];
     instances: { peer: string; since: string; last: string | null }[];
     incremental: IncView | null;
+    /** 这一版的源码传上来没有（upload-sources） */
+    sourcesUploaded: boolean;
     reportUrl: string | null;
     xmlUrl: string;
   };
@@ -292,8 +300,8 @@ export const api = {
   detail: (name: string, version?: string | null) =>
     request<Detail>(`/api/services/${enc(name)}/detail${version ? `?version=${enc(version)}` : ""}`),
   health: () => request<{ ok: boolean; version: string }>("/api/health"),
-  source: (name: string, kind: "runtime" | "unit", file: string, version?: string | null) =>
-    request<SourceView>(`/api/services/${enc(name)}/source?kind=${kind}&file=${enc(file)}${version ? `&version=${enc(version)}` : ""}`),
+  source: (name: string, kind: "runtime" | "unit", file: string, version?: string | null, full = false) =>
+    request<SourceView>(`/api/services/${enc(name)}/source?kind=${kind}&file=${enc(file)}${version ? `&version=${enc(version)}` : ""}${full ? "&full=1" : ""}`),
   /** 手动触发：拉一次快照并出报告（累加，不清零） */
   dump: (name: string) => command(`/api/dump?service=${enc(name)}`),
   /** 手动触发：结算当前周期并归档（dump --reset + 归档 + 终版报告） */

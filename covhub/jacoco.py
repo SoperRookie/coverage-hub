@@ -10,6 +10,7 @@ import tempfile
 
 from .layout import svc_dir
 from .logbuf import log
+from .sources import source_roots
 
 COUNTERS = ["INSTRUCTION", "BRANCH", "LINE", "COMPLEXITY", "METHOD"]
 
@@ -233,8 +234,12 @@ def do_dump(cfg, svc, dest, reset=False):
     return dest
 
 
-def make_report(cfg, svc, execfiles, out_dir, name):
-    """生成 HTML + XML + CSV。XML 是看板与新增覆盖计算读的那份。"""
+def make_report(cfg, svc, execfiles, out_dir, name, version=None):
+    """生成 HTML + XML + CSV。XML 是看板与新增覆盖计算读的那份。
+
+    源码按版本取：跑着的代码以 retarget 过的 svc.version 为准，没配才用调用方给的版本。
+    HTML 生成时就把源码内嵌进 *.java.html，归档之后不再依赖源码目录。
+    """
     classfiles = prepare_classfiles(cfg, svc)
     shutil.rmtree(out_dir, ignore_errors=True)
     os.makedirs(out_dir, exist_ok=True)
@@ -242,7 +247,7 @@ def make_report(cfg, svc, execfiles, out_dir, name):
     tail = []
     for path in classfiles:
         tail += ["--classfiles", path]
-    for path in svc.get("sourcefiles", []):
+    for path in source_roots(cfg, svc, svc.get("version") or version):
         tail += ["--sourcefiles", path]
     tail += [
         "--html", os.path.join(out_dir, "html"),

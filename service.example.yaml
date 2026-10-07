@@ -13,7 +13,7 @@ excludes: []
 classDumpDir: /tmp/covhub-classes/example-service   # 被测端路径
 classfiles:                  # 出报告用的 class（hub 上的路径），必须与运行中的服务同一份产物
   - ./data/example-service/artifacts/1.0.0
-sourcefiles: []              # 可选，配了才能在报告里下钻到源码行
+sourcefiles: []              # 可选，hub 本机源码目录；只在该版本没 upload-sources 时兜底，且只对当前 version 生效
 reportExcludes:              # 只影响报告口径，随时可改重出报告
   - com/example/**/dto/**
 sourceEncoding: UTF-8

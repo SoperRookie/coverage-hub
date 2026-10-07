@@ -21,7 +21,7 @@
  *      跑在 hub 那台机器上。此时节点需要 Python 3、java、covhub.py 与配置文件。
  *      home    covhub 安装目录，默认 /opt/coverage-hub
  *      config  配置文件路径，不传则由 covhub 在 <home> 下自行探测
- *              （targets.yaml → targets.yml → targets.json）
+ *              （covhub.yaml → covhub.yml → covhub.json → targets.yaml → targets.yml → targets.json）
  *      python  python 可执行文件，默认 python3
  *
  * 没传 hub 也没设 COVHUB_URL 时自动落到本地模式。
@@ -41,7 +41,7 @@ private String hubUrl(Map args) {
 private String cli(Map args) {
     String home = args.home ?: '/opt/coverage-hub'
     String python = args.python ?: 'python3'
-    // 不传 config 就不加 -c，交给 covhub 在工作目录里按 yaml → yml → json 探测
+    // 不传 config 就不加 -c，交给 covhub 在工作目录里按 covhub.yaml → yml → json → targets.* 探测
     String opt = args.config ? " -c ${args.config}" : ''
     return "cd ${home} && ${python} ${home}/covhub.py${opt}"
 }
@@ -80,7 +80,7 @@ private String enc(Object value) {
 
 /**
  * 把一个文件作为原始正文 POST 给 hub（--data-binary；-d 会吃掉换行，diff 就废了）。
- * uploadClasses / pushUnitCoverage / pushDiff 共用。failOnError=false 时非 2xx 只警告，
+ * uploadClasses / uploadSources / pushUnitCoverage / pushDiff 共用。failOnError=false 时非 2xx 只警告，
  * 返回 null。
  */
 private String httpUpload(Map args, String path, String file, String what, boolean failOnError) {
@@ -306,30 +306,92 @@ String pushUnitCoverage(Map args) {
 }
 
 /**
- * 把 git diff 传给 hub，之后每次采集都能算出「本版本新增代码」的覆盖率。
- *   service / services、version 同上
- *   base      基线：上一版的 commit / tag（建议 git rev-parse 后的 SHA）
- *   head      可选，本次的 commit
- *   file      diff 文件。推荐生成命令：
+ * 这一版的 diff，之后每次采集都能算出「本版本新增代码」的覆盖率。两种来源：
+ *
+ *   fromSources: true   hub 比对该版本与基线版本经 uploadSources 传上来的源码（推荐；
+ *                       uploadSources 默认已经做了，这里用于指定基线或重做）。
+ *                       base 可选，是基线的**版本标识**，不给由 hub 自动定。
+ *   file                流水线自己算的 git diff；base 必填，是上一版的 commit / tag
+ *                       （建议 git rev-parse 后的 SHA），head 可选。推荐生成命令：
  *             git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 \
  *                 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt' > covhub.diff
- *   failOnError  默认 false
+ *
+ *   service / services、version 同上；failOnError 默认 false
  */
 String pushDiff(Map args) {
     assert (args.service || args.services) : 'pushDiff 需要 service'
     assert args.version : 'pushDiff 需要 version'
-    assert args.base : 'pushDiff 需要 base（基线的 commit / tag）'
-    assert args.file : 'pushDiff 需要 file（diff 文件路径）'
     assert hubUrl(args) : 'pushDiff 需要 hub（或环境变量 COVHUB_URL）'
     String qs = (args.services ? "services=${enc(args.services)}" : "service=${enc(args.service)}") +
-                "&version=${enc(args.version)}&base=${enc(args.base)}"
+                "&version=${enc(args.version)}"
+    if (args.fromSources) {
+        if (args.base) { qs += "&base=${enc(args.base)}" }
+        try {
+            String out = http(args, 'POST', "/api/diff?${qs}&from=sources")
+            echo out
+            return out
+        } catch (err) {
+            if (args.failOnError) { throw err }
+            echo "[covhub] 生成 diff 失败（不阻断构建）：${err}"
+            return null
+        }
+    }
+    assert args.base : 'pushDiff 需要 base（基线的 commit / tag）'
+    assert args.file : 'pushDiff 需要 file（diff 文件路径）'
+    qs += "&base=${enc(args.base)}"
     if (args.head) { qs += "&head=${enc(args.head)}" }
     return httpUpload(args, "/api/diff?${qs}", args.file as String, '推送 git diff',
                       args.failOnError ? true : false)
 }
 
 /**
- * 问 hub「上一版是谁」：最近结算的版本及其 diff 的 head，流水线用它定 git diff 的基线。
+ * 按版本把源码传给 hub：JaCoCo 报告下钻到行、看板「新增代码」看整个文件都靠它，
+ * hub 上不用 checkout 源码，历史版本也对得上。存好之后 hub 顺带比对基线版本的源码生成
+ * 这一版的 diff（新增代码覆盖率的依据）—— 构建节点不需要 git 历史，浅克隆、清过的
+ * 工作区都无所谓。
+ *   service / services、version 同上
+ *   archive   可选，现成的源码包（tar.gz / zip，比如 *-sources.jar 以外自己打的）。
+ *             不给就在当前工作区的 git 仓库里现打：受版本控制的 .java/.kt/.groovy/.scala，
+ *             去掉 src/test/，路径相对仓库根
+ *   base      可选，生成 diff 的基线版本标识；不给由 hub 自动定
+ *             （服务当前 version → 最近结算的版本 → 最近上传过源码的版本）
+ *   diff      可选，'skip' 则只存源码不生成 diff
+ *   failOnError  默认 false：hub 停机不该卡住所有构建，下次构建还会有
+ * hub 那边只收源码文件，配置文件之类即便混进包里也不落盘。
+ */
+String uploadSources(Map args) {
+    assert (args.service || args.services) : 'uploadSources 需要 service'
+    assert args.version : 'uploadSources 需要 version'
+    assert hubUrl(args) : 'uploadSources 需要 hub（或环境变量 COVHUB_URL）'
+    String archive = args.archive as String
+    if (!archive) {
+        archive = '.covhub-sources.tar.gz'
+        sh '''
+            set -e
+            top=$(git rev-parse --show-toplevel)
+            git -C "$top" -c core.quotepath=false ls-files -- '*.java' '*.kt' '*.groovy' '*.scala' \\
+                | grep -v -e '^src/test/' -e '/src/test/' > .covhub-sources.lst || true
+            [ -s .covhub-sources.lst ] || { echo "[covhub] 仓库里没有受版本控制的源码文件" >&2; exit 1; }
+            tar czf .covhub-sources.tar.gz -C "$top" -T .covhub-sources.lst
+            echo "[covhub] 打包 $(wc -l < .covhub-sources.lst | tr -d ' ') 个源码文件"
+            rm -f .covhub-sources.lst
+        '''
+    }
+    String qs = (args.services ? "services=${enc(args.services)}" : "service=${enc(args.service)}") +
+                "&version=${enc(args.version)}"
+    if (args.base) { qs += "&base=${enc(args.base)}" }
+    if (args.diff) { qs += "&diff=${enc(args.diff)}" }
+    try {
+        return httpUpload(args, "/api/upload-sources?${qs}", archive, '上传源码',
+                          args.failOnError ? true : false)
+    } finally {
+        if (!args.archive) { sh 'rm -f .covhub-sources.tar.gz' }
+    }
+}
+
+/**
+ * 问 hub「上一版是谁」：最近结算的版本及其 diff 的 head，流水线自己算 git diff 时用它定基线。
+ * 让 hub 比对源码生成 diff（uploadSources 的默认行为）的话用不着。
  * 返回 Map（latest 为 null 表示还没结算过任何版本）。
  */
 Map lastVersion(Map args) {
@@ -348,9 +410,26 @@ Map lastVersion(Map args) {
 String fetchAgent(Map args) {
     String dest = args.dest ?: "${pwd()}/jacocoagent.jar"
     assert hubUrl(args) : 'fetchAgent 需要 hub（或环境变量 COVHUB_URL）'
+    return fetchJar(args, '/api/agent.jar', dest)
+}
+
+/**
+ * 从 hub 下载 covhub-agent.jar 到本节点。
+ *
+ * push 通道的薄 agent：与 jacocoagent.jar 并列挂在被测 JVM 上，负责连 hub、断线重连。
+ * 只有 agentOpts() 返回的参数串里有两个 -javaagent 时才需要它（hub 配了 covhubAgent 的 push 服务），
+ * 放到与 jacocoagent.jar 相同的目录即可（hub 配置里两项通常同目录）。
+ */
+String fetchCovhubAgent(Map args) {
+    String dest = args.dest ?: "${pwd()}/covhub-agent.jar"
+    assert hubUrl(args) : 'fetchCovhubAgent 需要 hub（或环境变量 COVHUB_URL）'
+    return fetchJar(args, '/api/covhub-agent.jar', dest)
+}
+
+private String fetchJar(Map args, String path, String dest) {
     String script = """
         set -e
-        curl -sSf -H "X-Covhub-Token: \${COVHUB_TOKEN:-}" -o '${dest}' '${hubUrl(args)}/api/agent.jar'
+        curl -sSf -H "X-Covhub-Token: \${COVHUB_TOKEN:-}" -o '${dest}' '${hubUrl(args)}${path}'
     """
     if (args.tokenCredentialsId) {
         withCredentials([string(credentialsId: args.tokenCredentialsId, variable: 'COVHUB_TOKEN')]) {
@@ -359,7 +438,7 @@ String fetchAgent(Map args) {
     } else {
         sh script
     }
-    echo "[covhub] agent 已下载到 ${dest}"
+    echo "[covhub] ${path} 已下载到 ${dest}"
     return dest
 }
 
@@ -402,18 +481,26 @@ String fetchClasses(Map args) {
 
 /**
  * 从 hub 下载某个已结算版本的 jacoco.xml（给别的工具消费）。
- * hub 的看板本身就是静态文件服务，报告直接按路径取。
+ * jacoco.xml 在 hub 的报告目录（dataDir）里，按路径直接取；该目录和 /api/* 一样受令牌门禁，
+ * 所以和 fetchJar 一样带 X-Covhub-Token（tokenCredentialsId 或环境变量 COVHUB_TOKEN）。
  */
 String fetchReport(Map args) {
     assert args.service : 'fetchReport 需要 service'
     assert args.version : 'fetchReport 需要 version'
     String dest = args.dest ?: "${pwd()}/jacoco-runtime.xml"
     assert hubUrl(args) : 'fetchReport 需要 hub（或环境变量 COVHUB_URL）'
-    sh """
+    String script = """
         set -e
-        curl -sSf -o '${dest}' \\
+        curl -sSf -H "X-Covhub-Token: \${COVHUB_TOKEN:-}" -o '${dest}' \\
              '${hubUrl(args)}/${enc(args.service)}/versions/${enc(args.version)}/jacoco.xml'
     """
+    if (args.tokenCredentialsId) {
+        withCredentials([string(credentialsId: args.tokenCredentialsId, variable: 'COVHUB_TOKEN')]) {
+            sh script
+        }
+    } else {
+        sh script
+    }
     echo "[covhub] ${args.service} ${args.version} 的报告已下载到 ${dest}"
     return dest
 }

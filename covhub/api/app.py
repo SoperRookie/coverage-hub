@@ -88,6 +88,11 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
             collector.start(int(collect["port"]), collect.get("bindAddress", "0.0.0.0"))
             if not with_watch:
                 log("  ! 收集端已起，但没带 --with-watch —— 连上来的实例不会被定时取数")
+            if not cfg.get("covhubAgent"):
+                # 升级上来的老配置没有这一项：不报错，但这次重启断掉的实例不会回来，得有人知道
+                log("  ! 未配置 covhubAgent：push 服务挂的是 JaCoCo 自带的 output=tcpclient，"
+                    "hub 一重启它们就不再连回来（要等被测服务重启）。配上 covhubAgent 后"
+                    "重新取 agent-opts 即可")
 
         stop = threading.Event()
         if with_watch:

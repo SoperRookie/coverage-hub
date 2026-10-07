@@ -15,6 +15,7 @@ from .config import find_service
 from .db import repo
 from .errors import CovhubError
 from .layout import safe_segment, svc_dir
+from .sources import find_source, sources_dir
 
 
 def _age_seconds(iso):
@@ -143,11 +144,13 @@ def service_detail(cfg, name, version=None):
         viewing = archived
         latest = archived
         runtime_inc = build.read_incremental(cfg, svc, "versions/%s" % archived["dir"])
+        runtime_version = archived["version"]
         report_dir = "%s/versions/%s" % (base, archived["dir"])
         has_report = os.path.isfile(os.path.join(svc_dir(cfg, svc), "versions", archived["dir"], "html", "index.html"))
         unit = repo.unit_report(name, archived["version"])
     else:
         runtime_inc = build.read_incremental(cfg, svc, "current")
+        runtime_version = svc.get("version")
         report_dir = "%s/current" % base
         has_report = row["hasReport"]
         unit = repo.latest_unit_report(name)
@@ -173,6 +176,8 @@ def service_detail(cfg, name, version=None):
                          for a in reversed(repo.versions(name, 100, sealed_by=None))],
             "instances": collector_instances(name) if row["channel"] == "push" else [],
             "incremental": _files_view(runtime_inc),
+            # 这一版的源码传上来没有：没有的话报告只到方法级，新增代码只能看存下的片段
+            "sourcesUploaded": sources_dir(cfg, svc, runtime_version) is not None,
             "reportUrl": "%s/html/index.html" % report_dir if has_report else None,
             "xmlUrl": "%s/jacoco.xml" % report_dir,
         },
@@ -231,11 +236,12 @@ def _recompute_entry(cfg, svc, where, version, path):
     return fresh.get("files", {}).get(path)
 
 
-def incremental_source(cfg, name, kind, path, context=3, version=None):
-    """某个文件的新增代码源码视图：新增行标覆盖状态，前后带 context 行上下文。
+def incremental_source(cfg, name, kind, path, context=3, version=None, full=False):
+    """某个文件的新增代码源码视图：新增行标覆盖状态，前后带 context 行上下文（full 时给全文）。
 
-    源码优先用算增量时存进 incremental.json 的片段（历史版本靠它，不依赖当时的源码目录
-    还在）；没有片段再从服务的 sourcefiles 里找；都没有就只返回行号与状态。
+    源码优先用流水线按版本传上来的整份文件；没有再用算增量时存进 incremental.json 的
+    片段（稀疏，只有新增行附近几行，全文模式也只能给这些）；再没有才去当前配置的
+    sourcefiles 里找（只对当前版本可信）；都没有就只返回行号与状态。
     """
     svc = find_service(cfg, name)
     where = "current"
@@ -262,24 +268,20 @@ def incremental_source(cfg, name, kind, path, context=3, version=None):
     added = set(entry.get("added") or [])
     hits, missed = set(entry.get("hit") or []), set(entry.get("missed") or [])
 
+    src_version = result.get("version")
     text_lines, source_path = None, None
+    if sources_dir(cfg, svc, src_version):
+        text_lines, source_path = find_source(cfg, svc, src_version, path, report_file)
     snippets = entry.get("snippets")
-    if snippets:
+    if text_lines is None and snippets:
         # 片段是稀疏的 {行号: 文本}；铺成按行号索引的列表，缺的行留 None
         max_nr = max(int(k) for k in snippets)
         text_lines = [None] * max_nr
         for k, v in snippets.items():
             text_lines[int(k) - 1] = v
         source_path = "incremental.json"
-    else:
-        candidates = [os.path.join(root, report_file) for root in svc.get("sourcefiles", [])]
-        candidates.append(os.path.join(cfg.get("baseDir", ""), path))
-        for cand in candidates:
-            if os.path.isfile(cand):
-                with open(cand, encoding=svc.get("sourceEncoding", "UTF-8"), errors="replace") as f:
-                    text_lines = f.read().splitlines()
-                source_path = cand
-                break
+    if text_lines is None:
+        text_lines, source_path = find_source(cfg, svc, src_version, path, report_file)
 
     def status(nr):
         if nr not in added:
@@ -292,11 +294,14 @@ def incremental_source(cfg, name, kind, path, context=3, version=None):
 
     lines = []
     if text_lines is not None:
-        wanted = set()
-        for nr in added:
-            for k in range(nr - context, nr + context + 1):
-                if 1 <= k <= len(text_lines):
-                    wanted.add(k)
+        if full:
+            wanted = set(range(1, len(text_lines) + 1))
+        else:
+            wanted = set()
+            for nr in added:
+                for k in range(nr - context, nr + context + 1):
+                    if 1 <= k <= len(text_lines):
+                        wanted.add(k)
         prev = 0
         for nr in sorted(wanted):
             if text_lines[nr - 1] is None:
@@ -309,6 +314,7 @@ def incremental_source(cfg, name, kind, path, context=3, version=None):
         for nr in sorted(added):
             lines.append({"nr": nr, "text": None, "status": status(nr)})
 
+    whole = text_lines is not None and source_path != "incremental.json"
     base = "/%s" % name
     if kind != "runtime":
         report_dir = None
@@ -319,6 +325,9 @@ def incremental_source(cfg, name, kind, path, context=3, version=None):
     return {
         "service": name, "kind": kind, "path": path, "reportFile": report_file,
         "sourceFound": text_lines is not None, "sourcePath": source_path,
+        # 片段是稀疏的，全文拿不到：前端据此决定给不给「展开全文」
+        "sourceVersion": src_version, "fullAvailable": whole, "full": bool(full and whole),
+        "totalLines": len(text_lines) if whole else None,
         "covered": entry["covered"], "total": entry["total"], "added": len(added),
         "lines": lines,
         "reportUrl": ("%s/%s" % (report_dir, _report_page(report_file))) if report_dir else None,

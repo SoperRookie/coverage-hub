@@ -7,14 +7,22 @@ import { api, type SourceView } from "../api";
 const props = defineProps<{ service: string; kind: "runtime" | "unit"; file: string; version?: string | null; onError: (err: unknown) => boolean }>();
 const view = ref<SourceView | null>(null);
 const error = ref("");
+const loading = ref(false);
 
-onMounted(async () => {
+// full：整个文件（该版本传过源码才有）；否则只看新增行前后几行
+async function load(full: boolean) {
+  loading.value = true;
   try {
-    view.value = await api.source(props.service, props.kind, props.file, props.version);
+    view.value = await api.source(props.service, props.kind, props.file, props.version, full);
+    error.value = "";
   } catch (err) {
     if (!props.onError(err)) error.value = err instanceof Error ? err.message : String(err);
+  } finally {
+    loading.value = false;
   }
-});
+}
+
+onMounted(() => load(false));
 </script>
 
 <template>
@@ -28,10 +36,16 @@ onMounted(async () => {
       <span class="legend"><i class="sw missed"></i>未执行</span>
       <span class="legend"><i class="sw nocode"></i>无探针（空行 / 注释 / 声明）</span>
       <span class="spacer"></span>
-      <a v-if="view.reportUrl" class="plain" :href="view.reportUrl" target="_blank">在 JaCoCo 报告里看整个文件</a>
+      <a v-if="view.fullAvailable" href="#" class="plain" :class="{ busy: loading }" @click.prevent="!loading && load(!view.full)">
+        {{ view.full ? "只看新增" : `展开全文（${view.totalLines} 行）` }}
+      </a>
+      <a v-if="view.reportUrl" class="plain" :href="view.reportUrl" target="_blank">在 JaCoCo 报告里看</a>
     </div>
-    <div v-if="!view.sourceFound" class="muted" style="margin: 6px 0">
-      hub 上找不到这个文件的源码（服务没配 <code>sourcefiles</code>，或这份归档早于 hub 开始保存源码片段），只列行号：
+    <div v-if="!view.sourceFound" class="muted note">
+      hub 上没有 {{ view.sourceVersion || "这一版" }} 的源码：构建流水线没跑 <code>upload-sources</code>，或这份归档早于 hub 开始保存源码。只列行号：
+    </div>
+    <div v-else-if="!view.fullAvailable" class="muted note">
+      只有结算时存下的新增行附近片段 —— {{ view.sourceVersion || "这一版" }} 没传过源码（<code>upload-sources</code>），看不了全文。
     </div>
     <table class="code">
       <tbody>
@@ -49,6 +63,8 @@ onMounted(async () => {
 .src { border: 1px solid var(--line); border-radius: 6px; overflow: hidden; margin: 4px 0 8px; }
 .src-head { display: flex; align-items: center; gap: 12px; padding: 6px 10px; background: var(--surface-2); border-bottom: 1px solid var(--line); font-size: 12px; }
 .src-head .spacer { flex: 1; }
+.src-head a.busy { opacity: 0.5; cursor: default; }
+.note { margin: 6px 10px; font-size: 12px; }
 .sw { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
 .sw.covered { background: var(--src-covered-strong); }
 .sw.missed { background: var(--src-missed-strong); }

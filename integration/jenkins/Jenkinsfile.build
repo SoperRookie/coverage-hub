@@ -7,13 +7,14 @@
  * 做四件事：
  *   1. 跑测试并产出各模块 jacoco.exec
  *   2. 由聚合模块产出 jacoco-aggregate/jacoco.xml
- *   3. 把 jacoco.xml 和 git diff 推给 hub —— 看板上「单测覆盖率」与「新增代码
- *      覆盖率」两列就来自这里（hub 停机时只警告，不卡构建）
+ *   3. 把 jacoco.xml 和源码推给 hub（diff 由 hub 比对两版源码生成）—— 看板上「单测覆盖率」
+ *      与「新增代码覆盖率」两列就来自这里（hub 停机时只警告，不卡构建）
  *   4. 归档 class 产物（可选，见下）
  *
  * 【前置】被测项目已加入 integration/maven-aggregate-module 那个聚合模块 ——
- * 这要改研发的 pom。不能改的话这整条流水线都用不上，运行期覆盖率不依赖它，
- * 直接看 Jenkinsfile.deploy 即可。
+ * 这要改研发的 pom。不能改的话删掉 Coverage Report 阶段和 pushUnitCoverage 那一行，
+ * uploadSources（源码 + diff）不依赖聚合模块，照样能用；运行期覆盖率也不依赖它，
+ * 见 Jenkinsfile.deploy。
  *
  * 【归档那一步现在是可选的】v1.1.0 起 class 由 agent 的 classDumpDir 在运行期
  * 自己交出，与 exec 的指纹必然匹配。构建期归档保留下来只是给「愿意改构建、
@@ -35,8 +36,8 @@ pipeline {
         COVHUB_URL      = 'http://covhub.internal:8900'
         COVHUB_SERVICE  = 'my-service'
         COVHUB_TOKEN_ID = 'covhub-token'
-        // 算「新增代码」的基线。留空则问 hub 上一次结算的版本对应的 commit，
-        // 没有就退回 origin/main。浅克隆要先 fetch --unshallow --tags，否则 rev-parse 找不到基线
+        // 算「新增代码」的基线**版本**。留空由 hub 自动定：服务当前 version → 最近结算的版本
+        // → 最近上传过源码的版本。diff 由 hub 比对两版上传的源码生成，构建节点不需要 git 历史
         DIFF_BASE       = ''
     }
 
@@ -96,40 +97,19 @@ pipeline {
         }
 
         stage('Push to covhub') {
-            // 单测报告 + git diff 送给 hub。版本串必须和发版时 predeploy / retarget 用的
+            // 单测报告 + 源码送给 hub（diff 由 hub 比对源码生成）。版本串必须和发版时 predeploy / retarget 用的
             // 一致（这里都是 REVISION），否则 hub 找不到对应的快照，新增覆盖永远算不出来。
             steps {
                 script {
                     covhub.pushUnitCoverage(service: env.COVHUB_SERVICE, version: env.REVISION,
                                             xml: env.AGGREGATE_XML, tokenCredentialsId: env.COVHUB_TOKEN_ID)
 
-                    String base = env.DIFF_BASE
-                    if (!base) {
-                        def last = covhub.lastVersion(service: env.COVHUB_SERVICE,
-                                                      tokenCredentialsId: env.COVHUB_TOKEN_ID)
-                        base = last?.latest?.head ?: 'origin/main'
-                    }
-                    // -M 识别重命名（挪代码不算新代码）；-U0 少传上下文；pathspec 在源头砍掉
-                    // yaml / lockfile 的噪音；core.quotepath=false 让中文路径不被转义
-                    sh """
-                        set -e
-                        git fetch --tags --quiet || true
-                        BASE_SHA=\$(git rev-parse --verify '${base}^{commit}' 2>/dev/null || echo '')
-                        if [ -z "\$BASE_SHA" ]; then
-                            echo "[covhub] 找不到基线 ${base}，跳过新增代码覆盖（浅克隆？先 git fetch --unshallow --tags）"
-                            : > covhub.diff
-                        else
-                            git -c core.quotepath=false diff --no-color --no-ext-diff --no-textconv -M --unified=0 \\
-                                --diff-filter=AMR "\$BASE_SHA"..HEAD -- '*.java' '*.kt' > covhub.diff
-                            echo "\$BASE_SHA" > covhub.base
-                        fi
-                    """
-                    if (fileExists('covhub.base')) {
-                        covhub.pushDiff(service: env.COVHUB_SERVICE, version: env.REVISION,
-                                        base: readFile('covhub.base').trim(),
-                                        head: sh(script: 'git rev-parse HEAD', returnStdout: true).trim(),
-                                        file: 'covhub.diff', tokenCredentialsId: env.COVHUB_TOKEN_ID)
-                    }
+                    // 这一版的源码：hub 独立部署、本机没有源码，报告下钻到行和「新增代码」看全文都靠它。
+                    // 存好之后 hub 拿基线版本的源码和它比对，生成这一版的 diff（新增代码覆盖率的依据）——
+                    // 不在构建节点上 git diff，所以浅克隆、cleanWs 过的工作区、找不到上一版 commit 都没关系。
+                    // 第一次接入时还没有基线，diff 为空属正常，下一版就有了。
+                    covhub.uploadSources(service: env.COVHUB_SERVICE, version: env.REVISION,
+                                         base: env.DIFF_BASE ?: null, tokenCredentialsId: env.COVHUB_TOKEN_ID)
                 }
             }
         }
@@ -139,8 +119,9 @@ pipeline {
             //
             // v1.1.0 起这不再是唯一来源：agent 的 classDumpDir 会在运行期把实际
             // 加载到的 class 落盘，指纹必然匹配，且不需要构建流水线配合。
-            // 这一步保留给「愿意改构建、想两份都留着」的项目 —— 两份都有时
-            // covhub 优先用 classdumpdir 那份。整段删掉不影响运行期覆盖率。
+            // 这一步保留给「愿意改构建、想两份都留着」的项目 —— 两份传的是同一个
+            // artifacts/<版本>/ 目录，后传的覆盖先传的。整段删掉不影响运行期覆盖率，
+            // 但 Jenkinsfile.deploy 第 2 步的 copyArtifacts 要跟着改（见 jenkins/README）。
             steps {
                 sh '''
                     rm -rf coverage-artifacts && mkdir -p coverage-artifacts
@@ -159,7 +140,7 @@ pipeline {
 
     post {
         success {
-            echo "单测报告与 diff 已推给 hub；class 产物已归档（运行期另有 classDumpDir 一路，不依赖这里）。"
+            echo "单测报告与源码已推给 hub（diff 由 hub 生成）；class 产物已归档（运行期另有 classDumpDir 一路，不依赖这里）。"
         }
     }
 }

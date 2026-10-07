@@ -186,6 +186,21 @@ def update_project(name, fields):
         return d
 
 
+def upsert_project(fields, overwrite=False):
+    """import 用：返回 added / updated / skipped。"""
+    with session_scope() as s:
+        proj = s.scalar(select(Project).where(Project.name == fields["name"]))
+        if proj is None:
+            s.add(Project(**fields))
+            return "added"
+        if not overwrite:
+            return "skipped"
+        for key, value in fields.items():
+            if key != "name":
+                setattr(proj, key, value)
+        return "updated"
+
+
 def remove_project(name):
     """只删项目；服务的 project_id 由外键 SET NULL（SQLite 靠 PRAGMA foreign_keys=ON）。"""
     with session_scope() as s:
@@ -534,10 +549,11 @@ def unit_history(name, limit=40):
 
 def _diff_dict(row):
     return {"id": row.id, "version": row.version, "base": row.base, "head": row.head,
-            "at": _iso(row.at), "files": row.files, "addedLines": row.added_lines}
+            "at": _iso(row.at), "files": row.files, "addedLines": row.added_lines,
+            "origin": row.origin}
 
 
-def upsert_diff(name, version, base, head, files, added_lines):
+def upsert_diff(name, version, base, head, files, added_lines, origin="upload"):
     with session_scope() as s:
         svc = _get(s, name)
         row = s.scalar(select(Diff).where(Diff.service_id == svc.id, Diff.version == version))
@@ -547,6 +563,7 @@ def upsert_diff(name, version, base, head, files, added_lines):
         row.base, row.head = base, head
         row.at = datetime.now().replace(microsecond=0)
         row.files, row.added_lines = files, added_lines
+        row.origin = origin
         s.flush()
         return _diff_dict(row)
 

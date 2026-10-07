@@ -28,22 +28,26 @@
 定时连过去把这份记录（exec）拉回来，配上 agent 自己落盘的那份 class，出 JaCoCo
 原生报告，并在看板上展示。发版前 hub 把这一版的数据结算归档，新版本从零开始。
 
+hub 连不到被测端时（容器网络只出不进、多副本自动扩缩）方向可以反过来：被测 JVM 上再多挂一个
+`covhub-agent.jar`，由它主动连回 hub（push 通道，Step 2）—— hub 不在时被测服务照常启动，
+hub 重启后它自己重连。
+
 构建流水线另外送两样东西给 hub（可选，各一条 curl）：`mvn verify` 产出的单测 jacoco.xml，
-和这一版的 git diff。有了它们，看板上每个服务就有四个数：运行时总覆盖、运行时**新增代码**
-覆盖、单测总覆盖、单测新增代码覆盖。
+和这一版的源码（hub 拿它和上一版比对得出 diff）。有了它们，看板上每个服务就有四个数：运行时总覆盖、
+运行时**新增代码**覆盖、单测总覆盖、单测新增代码覆盖。
 
 接口文档在 hub 的 `/docs`（自带 Swagger UI），本机试玩可用 `tools/seed_demo.py` 灌一套演示数据。
 
 ### 谁装什么
 
 **服务端全公司只有一个。** 每接一个服务，被测机器上多出来的东西只有一个
-`jacocoagent.jar`（还能从 hub 现下）；发版节点上一行 Python 都不需要装。
+`jacocoagent.jar`（push 通道再加一个 `covhub-agent.jar`；都能从 hub 现下）；发版节点上一行 Python 都不需要装。
 
 | 机器 | 需要什么 | 不需要什么 |
 |---|---|---|
-| **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里，`web/dist`） |
+| **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、`git`（比对源码生成 diff）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里，`web/dist`） |
 | **看板那一台**（可以就是 hub 那台） | nginx 之类的静态服务器 + `web/dist` 的内容（模板见 `integration/nginx/covhub.conf`）。不想单独部署就配 `serve.webDir`，让 hub 一起托管 | Node、Python |
-| **被测服务所在机器** | `jacocoagent.jar`（`covhub-client.sh fetch-agent` 下载）；pull 通道要能被 hub 连上 agent 端口 | Python、covhub、配置文件 |
+| **被测服务所在机器** | `jacocoagent.jar`（`covhub-client.sh fetch-agent` 下载）；push 通道再加 `covhub-agent.jar`（`fetch-covhub-agent`）；pull 通道要能被 hub 连上 agent 端口 | Python、covhub、配置文件 |
 | **发版节点 / 流水线** | `curl`（用 `integration/covhub-client.sh` 包一层） | Python、java、配置文件、历史 class 产物 |
 | **被测项目本身** | **什么都不用改** | 代码、pom、Dockerfile、启动脚本 |
 
@@ -75,8 +79,9 @@
 | hub 的 Python | 3.12 | `pip install .` 装 FastAPI、SQLAlchemy、Alembic、pydantic、PyYAML、PyMySQL。内网机器提前准备 wheel |
 | hub 的数据库 | MySQL 8（主验证）/ PostgreSQL | 存服务配置、覆盖率历史、归档元数据。exec / 报告 / class 产物仍在磁盘。单机试用可不配，用配置文件旁的 SQLite |
 | hub 的 `java` | 8+ | 跑 `lib/jacococli.jar` 出报告。`java -version` 能出来即可，不需要 JDK |
-| 被测服务的 JVM | 8+ | `lib/jacocoagent.jar` 的 manifest 写着 `Java-Version: 8` |
-| JaCoCo 版本 | 0.8.16.1（`lib/` 自带） | 能插桩多高版本的 class 由它决定。被测服务用了比它更新的 Java，agent 启动时会报 `Unsupported class file major version`，届时按 `CLAUDE.md` 里的说明换 `lib/` 下两个 jar |
+| hub 的 `git` | 任意版本 | `upload-sources` 之后 hub 用 `git diff --no-index` 比对两版源码生成 diff；没装则 diff 生成不了（返回体 `diffReason` 说明），新增代码覆盖率出不来 |
+| 被测服务的 JVM | 8+ | `lib/jacocoagent.jar` 的 manifest 写着 `Java-Version: 8`；`lib/covhub-agent.jar`（push 通道）同样是 Java 8 字节码 |
+| JaCoCo 版本 | 0.8.16.1（`lib/` 自带） | 能插桩多高版本的 class 由它决定。被测服务用了比它更新的 Java，agent 启动时会报 `Unsupported class file major version`，届时按 `CLAUDE.md` 里的说明换 `lib/` 下 JaCoCo 的两个 jar（`covhub-agent.jar` 不绑定 JaCoCo 版本，不用换） |
 | 被测机器 | 能改环境变量或 JVM 参数 | 这是唯一的硬要求。容器、systemd、K8s、裸 `java -jar` 都满足 |
 | 发版节点 | `curl` | 就这一个 |
 
@@ -88,17 +93,19 @@
 | 配置项 | 在哪台机器上 | 为什么 | 容器场景写什么 |
 |---|---|---|---|
 | `jacocoAgent` | **被测端** | 它只用来拼进 `-javaagent:` 参数串，jar 是被测 JVM 加载的 | 容器内路径，如 `/opt/jacoco/jacocoagent.jar` |
+| `covhubAgent` | **被测端** | 同上，push 通道的第二个 `-javaagent:`（连 hub、断线重连） | 容器内路径，如 `/opt/jacoco/covhub-agent.jar` |
 | `classDumpDir` | **被测端** | agent 把加载到的 class 落在这里 | 容器内路径，取的时候 `docker cp` / `kubectl cp` |
 | `jacocoCli` | hub | hub 自己跑 `java -jar` 出报告 | hub 本机路径 |
 | `dataDir` | hub | 采集产物全在这 | hub 本机路径 |
 | `classfiles` | hub | 报告是 hub 出的，class 必须在 hub 上。用 `upload-classes --retarget` 会自动填 | hub 本机路径 |
-| `sourcefiles` | hub | 同上，下钻源码行时读 | hub 本机路径 |
+| `sourcefiles` | hub | 兜底用：该版本没经 `upload-sources` 传过源码时才读，且只对当前版本生效 | hub 本机路径（独立部署一般不配） |
 | `address` / `port` | 被测端的**对外**地址 | hub 连过去的目标。容器要写宿主机 IP + 映射出来的端口 | 宿主机 IP:映射端口 |
 | `bindAddress` | 被测端的**监听**地址 | agent 在被测 JVM 里监听 | 一律 `0.0.0.0` |
 | `collect.advertiseAddress` | **被测端能访问到的** hub 地址 | push 通道 agent 连回来用 | hub 的对外 IP / 域名，不是 `127.0.0.1` |
 
 一个小验证：`jacocoAgent` 填的路径 hub 本机不存在也没关系 —— `agent-opts` 照样输出
-正确的参数串；只有 `fetch-agent`（从 hub 下载 agent）会因为找不到文件而 404。
+正确的参数串，hub 自己只检查它要跑的 `jacocoCli`；只有 `fetch-agent`（从 hub 下载 agent）会因为找不到文件而 404。
+`covhubAgent` 与 `fetch-covhub-agent` 同理。
 
 ### 1.3 网络放行清单
 
@@ -109,7 +116,7 @@
 | **pull**（默认） | hub → 被测端 | 被测端的 agent 端口（默认 6300） | 被测端 | **无**，靠防火墙限制来源 |
 | **push** | 被测端 → hub | hub 的收集端口（`collect.port`，默认 6400） | hub | **无**，靠防火墙限制来源 |
 | 两者都要 | 发版节点 / 浏览器 → hub | hub 的 HTTP 端口（默认 8900） | hub | `serve.token` |
-| 两者都要 | 被测端 → hub（可选） | 8900，`fetch-agent` 下载 agent 用 | hub | `serve.token` |
+| 两者都要 | 被测端 → hub（可选） | 8900，`fetch-agent` / `fetch-covhub-agent` 下载 agent 用 | hub | `serve.token` |
 
 **agent 端口和收集端口都没有认证**，谁连上都能拉数据、清零计数器。三条底线：
 
@@ -147,7 +154,7 @@ order-service-uat
 
 两条配置各自独立，互不影响；发版流水线里传对应环境的名字即可。
 
-服务名只用字母、数字、`-`、`_`、`.` —— 它会出现在 URL 路径和目录名里。
+服务名只用字母、数字、`-`、`_`、`.`，且不能以 `.` 或 `-` 开头 —— 它会出现在 URL 路径和目录名里。
 
 ---
 
@@ -158,7 +165,7 @@ order-service-uat
 **只需要一台**，整个团队共用。要求：
 
 - 能连到所有 pull 通道服务的 agent 端口；push 通道的被测端能连到它
-- 装有 Python 3.12 和 java 8+
+- 装有 Python 3.12、java 8+ 和 git（hub 比对两版源码生成 diff 要用）
 - 磁盘留出余量：`data/` 会持续增长（§8.2 有估算）
 
 通常放测试环境的一台管理机。被测服务和发版节点都不在这台机器上跑任何 covhub
@@ -191,7 +198,7 @@ sudo mkdir -p /opt/coverage-hub
 sudo chown "$USER" /opt/coverage-hub
 cd /opt/coverage-hub
 
-git clone <本仓库> .                # covhub.py、covhub/、integration/、lib/ 下两个 jar、前端产物 web/dist 都在版本库里
+git clone <本仓库> .                # covhub.py、covhub/、integration/、lib/ 下三个 jar、前端产物 web/dist 都在版本库里
 python3 --version                   # 3.12
 java -version                       # ≥ 8
 pip3 install .                      # 依赖：FastAPI、uvicorn、SQLAlchemy、Alembic、pydantic、PyYAML、PyMySQL
@@ -216,6 +223,7 @@ GRANT ALL ON covhub.* TO 'covhub'@'%';
 
 ```yaml
 jacocoAgent: ./lib/jacocoagent.jar      # 被测端路径！容器场景改成容器内路径（§1.2）
+covhubAgent: ./lib/covhub-agent.jar     # 同上。push 通道连 hub 用（Step 2）；不用 push 可以不管它
 jacocoCli: ./lib/jacococli.jar
 dataDir: ./data
 
@@ -243,7 +251,7 @@ collect:                                # 只有要用 push 通道才需要；�
 > 目录相同」时能用。绝大多数场景要改成被测端的绝对路径，例如
 > `/opt/jacoco-lib/jacocoagent.jar`（裸机）或 `/opt/jacoco/jacocoagent.jar`（容器内）。
 > 不同服务放在不同位置时，以多数为准，个别服务在注入时手工改参数串里的 jar 路径即可
-> —— 参数串里只有这一项是可以手改的。
+> —— 参数串里只有这一项是可以手改的。`covhubAgent` 同理，通常和 `jacocoAgent` 放同一个目录。
 
 `database.url` 留空则用配置文件旁边的 SQLite 文件 `covhub.db`——只适合单机试用。它故意
 **不放在 `dataDir` 里**：那是看板的静态目录，放进去等于把整个库开放下载。
@@ -252,7 +260,7 @@ collect:                                # 只有要用 push 通道才需要；�
 
 ```bash
 python3 covhub.py db upgrade
-# 数据库结构已升到 0002（mysql+pymysql://covhub:***@10.0.0.6:3306/covhub?charset=utf8mb4）
+# 数据库结构已升到 0003（mysql+pymysql://covhub:***@10.0.0.6:3306/covhub?charset=utf8mb4）
 ```
 
 `autoUpgrade: true` 时 `serve` 启动也会自动做这一步；关掉它则表结构不是最新时拒绝启动。
@@ -295,9 +303,9 @@ nohup python3 covhub.py serve --with-watch --port 8900 > covhub.log 2>&1 &
 
 ```
 [10:00:01] 数据库：mysql+pymysql://covhub:***@10.0.0.6:3306/covhub?charset=utf8mb4
-[10:00:01] push 收集端已监听 0.0.0.0:6400（等待 output=tcpclient 的 agent 连入）   ← 配了 collect.port 才有
+[10:00:01] push 收集端已监听 0.0.0.0:6400（等待被测端的 agent 连入）   ← 配了 collect.port 才有
 [10:00:01] 采集线程已启动，每 300 秒轮询一次
-[10:00:01] covhub 2.3.1 已启动： http://127.0.0.1:8900/  （根目录 /opt/coverage-hub/data）
+[10:00:01] covhub 2.6.0 已启动： http://127.0.0.1:8900/  （根目录 /opt/coverage-hub/data）
 [10:00:01] 控制 API： http://127.0.0.1:8900/api/health
 [10:00:01] 看板： 由外部托管（未配 serve.webDir，本进程只发 API 与报告目录）
 ```
@@ -432,7 +440,7 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 或 /opt/covhub/web
 
 ```bash
 curl -s http://127.0.0.1:8900/api/health
-# {"ok": true, "version": "2.3.0", ...}
+# {"ok": true, "version": "2.6.0", "services": [...]}
 
 curl -s http://127.0.0.1:8900/order-service/current/jacoco.xml
 # {"ok": false, "error": "..."}  ← 401，说明令牌生效了；返回 404 或文件内容都说明没生效
@@ -504,25 +512,29 @@ export COVHUB_TOKEN=<serve.token>
 ```
 health                                         存活探测
 status [service]                               连通性与最新覆盖率
-agent-opts <service>                           打印 -javaagent 参数串
+agent-opts <service>                           打印 -javaagent 参数串（push 通道是空格隔开的两个）
 fetch-agent [目标路径]                          下载 jacocoagent.jar（默认存到 ./jacocoagent.jar）
+fetch-covhub-agent [目标路径]                   下载 covhub-agent.jar（push 通道用，默认存到 ./covhub-agent.jar）
 dump <service>                                 拉一次快照（累加）
 predeploy <service> [version] [--allow-missing] 结算归档，停服之前调
 report <service>                               用已有 exec 重出报告
 diagnose <service> [version]                   exec 与 class 指纹是否对得上
 retarget <service> <version> [classfiles,...]  改配置里的版本与 class 路径
 upload-classes <service> <version> <包> [--retarget]  上传 class 产物
+upload-sources <service> <version> [包] [--base <基线版本>] [--no-diff]
+                                               上传该版本源码（不给包就在当前 git 仓库里打），hub 顺带比对基线版本生成 diff
 fetch-classes <service> <version> <目标目录>     取回某版本的 class 产物
 wait-online <service> [超时秒数，默认 120]       等新实例的 agent 就绪
 unit-coverage <service> <version> <jacoco.xml> [--group 模块]   构建流水线：送单测报告
-diff <service> <version> <diff文件> --base <基线> [--head <本次>] 构建流水线：送 git diff
-last-version <service> [--plain]               上一次结算的版本与其 diff 的 head（定 diff 基线）
+diff <service> <version> --from-sources [--base <基线版本>]   让 hub 比对两版已上传的源码生成 diff（指定基线 / 重做）
+diff <service> <version> <diff文件> --base <基线commit> [--head <本次>]   送流水线自己算的 git diff
+last-version <service> [--plain]               上一次结算的版本与其 diff 的 head（自己算 git diff 时定基线）
 recompute <service> [version]                  按已有 diff 重算新增代码覆盖
 ```
 
 环境变量除 `COVHUB_URL` / `COVHUB_TOKEN` 外还有 `COVHUB_TIMEOUT`（单次请求最长秒数，默认 600，
-predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。退出码：0 成功、1 hub 返回非 2xx
-（业务失败，响应体的 `log` 里有原因）、2 连不上 hub 或参数错。只有 GET 会自动重试，`dump` / `predeploy`
+predeploy 大服务要几分钟）、`COVHUB_CONNECT_TIMEOUT`（默认 10）和 `COVHUB_POLL_INTERVAL`（`wait-online` 的轮询
+间隔秒数，默认 5）。退出码：0 成功、1 hub 返回非 2xx（业务失败，响应体的 `log` 里有原因）或 `wait-online` 超时、2 连不上 hub 或参数错。只有 GET 会自动重试，`dump` / `predeploy`
 这类会改状态的不重试。
 
 ---
@@ -543,16 +555,17 @@ predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。
 **不需要拿到构建产物。** v1.1.0 起 class 由 agent 自己落盘（`classDumpDir`），出报告用的
 就是运行时那一份 —— 指纹必然匹配，不需要被测项目的构建流水线配合。
 
-只有一种情况仍需构建产物：想在报告里**下钻到源码行**，那还要配 `sourcefiles` 指向
-对应版本的源码（Step 8）。只看类和方法级别的覆盖数字则不需要。
+只有一种情况还要构建侧配合：想在报告里**下钻到源码行**、在看板上看新增代码的整个文件，
+得让流水线按版本把源码传给 hub（Step 8，一条命令）。只看类和方法级别的覆盖数字则不需要。
 
 ### Step 2 · 选通道
 
 | | pull（默认） | push |
 |---|---|---|
 | 方向 | hub 主动连 agent | agent 主动连回 hub |
-| agent 输出 | `output=tcpserver` | `output=tcpclient` |
+| agent 输出 | `output=tcpserver` | `output=none` + `covhub-agent.jar`（两个 `-javaagent`） |
 | 被测端要开端口 | 要（6300） | 不要 |
+| hub 不在 / 重启时 | 被测服务不受影响，hub 回来后接着拉 | 被测服务不受影响，`covhub-agent` 后台重连 |
 | 多副本 | 每个副本要配一条 | 天然汇聚，扩缩容不用改配置 |
 | 断代检测抓的是 | 进程重启（自动结算上一周期） | 混版本（只告警不结算） |
 | CLI 单独跑 `status` | 能看到 | 看不到（显示 `?`，要看 API 或看板） |
@@ -561,11 +574,18 @@ predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。
 拿不准就用 pull；K8s 多副本直接用 push。**通道只在 hub 配置里定**（`channel:`），
 被测端的注入方式两者完全一样，参数串由 `agent-opts` 自动切换。
 
+> **push 通道多一个 jar。** JaCoCo 自带的 `output=tcpclient` 启动时连不上 hub 会让被测 JVM 直接
+> 起不来，hub 重启后也不会重连。所以 hub 配了 `covhubAgent`（`init` 的模板默认带）时，push 服务的
+> 参数串是两个 `-javaagent`：JaCoCo 只插桩（`output=none`），`covhub-agent.jar` 负责连 hub ——
+> 连不上就后台重试，断了自己连回来，任何失败都不影响被测应用。被测端要多放这一个 jar
+> （`fetch-covhub-agent`）。删掉 `covhubAgent` 那一行则退回 `output=tcpclient`。
+
 ### Step 3 · 在 hub 上登记这个服务
 
 服务配置在数据库里，用 CLI 登记（在 hub 本机；也可以用 `POST /api/services`，字段名一样）。
 先建项目（可选，看板按它分组），再登记服务。项目也可以在看板「项目总览 → 新建项目」里建，
-服务归入哪个项目可以事后在项目面板「添加服务」里勾选 —— 登记时不给 `--project` 的服务会进「未分组」：
+服务归入哪个项目可以事后在项目面板「添加服务」里勾选 —— 登记时不给 `--project` 的服务会进「未分组」
+（已属于别的项目的服务要先移出，`service update <svc> --no-project` 或面板里「移出」，再归入新项目）：
 
 ```bash
 python3 covhub.py project add shop --title "商城"
@@ -594,7 +614,7 @@ bindAddress: 0.0.0.0      # pull：agent 在被测端监听的地址
 includes:
   - com.example.order.*
 classDumpDir: /tmp/covhub-classes/order-service     # 被测端路径
-classfiles:               # 先随便填一个，Step 7 upload-classes --retarget 会自动改
+classfiles:               # 可以先不填（或随便填一个），Step 7 upload-classes --retarget 会自动改
   - ./data/order-service/artifacts/1.4.2
 reportExcludes:
   - com/example/order/**/dto/**
@@ -621,7 +641,7 @@ python3 covhub.py service add order-service --channel push --includes 'com.examp
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `name` | 是 | 主键，见 §1.5。`api`、`assets`、`index.html` 这几个是保留名 |
+| `name` | 是 | 主键，见 §1.5。`api`、`assets`、`index.html`、`favicon.ico`、`agent.jar`、`docs`、`swagger` 是保留名（不区分大小写） |
 | `project` | 否 | 所属项目名，看板按它分组；先 `project add` |
 | `version` | 建议 | 当前在线版本。`predeploy` 不带版本号时用它做归档目录名；pull 通道还会作为 agent 的 `sessionid`。发版流水线里的 `retarget` / `upload-classes --retarget` 会自动更新它 |
 | `channel` | 否 | `pull`（默认）或 `push` |
@@ -630,8 +650,8 @@ python3 covhub.py service add order-service --channel push --includes 'com.examp
 | `includes` | 强烈建议 | 传给 agent，决定**哪些类插桩**。类名用 `.` 分隔，`*` 匹配任意字符（含 `.`），`?` 匹配一个字符。多项工具会用 `:` 拼起来。**不配就插桩所有类**，把 Spring、MyBatis 全插一遍，启动慢几倍还撑大 exec |
 | `excludes` | 否 | 同上，反向。被排除的类连数据都不产生，**事后找不回**，改了要重启服务 |
 | `classDumpDir` | 强烈建议 | **被测端**路径。agent 把加载到的每个 class 落在这里，文件名自带指纹（`OrderService.3f2a91c4e8b70d15.class`）。不配就得靠构建期归档 class，见 §6 |
-| `classfiles` | 是 | **hub 上**出报告用的 class 目录（可多个），必须是运行中那一份产物。走 `upload-classes --retarget` 会自动填成 `data/order-service/artifacts/<版本>/` |
-| `sourcefiles` | 否 | **hub 上**的源码根目录（`src/main/java` 那一级），配了才能下钻到行 |
+| `classfiles` | 否（出报告前必须有） | **hub 上**出报告用的 class 目录（可多个），必须是运行中那一份产物。登记时可以不填，走 `upload-classes --retarget` 会自动填成 `data/order-service/artifacts/<版本>/` |
+| `sourcefiles` | 否 | **hub 本机**的源码根目录（`src/main/java` 那一级）。只在该版本没 `upload-sources` 时兜底，且只对当前版本生效；独立部署用 Step 8 的上传即可 |
 | `reportExcludes` | 否 | 报告端过滤，Ant 路径风格用 `/`：`**` 跨目录、`*` 不跨目录。只影响统计口径，改了跑一次 `report` 即可 |
 | `sourceEncoding` | 否 | 默认 `UTF-8`。源码页乱码时看这里 |
 | `dumpRetry` | 否 | 默认 3。传给 `jacococli dump --retry`，服务刚起来端口还没监听时多试几次 |
@@ -685,14 +705,27 @@ covhub-client.sh agent-opts order-service
 # -javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.order.*,classdumpdir=/tmp/covhub-classes/order-service,sessionid=1.4.2
 ```
 
+push 通道的服务（hub 配了 `covhubAgent`）要多取一个 jar，参数串是**空格隔开的两个** `-javaagent`，
+整串一起塞进 `JAVA_TOOL_OPTIONS`：
+
+```bash
+covhub-client.sh fetch-covhub-agent /opt/jacoco-lib/covhub-agent.jar
+# [covhub] 已下载 covhub-agent -> /opt/jacoco-lib/covhub-agent.jar
+
+covhub-client.sh agent-opts order-service
+# -javaagent:/opt/jacoco-lib/jacocoagent.jar=output=none,includes=com.example.order.*,excludes=covhub.agent.*:org.jacoco.agent.rt.*,classdumpdir=/tmp/covhub-classes/order-service,sessionid=order-service -javaagent:/opt/jacoco-lib/covhub-agent.jar=address=covhub.internal,port=6400,idle=900
+```
+
 参数串里各段的含义：
 
 | 段 | 来自配置 | 说明 |
 |---|---|---|
 | `-javaagent:<路径>` | `jacocoAgent` | 被测端的 jar 路径。不对就改配置，或**只改这一段** |
-| `output=tcpserver` / `tcpclient` | `channel` | 通道 |
-| `address` / `port` | pull：`bindAddress` / `port`；push：`collect.advertiseAddress` / `collect.port` | 两个通道里含义相反：pull 是自己监听在哪，push 是连去哪 |
-| `includes` / `excludes` | 同名 | 多项用 `:` 拼 |
+| `output=tcpserver` / `none` / `tcpclient` | `channel` | 通道。pull 是 `tcpserver`；push 是 `none`（连 hub 交给第二个 agent），没配 `covhubAgent` 时是 `tcpclient` |
+| `address` / `port` | pull：`bindAddress` / `port`；push：`collect.advertiseAddress` / `collect.port` | 两个通道里含义相反：pull 是自己监听在哪，push 是连去哪（push 下这两项在第二个 `-javaagent` 里） |
+| 第二个 `-javaagent:<路径>` | `covhubAgent` | 只有 push 通道有。被测端的 `covhub-agent.jar` 路径 |
+| `idle` | `watch.intervalSeconds` × 3，不低于 180 | 只有 push 通道有。这么多秒没收到 hub 的指令就当连接已死、重连 |
+| `includes` / `excludes` | 同名 | 多项用 `:` 拼。push 下 `excludes` 末尾会自动追加两条（`covhub.agent.*`、`org.jacoco.agent.rt.*`），免得 agent 自己被算进覆盖率 |
 | `classdumpdir` | `classDumpDir` | 落盘目录 |
 | `sessionid` | pull：`version`；push：`name` | push 通道靠它认领连接，**不能手改** |
 
@@ -732,7 +765,7 @@ docker run -d --name order-service \
 
 三个必须注意的点：
 
-1. agent jar 要**挂进容器**，且 hub 配置里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的
+1. agent jar 要**挂进容器**，且 hub 配置里 `jacocoAgent` 要写**容器内路径**（`/opt/jacoco/jacocoagent.jar`）—— agent 是在容器里被加载的。push 通道的 `covhubAgent` 同理，两个 jar 放同一个目录一起挂进去
 2. `classDumpDir` 同理是容器内路径，取的时候 `docker cp`
 3. pull 通道下 `bindAddress` 必须 `0.0.0.0`，且 **6300 要映射出来**；push 通道这两条都不需要
 
@@ -775,7 +808,8 @@ spec:
       initContainers:
         - name: fetch-agent
           image: curlimages/curl:latest
-          command: ["sh","-c","curl -sSf -H 'X-Covhub-Token: $(COVHUB_TOKEN)' -o /shared/jacocoagent.jar http://covhub.internal:8900/api/agent.jar"]
+          # 两个 jar：JaCoCo agent + push 通道连 hub 用的 covhub-agent（pull 通道只要第一个）
+          command: ["sh","-c","curl -sSf -H 'X-Covhub-Token: $(COVHUB_TOKEN)' -o /shared/jacocoagent.jar http://covhub.internal:8900/api/agent.jar && curl -sSf -H 'X-Covhub-Token: $(COVHUB_TOKEN)' -o /shared/covhub-agent.jar http://covhub.internal:8900/api/covhub-agent.jar"]
           env:
             - name: COVHUB_TOKEN
               valueFrom: { secretKeyRef: { name: covhub, key: token } }
@@ -790,13 +824,16 @@ spec:
             - { containerPort: 8080 }
 ```
 
-之后注入环境变量（K8s 下推荐 push 通道，不用暴露 6300、不用 Service 固定地址、多副本天然汇聚）：
+之后注入环境变量（K8s 下推荐 push 通道，不用暴露 6300、不用 Service 固定地址、多副本天然汇聚；
+hub 不在时 Pod 照常启动，hub 重启后各副本自己连回来）：
 
 ```bash
 kubectl -n prod set env deployment/order-service \
   JAVA_TOOL_OPTIONS="$(covhub-client.sh agent-opts order-service)"
 kubectl -n prod rollout status deployment/order-service
 ```
+
+push 通道的参数串里有空格（两个 `-javaagent`），上面的双引号不能省。
 
 坚持用 pull 的话，每个 Pod 是独立采集目标，需要 Service 暴露到固定地址，或干脆固定单副本。
 
@@ -821,10 +858,11 @@ export JAVA_TOOL_OPTIONS="-javaagent:/opt/skywalking/skywalking-agent.jar $(covh
 
 两点注意：
 
-- 参数串里**没有空格**，所以不需要额外引号；但整个变量值要用双引号包住
+- pull 通道的参数串里没有空格；**push 通道是空格隔开的两个 `-javaagent`**。两种都一样：整个变量值用双引号包住，
+  别拆开、别调换顺序（`jacocoagent.jar` 在前，`covhub-agent.jar` 在后）
 - 另一个 agent 如果也会改写字节码（APM 类基本都会），把 JaCoCo 的 `-javaagent` 放在**它前面**，
   让 JaCoCo 先插桩原始 class；否则 JaCoCo 看到的是被 APM 改过的 class，指纹会和 classdumpdir
-  里落盘的对不上
+  里落盘的对不上。`covhub-agent.jar` 不改字节码，它和 APM agent 谁先谁后无所谓
 
 ### Step 6 · 起服务后：确认 agent 挂上了
 
@@ -838,6 +876,13 @@ docker logs order-service 2>&1 | head -1       # 或 journalctl -u order-service
 # 2. pull 通道：agent 端口在监听
 ss -lnt | grep 6300                            # 容器里：docker exec order-service sh -c 'cat /proc/net/tcp' 看 189C（=6300 的十六进制）
 # LISTEN 0 50 *:6300 *:*
+
+# 2'. push 通道：covhub-agent 连上 hub 了（它的日志是英文的，前缀固定）
+docker logs order-service 2>&1 | grep '\[covhub-agent\]'
+# [covhub-agent] started (1.0), collector covhub.internal:6400
+# [covhub-agent] connected to covhub.internal:6400
+#   只有 cannot reach ... retrying in background 而没有 connected to：hub 没起或地址不通，
+#   应用本身不受影响，通了会自己连上（§9 排障表）
 
 # 3. classDumpDir 有文件了（包名目录 + 带指纹的文件名）
 ls /tmp/covhub-classes/order-service/com/example/order | head -3
@@ -867,7 +912,7 @@ POD=$(kubectl -n prod get pod -l app=order-service -o name | head -1)
 kubectl -n prod cp "${POD#pod/}:/tmp/covhub-classes/order-service" ./cls && tar czf cls.tgz -C ./cls .
 
 covhub-client.sh upload-classes order-service 1.4.2 cls.tgz --retarget
-# {"ok": true, "log": "order-service：已接收 1.4.2 的 class 产物 1832 个 -> /opt/coverage-hub/data/order-service/artifacts/1.4.2\norder-service -> version=1.4.2 classfiles=['/opt/coverage-hub/data/order-service/artifacts/1.4.2']", ...}
+# {"ok": true, "service": "order-service", "version": "1.4.2", "path": "/opt/coverage-hub/data/order-service/artifacts/1.4.2", "classes": 1832, "retarget": "[10:20:11] order-service -> version=1.4.2 classfiles=['/opt/coverage-hub/data/order-service/artifacts/1.4.2']\n"}
 
 rm -rf cls cls.tgz
 ```
@@ -885,12 +930,13 @@ Step 3 里 `classfiles` 随便填的那个值到这里被自动纠正。两台�
 - **换了版本必须重新传**（`predeploy` → 部署 → `upload-classes --retarget`，§5）
 - **传完就删被测端那份**，别让它一直占磁盘。用 `includes` 收窄范围后，典型服务在几十 MB 量级
 - 包里的**顶层目录会自动剥掉**：`tar czf cls.tgz cls/` 和 `tar czf cls.tgz -C cls .` 两种打法都行
-- 支持 `tar.gz` 和 `zip`；返回体里 `已接收 ... 0 个` 说明打包方式不对，检查包里是不是真有 `.class`
+- 支持 `tar.gz` 和 `zip`；返回体里 `"classes": 0` 说明打包方式不对（hub 日志里会有「包里一个 .class 都没有」），检查包里是不是真有 `.class`
 - **动态生成的类也在里面** —— Spring AOP、MyBatis 代理这类构建产物里根本没有的类，只有 agent 见过
 
 > **仍然想走构建期归档？** 也支持：构建流水线打包 `target/classes` 后同样用
-> `upload-classes` 传上来即可（`Jenkinsfile.build` 里有现成的一步）。两者都有时优先
-> 用 classdumpdir 那份 —— 它才是运行时真相。
+> `upload-classes` 传上来即可（`Jenkinsfile.build` 里有现成的一步）。两份传的是同一个
+> `artifacts/<版本>/` 目录，**后传的整份覆盖先传的**，hub 不会自动挑；想以 classdumpdir 那份
+> 为准（它才是运行时真相），就让它最后传。
 
 日后要在别处用某个版本的 class（重出报告、比对）时，从 hub 取回来即可，本机不必囤：
 
@@ -900,30 +946,40 @@ covhub-client.sh fetch-classes order-service 1.4.2 ./classes-1.4.2
 
 ### Step 8 · 可选：让报告能下钻到源码行
 
-不配 `sourcefiles` 时，报告到方法级别为止，类页面显示「Source file ... was not found」。
-要看到具体哪一行被执行过，hub 上得有**对应版本**的源码：
+hub 上没有源码时，报告到方法级别为止，类页面显示「Source file ... was not found」；看板的
+「新增代码」也只有行号。hub 是独立部署的，**不去拉代码仓库** —— 由构建流水线按版本把源码传上来。
+在构建这一版的同一个 checkout 里（行号才对得上）：
 
 ```bash
-# hub 上
-sudo mkdir -p /opt/src && cd /opt/src
-git clone <order-service 仓库> order-service
-cd order-service && git checkout v1.4.2        # 版本要和线上的一致，否则行号错位
+covhub-client.sh upload-sources order-service 1.4.2
 ```
 
-配置里指向 `src/main/java` 那一级（多模块项目每个模块一条）：
+它在当前 git 仓库里打包受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`，路径相对仓库根）
+再 POST 给 hub；也可以给一个现成的 tar.gz / zip 作第三个参数。Jenkins 里是
+`covhub.uploadSources(service:, version:)`（`Jenkinsfile.build` 的 `Push to covhub` 阶段已带上）。
+存好之后 hub 顺带拿基线版本的源码和它比对，生成这一版的 diff（§5.6）。
 
-```yaml
-    sourcefiles:
-      - /opt/src/order-service/order-api/src/main/java
-      - /opt/src/order-service/order-core/src/main/java
-```
+hub 存到 `data/order-service/sources/1.4.2/`，按每个文件的 `package` 声明识别源码根 ——
+多模块、非标准目录、sources.jar 平铺都不用另外配置。之后：
 
-`retarget` 也能改这一项（`--sourcefiles`），发版流水线里可以在 checkout 新版本源码后
-一并更新。源码是 Lombok 生成的 getter/setter 这类，报告里会标在 `@Data` 那一行，属正常。
+- 出报告时按服务当前 `version` 找源码，类页面有逐行红绿标记。HTML 生成时就把源码内嵌进去，
+  归档报告不依赖这个目录；
+- 看板「新增代码」点开能「展开全文」，服务发了新版本之后旧版本的也照样对得上；
+- 该版本已有 diff 时，新增行附近的片段顺手补进 `incremental.json`。
 
-`sourcefiles` 同时喂给看板的「新增代码 → 看源码」视图。结算归档时 hub 会把新增行附近的源码
-片段一起存进归档，所以**历史版本**的源码视图不要求这个目录还停在旧版本 —— 只要当前周期
-的 `sourcefiles` 指向的就是当前版本即可。
+几点要知道：
+
+- **版本串要和服务的 `version` 一致**（同 §5.6）。先传源码、后 `retarget` 是常态：返回体的
+  `matchesCurrentVersion: false` 只是说「retarget 到这一版后才会用上」。
+- 已经在跑的周期传完源码后，下一轮采集自然带上；要立即看到就 `covhub-client.sh report <svc>`。
+- hub **只收源码文件**，配置文件之类即便混进包里也不落盘；`sources/` 目录不经静态路径外发，
+  只通过报告与源码视图接口出去（都要令牌）。
+- 源码是 Lombok 生成的 getter/setter 这类，报告里会标在 `@Data` 那一行，属正常。
+
+**兜底：hub 本机的源码目录。** 老的 `sourcefiles` 配置仍然有效：某个版本没传过源码时，出报告和
+看源码会去读它。但它是一个会跟着发版改掉的目录，所以**只对服务当前的 `version` 生效** —— 拿它去
+对旧版本的行号只会错位。本机已经 checkout 好的，也可以用 hub 上的 CLI 转成按版本存：
+`python covhub.py upload-sources order-service 1.4.2 /opt/src/order-service`。
 
 ### Step 9 · 验证接入
 
@@ -940,23 +996,24 @@ covhub-client.sh status order-service
 
 # 2. 拉一次快照
 covhub-client.sh dump order-service
-# {"ok": true, "log": "order-service：dump\n  指令 1.3%（412/31680）  分支 0.4%  触达类 1103/1832\n..."}
+# {"ok": true, "log": "[10:23:41] order-service：dump\n[10:23:42]   class 过滤：保留 1790，按 reportExcludes 剔除 42\n[10:23:44]   指令 1.3%（412/31680）  分支 0.4%  触达类 1103/1790\n..."}
 #   触达类不为 0 就说明 exec 和 class 对上了
 
 # 3. 诊断：确认 exec 与 class 对得上
 covhub-client.sh diagnose order-service
-# {"ok": true, "matchRate": 100.0, "verdict": "正常", ...}
+# {"ok": true, "diagnose": {"matchRate": 100.0, "verdict": "正常", ...}}
 
 # 4. 看板
-#   打开 http://<hub>:8900/?token=<令牌>，在所属项目的卡片里（没配 project 就在「未分组」）应看到 order-service
+#   打开看板（分离部署是 nginx 的地址，配了 serve.webDir 则是 http://<hub>:8900/），在弹窗里填令牌；
+#   在所属项目的卡片里（没配 project 就在「未分组」）应看到 order-service
 ```
 
 刚启动的服务覆盖率通常在 1% 左右、触达类却有六七成 —— 这是正常的：Spring 把 Bean
 都实例化了（构造器算覆盖），但业务方法一个没调。**手工点几下页面再 dump，数字应该
 明显上涨** —— 涨了就说明整条链路通了。
 
-之后不用再手工 dump：hub 每 `watch.intervalSeconds`（默认 300 秒）自动采一轮，看板
-每 60 秒刷新。测试同学跑完一轮用例想立刻看数，不用找运维敲命令 —— 服务详情页右上角的
+之后不用再手工 dump：hub 每 `watch.intervalSeconds`（默认 300 秒）自动采一轮，项目总览与项目面板
+每 60 秒自动刷新（服务详情页不自动刷新，手动刷新或点「立即采集」）。测试同学跑完一轮用例想立刻看数，不用找运维敲命令 —— 服务详情页右上角的
 **「立即采集」**就是这条 `dump`，点完 hub 的执行日志会弹出来。
 
 ---
@@ -978,6 +1035,7 @@ $ python3 covhub.py service add order-service --version 1.4.2 \
     --report-excludes 'com/example/order/**/dto/**'
 [10:14:02]   classfiles 里的相对路径 ./data/order-service/artifacts/1.4.2 将相对 /opt/coverage-hub 解析
 [10:14:02] 已登记服务 order-service（pull）
+{ ...入库后的整条配置（JSON，stdout）... }
 $ grep jacocoAgent covhub.yaml
 jacocoAgent: /opt/jacoco-lib/jacocoagent.jar        # 已按被测端路径改过
 
@@ -1019,7 +1077,7 @@ $ curl -s localhost:8080/api/orders/1 > /dev/null      # 随便调几个接口�
 
 $ tar czf cls.tgz -C /tmp/covhub-classes/order-service .
 $ covhub-client.sh upload-classes order-service 1.4.2 cls.tgz --retarget
-{"ok": true, "log": "order-service：已接收 1.4.2 的 class 产物 1832 个 -> /opt/coverage-hub/data/order-service/artifacts/1.4.2\norder-service -> version=1.4.2 classfiles=['/opt/coverage-hub/data/order-service/artifacts/1.4.2']"}
+{"ok": true, "service": "order-service", "version": "1.4.2", "path": "/opt/coverage-hub/data/order-service/artifacts/1.4.2", "classes": 1832, "retarget": "[10:20:11] order-service -> version=1.4.2 classfiles=['/opt/coverage-hub/data/order-service/artifacts/1.4.2']\n"}
 $ rm -f cls.tgz
 ```
 
@@ -1047,7 +1105,8 @@ classfiles  /opt/coverage-hub/data/order-service/artifacts/1.4.2
 判定        正常
 ```
 
-浏览器打开 `http://10.0.0.5:8900/?token=xxxx`，在项目 `shop` 的卡片里看到 `order-service`，
+浏览器打开看板（分离部署是 nginx 的地址；配了 `serve.webDir` 让 hub 自托管的话就是 `http://10.0.0.5:8900/`），
+在弹窗里填令牌，在项目 `shop` 的卡片里看到 `order-service`，
 点进去是服务详情（四个环形指标、趋势图），右上角「JaCoCo 报告」是原生报告。再去页面上点几个
 功能，点「立即采集」（或等一个轮询周期），覆盖率应该涨。**到这里接入完成**，接下来把 §5 排进发版流程。
 
@@ -1106,9 +1165,11 @@ covhub-client.sh diagnose "$SVC"
 
 ### 5.3 Jenkins 版
 
-装好 Shared Library 后（`integration/jenkins/README.md`），`Jenkinsfile.deploy` 就是
-上面这个顺序的模板，`DEPLOY_MODE` 参数选部署方式，`DIAGNOSE_MIN_MATCH`（默认 90）
-控制第 5 步的匹配率阈值 —— 低于它流水线失败。
+装好 Shared Library 后（`integration/jenkins/README.md`），`Jenkinsfile.deploy` 是同一思路的模板，但 class 的来源不同：
+它的五个阶段是结算 → 从构建任务（`BUILD_JOB`，需要 Copy Artifact 插件，且 `Jenkinsfile.build` 保留了「Archive for runtime coverage」
+那一步）取**构建期归档的 class 包** → 部署 → `uploadClasses` 并 retarget → 等在线、打一次基线 `dump`、按 `DIAGNOSE_MIN_MATCH`
+（默认 90，填 0 不校验）校验匹配率，低于它流水线失败。要像上面这样用 classDumpDir，就按 §5.2 把第 2、4 步换成在被测端打包上传。
+`DEPLOY_MODE` 参数选部署方式。
 
 ### 5.4 手工发版 / 没有流水线
 
@@ -1151,26 +1212,31 @@ push 通道下滚动发版中途新旧副本同时在线，hub 会检出「混�
 covhub-client.sh unit-coverage order-service "$VERSION" \
     coverage-report/target/site/jacoco-aggregate/jacoco.xml
 
-# 2. 这一版的 git diff。基线是上一版的 commit / tag：先问 hub 上一次结算的版本对应的 commit
-BASE=$(covhub-client.sh last-version order-service --plain | cut -f2)   # 第一次接入时为空
-BASE=${BASE:-origin/main}
-git fetch --unshallow --tags 2>/dev/null || git fetch --tags
-git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR \
-    "$BASE"..HEAD -- '*.java' '*.kt' > covhub.diff
-covhub-client.sh diff order-service "$VERSION" covhub.diff --base "$(git rev-parse "$BASE")" --head "$(git rev-parse HEAD)"
+# 2. 这一版的源码（Step 8 那一条）。hub 存好后拿基线版本的源码和它比对，生成这一版的 diff
+covhub-client.sh upload-sources order-service "$VERSION"
 ```
 
+diff **不在构建节点上算**：以前要 `git diff <上一版>..HEAD`，Jenkins `cleanWs` 过的工作区、浅克隆、
+只拉一个 tag 都会让 `rev-parse` 找不到上一版的 commit，diff 静默变空。hub 手里按版本存着源码，两棵树
+一比就是 diff（`git diff --no-index -M`，识别重命名，挪代码不算新代码），所以 **hub 机器要装 git**，
+构建节点只要能打包当前 checkout。基线由 hub 自动定：服务当前 `version`（线上跑着的那版）→ 最近结算的
+版本 → 最近上传过源码的版本，取第一个传过源码的；`--base 1.4.1` 可以指定。第一次接入还没有基线，
+源码照收、diff 为空（返回体 `diffReason` 说明原因），下一版就有了。
+
 `Jenkinsfile.build` 里的 `Push to covhub` 阶段就是这两步（`covhub.pushUnitCoverage` /
-`covhub.pushDiff`，hub 停机时只警告不卡构建 —— 单测报告下次构建还会有，这点和 `predeploy` 不同）。
+`covhub.uploadSources`，hub 停机时只警告不卡构建 —— 下次构建还会有，这点和 `predeploy` 不同）。
+仍想自己算 git diff 的项目：`covhub-client.sh diff <svc> <ver> covhub.diff --base <commit>`
+（groovy `covhub.pushDiff(file:, base:)`）还在，而且人工上传的优先，不会被自动生成的覆盖；想换回 hub 比对
+的结果就 `covhub-client.sh diff <svc> <ver> --from-sources`。
 
 三件事要知道：
 
 - **版本串必须一致。** 构建时给的 `$VERSION`、发版时 `predeploy` / `retarget` 用的版本、
   服务配置里的 `version` 得是同一个字符串，hub 才能把 diff 和运行时快照对上。
-  `diff` 命令的返回体里 `matchesCurrentVersion: false` 就是在提醒这件事。
+  `upload-sources` / `diff` 的返回体里 `matchesCurrentVersion: false` 就是在提醒这件事。
 - **分母只算 JaCoCo 有探针的行。** 空行、注释、import、纯声明不参与；一次全文件格式化会让
   整个文件算成新增。没有可覆盖的新增行时看板显示「无新增」。
-- **顺序不限。** diff、单测 XML、运行时快照哪个先到都行，晚到的会把已有的重算一遍，已归档
+- **顺序不限。** 源码（diff）、单测 XML、运行时快照哪个先到都行，晚到的会把已有的重算一遍，已归档
   的版本也会回写。
 
 ## 6. 构建期覆盖率（可选，要改 pom）
@@ -1207,10 +1273,11 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 
 - [ ] 被测端启动日志有 `Picked up JAVA_TOOL_OPTIONS:` 且内容与 `agent-opts` 输出一致
 - [ ] `covhub-client.sh status <service>` 里 `"online": true`（push：`instances` 数量等于副本数）
+- [ ] push：被测端日志有 `[covhub-agent] connected to <hub>:6400`；参数串是两个 `-javaagent`（只有一个且是 `output=tcpclient` 说明 hub 没配 `covhubAgent`）
 - [ ] `covhub-client.sh dump <service>` 能出数字，触达类不为 0
 - [ ] 手工操作几个页面后再 dump，覆盖率**有明显上涨**
 - [ ] `covhub-client.sh diagnose <service>` 指纹匹配接近 100%、判定为「正常」
-- [ ] 看板上所属项目（或「未分组」）里能看到该服务；配了 `sourcefiles` 的话 JaCoCo 报告里能看到绿色行标记
+- [ ] 看板上所属项目（或「未分组」）里能看到该服务；流水线传过源码（`upload-sources`）的话 JaCoCo 报告里能看到绿色行标记
 - [ ] class 产物已传到 hub，配置里 `classfiles` 指向 `data/<service>/artifacts/<版本>/`
 - [ ] 被测端的 `classDumpDir` 传完已清理
 - [ ] 发版流水线里 `predeploy` 排在停服之前，`upload-classes --retarget` 排在起服之后
@@ -1220,7 +1287,8 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 - [ ] 不带令牌访问 `http://<hub>:8900/<service>/current/jacoco.xml` 返回 401
 - [ ] 运维知道 stderr 会多一行 `Picked up JAVA_TOOL_OPTIONS`，不会当成告警
 - [ ] 看板上能找到该服务，详情页四个环形指标里至少「运行时 · 总覆盖」有值
-- [ ] （要单测 / 新增代码覆盖率的话）构建流水线已加 `unit-coverage` 与 `diff` 两步，详情页「新增代码明细」有文件列表
+- [ ] （要单测 / 新增代码覆盖率的话）构建流水线已加 `unit-coverage` 与 `upload-sources` 两步（diff 由 hub 比对源码生成），详情页「新增代码明细」有文件列表
+- [ ] （要看源码的话）构建流水线已加 `upload-sources`，新增代码点开能「展开全文」
 
 ### 看板每一块数据从哪来
 
@@ -1229,19 +1297,19 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 | 看板上的东西 | 数据来源 | 要做到的事 |
 |---|---|---|
 | 运行时 · 总覆盖、趋势图、在线状态 | hub 轮询 agent | §3 接入 + hub 带 `--with-watch` 起 |
-| 运行时 · 新增代码、「新增代码」页签 | 运行时报告 ∩ 这一版的 git diff | 构建流水线推 `diff`（§5.6），**版本串与服务的 `version` 一致** |
-| 「新增代码」里点开看源码 | `sourcefiles` 指向的源码目录 | Step 8 配 `sourcefiles`（当前版本的源码；历史版本用结算时存下的片段） |
+| 运行时 · 新增代码、「新增代码」页签 | 运行时报告 ∩ 这一版的 diff（hub 比对两版源码得出） | 构建流水线 `upload-sources`（§5.6），**版本串与服务的 `version` 一致** |
+| 「新增代码」里点开看源码、展开全文 | 按版本上传的源码 | Step 8 流水线 `upload-sources`（历史版本同样按它；早于上传的归档用结算时存下的片段） |
 | 单测 · 总覆盖、「单测覆盖率」页签 | 构建流水线推的 jacoco.xml | §6 加聚合模块 + §5.6 推 `unit-coverage` |
-| 单测 · 新增代码 | 单测 XML ∩ git diff | 上面两条都做 |
+| 单测 · 新增代码 | 单测 XML ∩ 这一版的 diff | 上面两条都做 |
 | 已结算版本、版本下拉（历史版本） | 每次 `predeploy` 的归档 | 发版流程排进 `predeploy`（§5），每发一版多一条 |
 | 历史对比 | 两个归档 / 当前周期的 jacoco.xml | 至少结算过一版；比对的是运行时指令覆盖 |
 | 触达类、指纹匹配率、`diagnose` | exec 与 class 指纹 | Step 7 `upload-classes --retarget`（或 `classDumpDir`） |
-| JaCoCo 原生报告下钻到行 | `sourcefiles` | Step 8 |
+| JaCoCo 原生报告下钻到行 | 按版本上传的源码（兜底：`sourcefiles`） | Step 8 |
 | 项目卡片、项目报表、侧栏项目 | 服务归属项目 | Step 3 `--project` 或看板里「添加服务」 |
 | 报表里的「期间结算版本 / 单测报告」 | archives / unit_reports 表 | 同上两行：有 `predeploy`、有 `unit-coverage` |
 | 断代记录 | hub 自动检测 | 不用做，pull 通道自动；push 只告警混版本 |
 
-一句话：**运行时靠接入，新增代码靠 diff，单测靠 XML，历史靠 predeploy，源码靠 sourcefiles，分组靠 project**。
+一句话：**运行时靠接入，新增代码靠 diff，单测靠 XML，历史靠 predeploy，源码靠 upload-sources，分组靠 project**。
 前三样以外都是可选的，缺哪块看板就在哪块显示「—」，不会报错。
 
 ---
@@ -1255,7 +1323,7 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 | hub 的采集 / API 日志 | `serve` 进程的 stderr：`nohup … 2>&1` 方式是 `covhub.log`，systemd 方式是 `journalctl -u covhub` |
 | 每次 API 调用的执行日志 | 也在返回体的 `log` 字段里，流水线输出中直接能看 |
 | agent 自己的错误 | 被测 JVM 的 stderr。agent 启动失败（jar 路径错、class 版本不支持）会在 `Picked up` 那行之后紧跟一段异常 |
-| 看板的状态徽章 | 离线 / 采集停了（超过 3 个轮询周期没新数据）/ 有断代 / 混版本 / 未知。在线状态由采集线程每轮写入，没带 `--with-watch` 的 hub 上永远是「未知」 |
+| 看板的状态徽章 | 离线 / 采集停了（超过 3 个轮询周期、且不少于 15 分钟没新数据）/ 有断代 / 混版本 / 未知。在线状态由采集线程每轮写入，没带 `--with-watch` 的 hub 上永远是「未知」 |
 
 `/api/health` 的请求不进日志（它会被反复轮询）。
 
@@ -1281,8 +1349,10 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 要备份的是三样：配置文件、数据库、`data/`。数据库里是服务配置、覆盖率历史、归档元数据
 （用 `mysqldump` 之类常规手段）；`data/` 里最值钱的是 `versions/<版本>/`（报告 + 全部 exec +
 `manifest.json`）—— manifest 记录了该 exec 对应哪份 class，是日后重新出报告的唯一依据。
-`artifacts/` 也一起备，否则 exec 有了 class 没了。库丢了而 `data/` 还在时，`covhub import`
-能从每个服务的 `versions/*/manifest.json` 把归档记录重建出来（快照历史重建不了）。
+`artifacts/` 也一起备，否则 exec 有了 class 没了。另外定期 `python3 covhub.py export --out covhub-services.yaml`
+（或 `GET /api/export`）把项目与服务配置导成文件一起备。库丢了而 `data/` 还在时，`covhub import covhub-services.yaml`
+先重建项目与服务配置，再从每个服务的 `versions/*/manifest.json` 把归档记录重建出来（快照历史重建不了；
+`import` 只认文件里列出的服务，所以没有 export 过的话配置得重新登记）。
 
 ### 8.4 改了配置要不要重启
 
@@ -1290,11 +1360,12 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 
 | 改了什么 | 要做什么 |
 |---|---|
-| `reportExcludes` / `sourcefiles` / `sourceEncoding` | 不用重启任何东西，`covhub-client.sh report <svc>` 重出报告 |
+| `reportExcludes` / `sourcefiles` / `sourceEncoding`，或刚 `upload-sources` | 不用重启任何东西，`covhub-client.sh report <svc>` 重出报告（不跑也行，下一轮采集自然带上） |
 | `includes` / `excludes` / `classDumpDir` / `bindAddress` / `port` | 重新取 `agent-opts`，**重启被测服务**。改了 `includes` 之后 class 集合变了，记得重传 class |
+| `covhubAgent` / `collect.advertiseAddress` / `collect.port`（影响 push 服务的参数串） | 重新取 `agent-opts`，**重启被测服务**才换上（`collect.port` 还要重启 hub）。已经在跑的实例按旧参数继续工作 |
 | `address` / `version` / `classfiles` / `project` | 不用重启，下一轮采集 / 下一次刷新看板生效 |
 | `serve.token` / `serve.webDir` | 不用重启，下一次请求就生效（配置文件每个请求重读）。令牌走环境变量 `COVHUB_TOKEN` 的话要重启进程 |
-| `serve.port` / `watch.intervalSeconds` / `collect.*` / `database.*` | **重启 hub**（这几项在启动时读一次） |
+| `serve.port` / `watch.intervalSeconds` / `collect.port` / `collect.bindAddress` / `database.*` | **重启 hub**（这几项在启动时读一次）。`collect.dumpTimeoutSeconds` 不用重启，下一轮取数即生效 |
 | 加 / 删一条 service | 不用重启 hub。删的话先跑一次 `predeploy` 把数据结算掉；`service remove` 只删配置，`data/<service>/` 和库里的历史不动 |
 
 ### 8.5 换令牌
@@ -1316,6 +1387,11 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 **两个交付物要一起更新**：只重启 hub 不换前端，看板可能调到一个还不存在的新接口；
 只换前端不重启 hub 同理。升级窗口里两步连着做。
 
+**重启 hub 对被测服务的影响**：pull 通道没有 —— hub 回来后接着拉。push 通道挂 `covhub-agent` 的实例
+会在 hub 回来后自己连上（退避重试，最长 30 秒一次），看板上的在线实例数随之恢复，hub 停着的那段时间
+被测端的计数器照常累加、不丢。**还在用 `output=tcpclient` 的实例不会回来**，要等被测服务各自重启 ——
+hub 启动日志里有「未配置 covhubAgent」的提醒就是这种情况，按 README「从 2.5 及更早升级到 2.6」换上即可。
+
 配置文件、数据库、`data/` 都不在版本库里，`git pull` 不会碰它们。依赖有变化时重跑
 `pip3 install .`；表结构有变化时 `serve` 启动会自动升级（`autoUpgrade: true`），或手工
 `python3 covhub.py db upgrade`。前端产物随仓库更新（`web/dist`），hub 机器不需要 Node；
@@ -1323,16 +1399,18 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 
 ### 8.7 升级 JaCoCo
 
-被测服务升到了 agent 不支持的 Java 版本时才需要。换 `lib/` 下的两个 jar（取法见
-`CLAUDE.md`），重启 hub；**被测端的 agent jar 也要换**（重新 `fetch-agent` 并重启服务）。
-两边版本不一致时 exec 格式通常仍兼容，但别指望，换就一起换。
+被测服务升到了 agent 不支持的 Java 版本时才需要。换 `lib/` 下 JaCoCo 的两个 jar
+（`jacocoagent.jar` / `jacococli.jar`，取法见 `CLAUDE.md`），重启 hub；**被测端的 agent jar 也要换**
+（重新 `fetch-agent` 并重启服务）。两边版本不一致时 exec 格式通常仍兼容，但别指望，换就一起换。
+`covhub-agent.jar` 不用跟着换：它对 JaCoCo 只走公开入口、用反射调用，不绑定 JaCoCo 版本。
 
 ### 8.8 hub 迁移
 
 整个 `/opt/coverage-hub`（含 `data/`）打包搬过去，数据库照常导出导入。相对路径相对配置
 文件解析，但 `upload-classes --retarget` 写进库里的 `classfiles` 是绝对路径，搬家后目录不同要
 `service update --classfiles` 改一下。然后改所有发版节点的 `COVHUB_URL`；push 通道还要改
-`collect.advertiseAddress` 并重启被测服务（参数串里带着旧地址）。
+`collect.advertiseAddress` 并重启被测服务（参数串里带着旧地址）。`advertiseAddress` 写的是域名、
+搬家只是换了解析的话不用重启被测服务：`covhub-agent` 每次重连都重新解析地址。
 
 ---
 
@@ -1348,17 +1426,21 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 | 启动日志没有 `Picked up JAVA_TOOL_OPTIONS` | `docker inspect` / `systemctl show -p Environment` 看变量到底有没有传到进程 | 环境变量没设到目标 JVM：compose override 没生效、drop-in 文件名不是 `.conf`、K8s `set env` 打到了别的容器 |
 | `Picked up` 后面跟着 `Error opening zip file or JAR manifest missing` | 到被测端看参数串里的 jar 路径存不存在 | `jacocoAgent` 配的路径在被测端不存在，或容器没挂进去 |
 | `Picked up` 后面跟着 `Unsupported class file major version` | `java -version` | 被测服务的 Java 比 `lib/` 里的 JaCoCo 新，换 jar（§8.7） |
-| 服务起来了但 `ss -lnt` 没有 6300 | 看启动日志有没有 agent 异常；确认 `output=tcpserver` | 参数串是 push 的（`tcpclient`）却按 pull 配；端口被占；agent 没起来 |
+| 服务起来了但 `ss -lnt` 没有 6300 | 看启动日志有没有 agent 异常；确认 `output=tcpserver` | 参数串是 push 的（`output=none` / `tcpclient`）却按 pull 配；端口被占；agent 没起来 |
 | `classDumpDir` 是空的 | 等服务完全起来再看；确认参数串里有 `classdumpdir=` | 手写参数串漏了；目录没写权限；`includes` 写错了什么都没匹配上 |
 | `status` 里 `"online": false` / 连通列是 `--` | 从 hub 上 `nc -zv <address> <port>` | 服务没起；`bindAddress` 绑了 `127.0.0.1` 但要跨机访问；容器端口没映射；防火墙；`address` 写成了容器 IP |
+| push：被测服务起不来，启动日志里有 JaCoCo 的 `ConnectException` | 看参数串是不是 `output=tcpclient` | 用的是 JaCoCo 自带的 tcpclient，启动时连不上 hub 就拒绝启动。hub 配上 `covhubAgent`，重新取 `agent-opts`（§Step 2） |
+| push：hub 重启后实例数掉到 0 再没回来 | hub 启动日志有没有「未配置 covhubAgent」告警；被测端日志有没有 `[covhub-agent]` | 同上：tcpclient 断了不重连。换成 `covhub-agent` 之前只能重启被测服务 |
+| push：被测端日志 `[covhub-agent] not started: JaCoCo agent not found` | 看参数串是不是两个 `-javaagent` 都在 | 只挂了 `covhub-agent.jar`，没挂 `jacocoagent.jar`（手工拆过参数串） |
+| push：被测端日志 `[covhub-agent] cannot reach ...` 之后一直没有 `connected to` | 被测端 `nc -zv <advertiseAddress> 6400` | hub 没起、收集端没配（`collect.port`）、地址不可达。应用本身不受影响，通了会自己连上 |
 | push：日志说「匹配不到任何服务」 | 比对参数串里的 `sessionid` 和配置里的 `name` | 手工改了 `sessionid`。用 `agent-opts` 生成就不会错 |
 | push：实例连上了但没数据 | hub 启动日志有没有「没带 --with-watch」告警 | hub 没带 `--with-watch`，收集端起了但没人取数 |
 | push：`status` 显示 `?` | 改用 API 或看板 | 你在**另一个进程**里跑的 CLI，看不到收集端手上的连接 —— 那是「不知道」不是「离线」 |
-| push：agent 端日志反复重连 | 被测端 `nc -zv <advertiseAddress> 6400` | `advertiseAddress` 配成了 hub 自己的监听地址（`0.0.0.0` / `127.0.0.1`）或容器外不可达的地址 |
+| push：被测端日志反复出现 `connected to` / `reconnecting` | 被测端 `nc -zv <advertiseAddress> 6400` | `advertiseAddress` 配成了 hub 自己的监听地址（`0.0.0.0` / `127.0.0.1`）或容器外不可达的地址 |
 | 客户端报 `HTTP 401` | —— | `COVHUB_TOKEN` 没设或和 `serve.token` 对不上 |
 | 客户端报「连不上 hub」 | `curl -v $COVHUB_URL/api/health` | `COVHUB_URL` 写错；hub 没起；8900 被防火墙挡了 |
-| `fetch-agent` 报 404 | hub 上看 `jacocoAgent` 指的文件在不在 | `jacocoAgent` 配的是被测端路径，hub 本机不存在这个文件。改回 `./lib/jacocoagent.jar` 下载一次，或直接从版本库 `lib/` 拷 |
-| `upload-classes` 返回「已接收 0 个」 | `tar tzf cls.tgz \| head` | 包里没有 `.class`：打错了目录，或服务还没加载任何匹配 `includes` 的类 |
+| `fetch-agent` / `fetch-covhub-agent` 报 404 | hub 上看 `jacocoAgent` / `covhubAgent` 指的文件在不在 | 配的是被测端路径，hub 本机不存在这个文件（或 `covhubAgent` 根本没配）。改回 `./lib/` 下的默认值下载一次，或直接从版本库 `lib/` 拷 |
+| `upload-classes` 返回体里 `"classes": 0` | `tar tzf cls.tgz \| head` | 包里没有 `.class`：打错了目录，或服务还没加载任何匹配 `includes` 的类 |
 
 ### 数据阶段
 
@@ -1370,17 +1452,17 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 | 部分类始终 0 | 看 `excludes` | 采集阶段就没插桩，改配置并**重启服务** |
 | 报告分母比预期大很多 | 看报告的包列表 | `reportExcludes` 没配，dto / mapper / config 都算进去了；或 `includes` 开太大把框架类也算了 |
 | 报告里有些类根本不出现 | `ls classDumpDir` 里有没有它 | 传 class 时那个类还没被加载过。调一次相关功能后重传 |
-| 源码页显示「Source file ... was not found」 | —— | 没配 `sourcefiles`，或路径没指到 `src/main/java` 那一级 |
+| 源码页显示「Source file ... was not found」 | 看板详情页有没有「该版本没传源码」提示 | 这一版没跑 `upload-sources`，或上传的版本串和服务的 `version` 不一致；传完跑一次 `report` 立即生效 |
 | 源码页乱码 | —— | `sourceEncoding` 没设成 `UTF-8` |
-| 源码页绿色标记打在错误的行上 | hub 上 `git -C /opt/src/... describe` | 源码版本和线上的不一致 |
+| 源码页绿色标记打在错误的行上 | 上传源码时用的版本串 / commit | 源码版本和线上的不一致：`upload-sources` 要在构建这一版的同一个 checkout 里跑 |
 | 覆盖率只涨不跌，跨了好几个版本 | `diagnose` 的会话数和断代记录 | 发版时没跑 `predeploy`。hub 会自动检测重启并结算，但重启前最后一个轮询周期的数据丢了 |
 | 看板上莫名多出一个版本归档 | `diagnose` 的「断代记录」 | 自动断代：hub 发现被测进程重启过（手工重启、OOM、驱逐），替你结算了上一周期 |
 | 归档目录名带 `-2` 后缀 | —— | 同一版本号结算了两次。归档不可覆盖，宁可多一个目录 |
 | push：看板报「在线实例跑着两份不同的 class」 | —— | 滚动发版正在进行，新旧副本同时在线。发版流程里补一次 `predeploy` |
-| push：某个副本的数据突然不见了 | hub 日志找「已断开（timed out）」 | 取数超时（默认 20 秒）后该实例被丢弃，会重连，但那一段覆盖率随实例消失 |
+| push：某个副本的数据突然不见了 | hub 日志找「已断开（timed out）」 | 取数超时（默认 20 秒）后该实例的连接被 hub 丢弃。挂 `covhub-agent` 的实例随后自己连回来，计数器一直在 JVM 里，下一轮照常取到（只是这一轮少一份快照）；用 `output=tcpclient` 的实例不会回来，直到被测服务重启，期间的覆盖率取不到 |
 | `predeploy` 报 409 | —— | 目标已不可达。服务已经停了？那这段数据已经丢了。确实要跳过用 `--allow-missing` |
 | `predeploy` 日志「指纹匹配率只有 x%」但仍归档 | `diagnose <svc> <版本>` | 这是有意的：exec 不可再生，对不上也先留下。把 class 对上后可以重出这一版的报告 |
-| 看板「新增代码」一直是「—」 | `diff` 命令返回体里的 `matchesCurrentVersion` | 没传这一版的 diff，或 diff 的版本串和服务当前 `version` 不一致。对上版本串后 `covhub recompute <svc>` |
+| 看板「新增代码」一直是「—」 | `diff` 命令返回体里的 `matchesCurrentVersion` | 没传这一版的 diff，或 diff 的版本串和服务当前 `version` 不一致。对上版本串后 `covhub-client.sh recompute <svc> [版本]`（hub 本机也可 `python3 covhub.py recompute <svc> --version <版本>`） |
 | 新增代码显示「无新增」 | 看 `data/<svc>/diff/<版本>.lines.json` | diff 里的新增行没有一行是 JaCoCo 有探针的（只改了注释 / 配置 / 测试代码），合法 |
 | 详情页提示「N 个新增的源码文件在报告里找不到」 | 对照 `includes` / `excludes` | 这些文件的类没被插桩（`excludes` 排掉、`includes` 没覆盖到），或 class 不在 `classfiles` 里。它们不进分母，数字会偏高 |
 | 单测那一列一直是「—」 | 构建流水线日志里 `unit-coverage` 那一步 | 没传单测报告；或 hub 停机时上传失败（默认只警告不卡构建） |
@@ -1392,7 +1474,7 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 | 服务启动明显变慢 | 看 `includes` | 范围太大，把框架类也插桩了。收窄到自己的业务包 |
 | 上传单测 XML 返回 413 | nginx 日志 | 反代的 `client_max_body_size` 默认 1m，聚合 XML 有几十 MB，调大 |
 | hub 启动日志第一行是 `sqlite:///…` | —— | `database.url` 没配或环境变量没传到进程，跑在了单机试用的 SQLite 上 |
-| 看板卡片提示「采集可能已经停了」 | hub 日志 | 超过 3 个轮询周期没新数据：hub 进程挂了、`--with-watch` 没带、或服务下线了 |
+| 看板卡片提示「采集可能已经停了」 | hub 日志 | 超过 3 个轮询周期（且不少于 15 分钟）没新数据：hub 进程挂了、`--with-watch` 没带、或服务下线了 |
 | 浏览器打开看板弹「需要访问令牌」 | —— | 配了 `serve.token`。填一次换到 Cookie，之后不再问 |
 | 打开 hub 的 `/` 看到一页说明而不是看板 | —— | 正常：前后端分离时看板在 nginx 那边。要让 hub 自己托管就配 `serve.webDir` |
 | 打开看板是 404 / 白屏 | nginx 日志 | `web/dist` 没同步到 nginx 的 root 目录，或 root 配错；产物换版本后要整个目录覆盖 |
@@ -1418,8 +1500,8 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 分离部署时把前端也同�
 撤之前先跑一次 `predeploy` 把最后一段数据结算掉。push 通道的服务撤下时，被测进程
 一停连接自然断开，hub 侧无需操作。
 
-被测机器上再删掉 `/opt/jacoco-lib/jacocoagent.jar` 和 `classDumpDir` 指向的目录就
-干净了 —— 从头到尾这台机器上就只多过这一个文件。
+被测机器上再删掉 `/opt/jacoco-lib/` 下的 jar（`jacocoagent.jar`，push 通道还有
+`covhub-agent.jar`）和 `classDumpDir` 指向的目录就干净了 —— 从头到尾这台机器上就只多过这一两个文件。
 
 hub 配置里那条 service 可以留着（看板上会显示离线），也可以删掉；`data/<service>/`
 里的归档不会自动删，需要的话手工搬走。

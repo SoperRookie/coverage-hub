@@ -1,6 +1,10 @@
-"""把旧的 targets.yaml（services 段）和 data/<svc>/state.json 导进数据库。
+"""把配置文件里的 projects / services 段和 data/<svc>/state.json 导进数据库。
 
-幂等：服务按 name 判断，已存在默认跳过；快照按 (时刻, 类型, 计数) 去重，
+来源有两种：旧的 targets.yaml（只有 services 段）和 `covhub export` 导出的文件
+（projects + services）—— 后者是在两个库（比如 covhub_dev 与 covhub）之间搬配置
+的通道，服务配置在库里，换一个库不会自动长出来。
+
+幂等：项目、服务按 name 判断，已存在默认跳过；快照按 (时刻, 类型, 计数) 去重，
 归档按目录名去重，断代按 (时刻, 类型) 去重。中途失败可以直接重跑。
 默认不动磁盘上的任何文件。
 """
@@ -14,16 +18,46 @@ from sqlalchemy import select
 from ..config import read_config_file
 from ..layout import svc_dir
 from ..logbuf import log
-from ..schemas import ServiceSpec
+from ..schemas import ProjectSpec, ServiceSpec
 from . import repo
 from .engine import session_scope
 from .models import Archive, Break, Service, ServiceState, Snapshot
 
 
-def import_services(config_path, dry_run=False, overwrite=False):
-    """返回 {name: added|updated|skipped|invalid}。"""
+OUTCOME_TEXT = {"added": "已导入", "updated": "已更新",
+                "skipped": "已存在，跳过（--overwrite 可覆盖）"}
+
+
+def import_projects(config_path, dry_run=False, overwrite=False):
+    """导 projects 段。返回 {name: added|updated|skipped|invalid}。旧 targets.yaml 没有这段。"""
     raw = read_config_file(config_path)
     result = {}
+    existing = {p["name"] for p in repo.list_projects()}
+    for item in raw.get("projects") or []:
+        name = item.get("name", "?") if isinstance(item, dict) else "?"
+        try:
+            fields = ProjectSpec(**item).model_dump()
+        except Exception as exc:
+            log("  ! 项目 %s：不合法，跳过 —— %s" % (name, _brief(exc)))
+            result[name] = "invalid"
+            continue
+        if dry_run:
+            result[name] = ("updated" if overwrite else "skipped") if name in existing else "added"
+        else:
+            result[name] = repo.upsert_project(fields, overwrite=overwrite)
+        log("  项目 %s：%s" % (name, OUTCOME_TEXT[result[name]]))
+    return result
+
+
+def import_services(config_path, dry_run=False, overwrite=False):
+    """返回 {name: added|updated|skipped|invalid}。
+
+    服务引用的项目在目标库里不存在时按名字建出来（只有名字，标题留空）：
+    换库导配置就是为了少一遍手工登记，卡在「先 project add」上没有意义。
+    """
+    raw = read_config_file(config_path)
+    result = {}
+    known_projects = {p["name"] for p in repo.list_projects()}
     for item in raw.get("services") or []:
         name = item.get("name", "?")
         try:
@@ -33,13 +67,18 @@ def import_services(config_path, dry_run=False, overwrite=False):
             log("  ! %s：配置不合法，跳过 —— %s" % (name, _brief(exc)))
             result[name] = "invalid"
             continue
+        project = fields.get("project")
+        if project and project not in known_projects:
+            log("  项目 %s 不存在，按名字建出（标题可事后 project update 补）" % project)
+            if not dry_run:
+                repo.upsert_project({"name": project})
+            known_projects.add(project)
         if dry_run:
             exists = name in repo.list_service_names()
             result[name] = ("updated" if overwrite else "skipped") if exists else "added"
         else:
             result[name] = repo.upsert_service(fields, overwrite=overwrite)
-        log("  %s：%s" % (name, {"added": "已导入", "updated": "已更新",
-                                  "skipped": "已存在，跳过（--overwrite 可覆盖）"}[result[name]]))
+        log("  %s：%s" % (name, OUTCOME_TEXT[result[name]]))
     return result
 
 

@@ -243,6 +243,7 @@ const crumbs = computed(() => [
           <el-radio-button value="unit">单测</el-radio-button>
         </el-radio-group>
         <span class="hint">点开一行看源码与逐行执行状态</span>
+        <span v-if="!d.runtime.sourcesUploaded" class="hint">· {{ viewingHistory ? "这一版" : "当前版本" }}没传源码（<code>upload-sources</code>），看不了全文，JaCoCo 报告也只到方法级</span>
       </div>
       <div class="card-body">
         <IncrementalTable v-if="incTab === 'runtime'" :view="d.runtime.incremental" :service="name" kind="runtime" :version="version" :on-error="onError"
@@ -304,6 +305,7 @@ const crumbs = computed(() => [
           <el-descriptions-item label="excludes"><span class="mono">{{ (d.config.excludes as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="reportExcludes"><span class="mono">{{ (d.config.reportExcludes as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="classfiles"><span class="mono">{{ (d.config.classfiles as string[]).join("  ") || "—" }}</span></el-descriptions-item>
+          <el-descriptions-item label="源码"><span>{{ d.runtime.sourcesUploaded ? "这一版已上传（upload-sources）" : "这一版没上传" }}</span></el-descriptions-item>
           <el-descriptions-item label="sourcefiles"><span class="mono">{{ (d.config.sourcefiles as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="classDumpDir"><span class="mono">{{ d.config.classDumpDir || "—" }}</span></el-descriptions-item>
         </el-descriptions>

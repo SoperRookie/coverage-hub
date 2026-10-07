@@ -3,7 +3,7 @@
   "info": {
     "title": "covhub 控制 API",
     "description": "JaCoCo 运行期覆盖率的采集与看板。整套方案只有 hub 这一个服务端，被测机器和发版节点不装 Python、不装 java、不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。\n\n**写接口在 hub 内部串行执行**，返回体里带着这次执行的日志。**非 2xx 一律表示失败**，调用方应据此让部署流程停下来。\n\n发版节点上更省事的做法是用 integration/covhub-client.sh 包一层。",
-    "version": "2.3.1"
+    "version": "2.6.0"
   },
   "paths": {
     "/api/health": {
@@ -302,6 +302,73 @@
           },
           "404": {
             "description": "配置里 jacocoAgent 指向的文件在 hub 上不存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "hub 内部错误",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
+      }
+    },
+    "/api/covhub-agent.jar": {
+      "get": {
+        "tags": [
+          "查询"
+        ],
+        "summary": "下载 covhub-agent.jar",
+        "description": "push 通道的薄 agent：与 jacocoagent.jar 并列挂在被测 JVM 上，负责连 hub 的收集端、\n断线重连（agent-opts 在配了 covhubAgent 时会生成两个 -javaagent）。\n和 /api/agent.jar 一样读的是配置里那一项指向的文件，那一项填的是**被测端**路径。",
+        "operationId": "covhub_agent_jar_api_covhub_agent_jar_get",
+        "responses": {
+          "200": {
+            "description": "jar 文件",
+            "content": {
+              "application/json": {
+                "schema": {}
+              },
+              "application/java-archive": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没配 covhubAgent，或它指向的文件在 hub 上不存在",
             "content": {
               "application/json": {
                 "schema": {
@@ -1697,12 +1764,75 @@
         }
       }
     },
+    "/api/export": {
+      "get": {
+        "tags": [
+          "服务配置"
+        ],
+        "summary": "导出全部项目与服务配置",
+        "description": "与 CLI 的 covhub export 同一份实现：存成文件后 covhub import 能原样导进另一个库。",
+        "operationId": "export_config_api_export_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportResult"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "配置不合法或同名服务已存在",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ]
+      }
+    },
     "/api/import": {
       "post": {
         "tags": [
           "服务配置"
         ],
-        "summary": "从旧 targets.yaml 导入服务与历史",
+        "summary": "导入项目与服务配置（旧 targets.yaml 或 export 的输出）及历史",
         "description": "幂等，可重复调用。和 CLI 的 covhub import 是同一份实现。",
         "operationId": "import_legacy_api_import_post",
         "security": [
@@ -1741,11 +1871,11 @@
             "required": false,
             "schema": {
               "type": "boolean",
-              "description": "同名服务已存在时覆盖",
+              "description": "同名项目 / 服务已存在时覆盖",
               "default": false,
               "title": "Overwrite"
             },
-            "description": "同名服务已存在时覆盖"
+            "description": "同名项目 / 服务已存在时覆盖"
           },
           {
             "name": "dryRun",
@@ -2384,8 +2514,8 @@
         "tags": [
           "构建期"
         ],
-        "summary": "收一份 git diff，用于新增代码覆盖率",
-        "description": "推荐的生成命令：\n`git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt'`。\n\nhub 记下每个源码文件的新增行号，之后每次快照都按它算**新增代码的运行时覆盖率**；\n该版本已有的快照与单测报告立刻重算一遍。分母是新增行里 JaCoCo 有探针的行。\n返回体里的 `matchesCurrentVersion` 为 false 说明版本串对不上服务当前 version ——\n运行时快照按 version 找 diff，对不上就永远算不出新增覆盖。",
+        "summary": "该版本的 diff：由 hub 比对两版源码生成（from=sources），或收流水线上传的 git diff",
+        "description": "两种来源，效果一样：hub 记下每个源码文件的新增行号，之后每次快照都按它算**新增代码的\n运行时覆盖率**，该版本已有的快照与单测报告立刻重算一遍。分母是新增行里 JaCoCo 有探针的行。\n\n**from=sources（推荐）**：两版源码都经 upload-sources 传上来后由 hub 比对，构建节点不需要\n基线 commit 的历史（浅克隆、清过的工作区都无所谓）。upload-sources 默认就会做这一步，这个\n接口用于显式指定基线或重做。\n\n**上传 git diff**：推荐的生成命令\n`git -c core.quotepath=false diff --no-color --no-ext-diff -M --unified=0 --diff-filter=AMR <base>..<head> -- '*.java' '*.kt'`。\n流水线上传的 diff 优先：之后 upload-sources 不会用自动生成的覆盖它。\n\n返回体里的 `matchesCurrentVersion` 为 false 说明版本串对不上服务当前 version ——\n运行时快照按 version 找 diff，对不上就永远算不出新增覆盖。",
         "operationId": "push_diff_api_diff_post",
         "security": [
           {
@@ -2456,13 +2586,20 @@
           {
             "name": "base",
             "in": "query",
-            "required": true,
+            "required": false,
             "schema": {
-              "type": "string",
-              "description": "基线：上一版的 commit / tag（建议传 rev-parse 后的 SHA）",
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "基线。上传 git diff 时必填，是上一版的 commit / tag（建议传 rev-parse 后的 SHA）；from=sources 时是基线的**版本标识**，不给则 hub 自动定：服务当前 version → 最近结算的版本 → 最近上传过源码的版本",
               "title": "Base"
             },
-            "description": "基线：上一版的 commit / tag（建议传 rev-parse 后的 SHA）"
+            "description": "基线。上传 git diff 时必填，是上一版的 commit / tag（建议传 rev-parse 后的 SHA）；from=sources 时是基线的**版本标识**，不给则 hub 自动定：服务当前 version → 最近结算的版本 → 最近上传过源码的版本"
           },
           {
             "name": "head",
@@ -2477,10 +2614,28 @@
                   "type": "null"
                 }
               ],
-              "description": "本次的 commit",
+              "description": "本次的 commit（上传 git diff 时）",
               "title": "Head"
             },
-            "description": "本次的 commit"
+            "description": "本次的 commit（上传 git diff 时）"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "填 sources：不读正文，由 hub 比对该版本与基线版本经 upload-sources 传上来的源码生成 diff（git diff --no-index -M，识别重命名）",
+              "title": "From"
+            },
+            "description": "填 sources：不读正文，由 hub 比对该版本与基线版本经 upload-sources 传上来的源码生成 diff（git diff --no-index -M，识别重命名）"
           }
         ],
         "responses": {
@@ -2536,7 +2691,7 @@
           }
         },
         "requestBody": {
-          "required": true,
+          "required": false,
           "content": {
             "application/octet-stream": {
               "schema": {
@@ -2555,7 +2710,190 @@
               }
             }
           },
-          "description": "`git diff <基线>..<本次>` 的输出。curl 用 --data-binary @file"
+          "description": "`git diff <基线>..<本次>` 的输出。curl 用 --data-binary @file。from=sources 时不读正文"
+        }
+      }
+    },
+    "/api/upload-sources": {
+      "post": {
+        "tags": [
+          "构建期"
+        ],
+        "summary": "上传该版本的源码（报告下钻到行、新增代码看源码）",
+        "description": "hub 独立部署时本机没有源码：流水线按版本把源码传上来，存在 `data/<svc>/sources/<版本>/`。\n出报告按版本取（JaCoCo HTML 生成时把源码内嵌进类页面，归档后不再依赖它），新增代码视图\n能看整个文件，历史版本也对得上。\n\n**顺带生成这一版的 diff**（新增代码覆盖率的依据）：hub 拿基线版本的源码和这一份比对，构建\n节点不需要有基线 commit 的历史。生成不了（第一次接入没有基线、hub 没装 git）不算失败，\n返回体 `diff` 为 null、`diffReason` 说明原因。\n\n只收 `.java/.kt/.groovy/.scala` 且丢掉 `src/test/`，其余文件（配置、密钥）一律不落盘；\n源码根按每个文件的 `package` 声明识别，与目录布局无关。同版本重传整份替换。\n这个目录**不经静态路径外发**，只通过报告与源码视图接口出去。",
+        "operationId": "upload_sources_api_upload_sources_post",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "服务名",
+              "title": "Service"
+            },
+            "description": "服务名"
+          },
+          {
+            "name": "services",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "一份源码落多个服务，逗号分隔（一个仓库多个服务时用）",
+              "title": "Services"
+            },
+            "description": "一份源码落多个服务，逗号分隔（一个仓库多个服务时用）"
+          },
+          {
+            "name": "version",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "版本标识，不给则取服务当前 version",
+              "title": "Version"
+            },
+            "description": "版本标识，不给则取服务当前 version"
+          },
+          {
+            "name": "diff",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "description": "auto：存好源码后由 hub 比对基线版本的源码生成这一版的 diff（已有流水线上传的 diff 时不覆盖）；skip：不生成",
+              "default": "auto",
+              "title": "Diff"
+            },
+            "description": "auto：存好源码后由 hub 比对基线版本的源码生成这一版的 diff（已有流水线上传的 diff 时不覆盖）；skip：不生成"
+          },
+          {
+            "name": "base",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "生成 diff 时的基线版本标识，不给则 hub 自动定：服务当前 version → 最近结算的版本 → 最近上传过源码的版本",
+              "title": "Base"
+            },
+            "description": "生成 diff 时的基线版本标识，不给则 hub 自动定：服务当前 version → 最近结算的版本 → 最近上传过源码的版本"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourcesUploadResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "正文为空、不是 JaCoCo XML / git diff、或版本串不能作目录名",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "required": true,
+          "description": "源码压缩包，tar.gz 或 zip，从仓库根打包（covhub-client.sh upload-sources 会替你打）。curl 用 --data-binary @file",
+          "content": {
+            "application/gzip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/zip": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            },
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
         }
       }
     },
@@ -3061,7 +3399,7 @@
           "看板"
         ],
         "summary": "某个文件的新增代码源码视图",
-        "description": "新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用算增量时存下的片段\n（历史版本靠它），其次从服务的 sourcefiles 里找，都没有时只有行号与状态。",
+        "description": "新增行标覆盖状态（covered / missed / nocode），前后带上下文。源码优先用该版本经\nupload-sources 传上来的整份文件，其次用算增量时存下的片段（稀疏，没有全文），再次是服务\n配置的 sourcefiles（只对当前版本可信）；都没有时只有行号与状态。",
         "operationId": "incremental_source_api_services__name__source_get",
         "security": [
           {
@@ -3138,6 +3476,18 @@
               "title": "Version"
             },
             "description": "看某个已结算版本的（归档目录名）"
+          },
+          {
+            "name": "full",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "给整个文件（该版本上传过源码才有全文，否则仍只有片段）",
+              "default": false,
+              "title": "Full"
+            },
+            "description": "给整个文件（该版本上传过源码才有全文，否则仍只有片段）"
           }
         ],
         "responses": {
@@ -3199,9 +3549,10 @@
           "agentOpts": {
             "type": "string",
             "title": "Agentopts",
-            "description": "塞进被测服务 JAVA_TOOL_OPTIONS 的参数串",
+            "description": "塞进被测服务 JAVA_TOOL_OPTIONS 的参数串。push 通道且 hub 配了 covhubAgent 时是空格隔开的两个 -javaagent（JaCoCo 只插桩，covhub-agent 连 hub 并断线重连），赋值时整串要带引号",
             "examples": [
-              "-javaagent:/opt/jacoco/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,sessionid=1.4.2"
+              "-javaagent:/opt/jacoco/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,sessionid=1.4.2",
+              "-javaagent:/opt/jacoco/jacocoagent.jar=output=none,includes=com.example.*,excludes=covhub.agent.*:org.jacoco.agent.rt.*,sessionid=order-service -javaagent:/opt/jacoco/covhub-agent.jar=address=covhub.internal,port=6400,idle=900"
             ]
           }
         },
@@ -3471,6 +3822,11 @@
           "addedLines": {
             "type": "integer",
             "title": "Addedlines"
+          },
+          "origin": {
+            "type": "string",
+            "title": "Origin",
+            "description": "upload：流水线上传的 git diff；sources：hub 比对两版已上传的源码生成"
           }
         },
         "type": "object",
@@ -3480,7 +3836,8 @@
           "base",
           "at",
           "files",
-          "addedLines"
+          "addedLines",
+          "origin"
         ],
         "title": "DiffOut"
       },
@@ -3497,6 +3854,18 @@
           },
           "diff": {
             "$ref": "#/components/schemas/DiffOut"
+          },
+          "baseReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basereason",
+            "description": "from=sources 时基线取自哪里（调用方指定 / 服务当前 version / 最近结算的版本 / 最近上传过源码的版本）"
           },
           "matchesCurrentVersion": {
             "type": "boolean",
@@ -3579,6 +3948,37 @@
         ],
         "title": "Error"
       },
+      "ExportResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectSpec"
+            },
+            "type": "array",
+            "title": "Projects"
+          },
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/ServiceSpec"
+            },
+            "type": "array",
+            "title": "Services",
+            "description": "入库原文：classfiles / sourcefiles 的相对路径不展开"
+          }
+        },
+        "type": "object",
+        "required": [
+          "projects",
+          "services"
+        ],
+        "title": "ExportResult",
+        "description": "与 covhub export 的文件同形，去掉 ok 后可直接作 import 的输入。"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -3604,7 +4004,7 @@
             "title": "Version",
             "description": "hub 版本",
             "examples": [
-              "2.3.1"
+              "2.6.0"
             ]
           },
           "services": {
@@ -3634,6 +4034,14 @@
             "type": "string",
             "title": "Log"
           },
+          "projects": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Projects",
+            "description": "每个项目的处理结果：added / updated / skipped / invalid"
+          },
           "services": {
             "additionalProperties": {
               "type": "string"
@@ -3657,6 +4065,7 @@
         "type": "object",
         "required": [
           "log",
+          "projects",
           "services",
           "state"
         ],
@@ -4732,6 +5141,128 @@
           "dump"
         ],
         "title": "Session"
+      },
+      "SourcesStored": {
+        "properties": {
+          "path": {
+            "type": "string",
+            "title": "Path",
+            "description": "源码在 hub 上的落点（data/<svc>/sources/<版本>/）"
+          },
+          "files": {
+            "type": "integer",
+            "title": "Files",
+            "description": "收下的源码文件数（只收 .java/.kt/.groovy/.scala，测试代码除外）"
+          },
+          "roots": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roots",
+            "description": "按 package 声明识别出的源码根（相对落点，空串是落点本身）"
+          }
+        },
+        "type": "object",
+        "required": [
+          "path",
+          "files",
+          "roots"
+        ],
+        "title": "SourcesStored"
+      },
+      "SourcesUploadResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean",
+            "title": "Ok",
+            "default": true
+          },
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "sources": {
+            "$ref": "#/components/schemas/SourcesStored"
+          },
+          "matchesCurrentVersion": {
+            "type": "boolean",
+            "title": "Matchescurrentversion",
+            "description": "与服务当前 version 是否一致；不一致时出报告用不上这一份，retarget 后才用"
+          },
+          "currentVersion": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currentversion"
+          },
+          "diff": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiffOut"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "该版本现在的 diff：默认由 hub 比对基线版本的源码生成；已有流水线上传的则保留；null 表示没有"
+          },
+          "diffReason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Diffreason",
+            "description": "没有生成 diff 时的原因（第一次接入没有基线、hub 没装 git、调用方 diff=skip……）"
+          },
+          "runtime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "该版本有 diff 时重算的运行时新增覆盖"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IncrementalBrief"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "log": {
+            "type": "string",
+            "title": "Log"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service",
+          "version",
+          "sources",
+          "matchesCurrentVersion",
+          "log"
+        ],
+        "title": "SourcesUploadResult"
       },
       "StatusResponse": {
         "properties": {

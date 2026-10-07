@@ -13,6 +13,7 @@ from .diagnose import diagnose
 from .jacoco import do_dump, exec_sessions, fingerprint, make_report, merge_execs
 from .layout import ensure_dirs, safe_segment, svc_dir
 from .logbuf import log
+from .sources import source_roots
 
 
 def record(cfg, svc, summary, kind, version=None, extra=None):
@@ -143,6 +144,8 @@ def archive_cycle(cfg, svc, version, entry, out_dir, execs, reason, health=None)
         "service": svc["name"], "version": version,
         "sealedAt": entry["at"], "sealedBy": reason, "summary": entry,
         "classfiles": svc["classfiles"],
+        # 出这份报告实际用的源码根（上传的按版本存，或配置里的 sourcefiles）
+        "sourcefiles": source_roots(cfg, svc, svc.get("version") or version),
         "fingerprint": _safe_fingerprint(cfg, svc),
         "execCount": len(moved),
         "matchRate": (health or {}).get("matchRate"),
@@ -196,7 +199,7 @@ def detect_break(cfg, svc, new_exec):
     log("检测到断代：会话启动时刻 %s → %s" % (prev, current))
     log("  被测进程重启过，先结算上一周期为版本 %s" % version)
     summary = make_report(cfg, svc, existing, os.path.join(root, "current"),
-                          "%s (%s)" % (svc["name"], version))
+                          "%s (%s)" % (svc["name"], version), version=version)
     entry = record(cfg, svc, summary, "seal", version,
                    extra={"reason": "restart-detected", "sessionStart": prev})
     archive = archive_cycle(cfg, svc, version, entry, os.path.join(root, "current"),
@@ -280,7 +283,8 @@ def snapshot(cfg, svc, reset, kind, version=None):
     )
     out_dir = os.path.join(root, "current")
     summary = make_report(cfg, svc, execs, out_dir,
-                          "%s (%s)" % (svc["name"], version or svc.get("version", "runtime")))
+                          "%s (%s)" % (svc["name"], version or svc.get("version", "runtime")),
+                          version=version)
     entry = record(cfg, svc, summary, kind, version)
     if session_start:
         repo.set_session_start(svc["name"], session_start)

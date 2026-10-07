@@ -22,6 +22,7 @@ from .jacoco import make_report
 from .layout import ensure_dirs
 from .logbuf import log
 from .schemas import ProjectPatch, ProjectSpec, ServicePatch, ServiceSpec
+from .sources import store_sources
 
 
 def agent_opts(cfg, name):
@@ -61,8 +62,9 @@ def dump(cfg, name):
     svc = find_service(cfg, name)
     if not reachable(svc):
         if service_channel(svc) == "push":
-            raise CovhubError("%s 当前没有实例连上来 —— 确认被测端 agent 用的是 "
-                              "output=tcpclient 且能访问到 collect.advertiseAddress" % svc["name"])
+            raise CovhubError("%s 当前没有实例连上来 —— 确认被测端挂的是 agent-opts 给的参数串 "
+                              "（covhub-agent 或 output=tcpclient），且能访问到 "
+                              "collect.advertiseAddress" % svc["name"])
         raise CovhubError("连不上 %s —— 确认服务在跑，且 agent 用的是 output=tcpserver"
                           % endpoint_label(svc))
     entry, _, _ = snapshot(cfg, svc, reset=False, kind="dump")
@@ -199,6 +201,53 @@ def unit_coverage(cfg, name, version, xml_path, group=None):
     return {"report": row, "incremental": build._brief(result) if result else None}
 
 
+def upload_sources(cfg, name, version, src, diff="auto", base=None):
+    """收一份某版本的源码（压缩包或目录），按版本存下，然后（默认）由 hub 比对基线版本的
+    源码生成这一版的 diff —— 流水线不必再在构建节点上 git diff。
+
+    diff="skip" 不生成；该版本已有流水线上传的 diff 时也不覆盖（人工给的优先）。生成不了
+    （没基线、hub 没 git）不算上传失败：源码已经存好，返回体 diffReason 说明原因。
+    报告里的源码行在下一次出报告时带上（采集轮询会做，急的话跑一次 report）；已经归档的
+    报告不重出 —— 归档报告对应的是当时那批 exec，重出是 report 的事，这里不越权。
+    """
+    svc = find_service(cfg, name)
+    version = version or svc.get("version")
+    if not version:
+        raise CovhubError("没给 version，服务 %s 也没配 version" % name)
+    if diff not in ("auto", "skip"):
+        raise CovhubError("diff 只能是 auto 或 skip")
+    stored = store_sources(cfg, svc, version, src)
+    current = svc.get("version")
+    if current != version:
+        log("  服务当前 version=%s：出报告按 version 找源码，retarget 到 %s 后才会用上这一份"
+            % (current, version))
+    else:
+        log("  当前周期的报告下一次采集时带上源码；要立即生效就跑一次 report")
+    out = {"version": version, "sources": stored, "matchesCurrentVersion": current == version,
+           "currentVersion": current, "runtime": None, "unit": None,
+           "diff": repo.get_diff(name, version), "diffReason": None}
+
+    reason = None
+    if diff == "skip":
+        reason = "调用方要求不生成"
+    elif out["diff"] and out["diff"]["origin"] == build.DIFF_ORIGIN_UPLOAD:
+        reason = "该版本已有流水线上传的 diff，不覆盖；要换成源码比对的结果就调一次 diff 接口（from=sources）"
+    else:
+        try:
+            r = diff_from_sources(cfg, name, version, base)
+            out.update(diff=r["diff"], runtime=r["runtime"], unit=r["unit"])
+            return out
+        except CovhubError as exc:
+            reason = str(exc)
+    log("  没有生成 diff：%s" % reason)
+    out["diffReason"] = reason
+    if build.load_diff_lines(cfg, svc, version) is not None:
+        # 已有 diff：把新增行附近的源码片段补进明细
+        recomputed = build.recompute(cfg, svc, version)
+        out.update(runtime=recomputed["runtime"], unit=recomputed["unit"])
+    return out
+
+
 def push_diff(cfg, name, version, base, text, head=None):
     """收一份 git diff，并把该版本已有的运行时快照与单测报告的新增覆盖重算一遍。"""
     svc = find_service(cfg, name)
@@ -210,6 +259,30 @@ def push_diff(cfg, name, version, base, text, head=None):
     row, lines = build.store_diff(cfg, svc, version, base, head, text)
     recomputed = build.recompute(cfg, svc, version)
     return {"diff": row, "matchesCurrentVersion": svc.get("version") == version,
+            "currentVersion": svc.get("version"), "runtime": recomputed["runtime"],
+            "unit": recomputed["unit"]}
+
+
+def diff_from_sources(cfg, name, version=None, base=None):
+    """由 hub 比对两版已上传的源码生成 diff，代替流水线上传 git diff；之后同样重算新增覆盖。
+
+    base 是基线的**版本标识**（不是 commit），不给就自动定（见 build.pick_diff_base）。
+    这是显式调用，已有的 diff 不管谁生成的都覆盖。
+    """
+    svc = find_service(cfg, name)
+    version = version or svc.get("version")
+    if not version:
+        raise CovhubError("没给 version，服务 %s 也没配 version" % name)
+    why = "调用方指定"
+    if not base:
+        base, why = build.pick_diff_base(cfg, svc, version)
+        if not base:
+            raise CovhubError("定不出基线：%s" % why)
+    text = build.diff_from_sources(cfg, svc, version, base)
+    log("%s：比对已上传的源码 %s → %s（基线取自：%s）" % (name, base, version, why))
+    row, _ = build.store_diff(cfg, svc, version, base, version, text, origin=build.DIFF_ORIGIN_SOURCES)
+    recomputed = build.recompute(cfg, svc, version)
+    return {"diff": row, "baseReason": why, "matchesCurrentVersion": svc.get("version") == version,
             "currentVersion": svc.get("version"), "runtime": recomputed["runtime"],
             "unit": recomputed["unit"]}
 
@@ -271,14 +344,34 @@ def _validate(model, fields):
         raise CovhubError("服务配置不合法 —— " + "；".join(parts))
 
 
+def export_config(cfg):
+    """把库里的项目与服务配置导成 import 能吃的形态（projects + services）。
+
+    路径存原文不展开，去掉 id / 时间戳这些库自己的列 —— 导出的文件要能原样
+    `covhub import` 进另一个库（生产 / 开发两套库切换时用），也能当备份。
+    """
+    projects = [{"name": p["name"], "title": p.get("title"), "description": p.get("description")}
+                for p in repo.list_projects()]
+    services = []
+    for row in repo.list_services():
+        row.pop("id", None)
+        services.append(row)
+    return {"projects": projects, "services": services}
+
+
 def import_legacy(cfg, config_path, dry_run=False, overwrite=False, with_state=True):
-    """把旧 targets.yaml 的 services 和 data/<svc>/state.json 导进数据库。幂等。"""
-    log("从 %s 导入服务配置%s" % (config_path, "（试运行）" if dry_run else ""))
+    """把配置文件里的 projects / services 和 data/<svc>/state.json 导进数据库。幂等。
+
+    来源是旧 targets.yaml 或 `covhub export` 的输出。
+    """
+    log("从 %s 导入配置%s" % (config_path, "（试运行）" if dry_run else ""))
+    projects = importer.import_projects(config_path, dry_run=dry_run, overwrite=overwrite)
     services = importer.import_services(config_path, dry_run=dry_run, overwrite=overwrite)
-    counts = {}
-    for outcome in services.values():
-        counts[outcome] = counts.get(outcome, 0) + 1
-    log("服务：%s" % (", ".join("%s %d" % kv for kv in sorted(counts.items())) or "无"))
+    for label, outcomes in (("项目", projects), ("服务", services)):
+        counts = {}
+        for outcome in outcomes.values():
+            counts[outcome] = counts.get(outcome, 0) + 1
+        log("%s：%s" % (label, ", ".join("%s %d" % kv for kv in sorted(counts.items())) or "无"))
 
     states = {}
     if with_state:
@@ -289,4 +382,4 @@ def import_legacy(cfg, config_path, dry_run=False, overwrite=False, with_state=T
             states[name] = c
             log("  %s 的历史：快照 %d、归档 %d、断代 %d，已存在跳过 %d"
                 % (name, c["snapshots"], c["archives"], c["breaks"], c["skipped"]))
-    return {"services": services, "state": states}
+    return {"projects": projects, "services": services, "state": states}

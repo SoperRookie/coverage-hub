@@ -1,5 +1,98 @@
 # 更新日志
 
+## 未发布
+
+- Windows 的 covhub-agent 构建脚本由 cmd 批处理 `agent\build.cmd` 换成 PowerShell `agent\build.ps1`
+  （`powershell -ExecutionPolicy Bypass -File agent\build.ps1`；带 UTF-8 BOM，注释可以是中文）。两个脚本仍然等价。
+- 文档按当前实现逐项对账：README 的命令一览 / 接口表补齐漏掉的参数，ONBOARDING 里过时的返回体示例、
+  迁移号、版本号、`classfiles` 必填与否、`Jenkinsfile.deploy` 的实际阶段等改正；integration 下各模板的注释同步。
+- 对账顺手修掉的几处：CLI 不再要求 `jacocoAgent` 在 hub 本机存在（它是被测端路径，按文档改成容器内路径后
+  `serve` / `dump` 会拒绝启动）；`diff` 子命令的 `version` 改为必填（原来省掉它时文件名会被当成版本）；
+  Jenkins 库 `fetchReport` 带上令牌（hub 配了 `serve.token` 时原来必 401）；`Jenkinsfile.deploy` 的 `IMAGE`
+  不带 tag 时由流水线补 `:NEW_VERSION`（参数默认值里的 `${NEW_VERSION}` 不会被展开）；k8s 方式 `rollout pause`
+  后再改镜像与环境变量，合成一次滚动；`diffs.origin` 在 models 里补 `server_default`，与迁移 0003 一致。
+
+## v2.6.0（2026-10-06）
+
+**push 通道换上自带的薄 agent `covhub-agent.jar`：hub 不在时被测服务照常启动，hub 重启后自己重连。**
+JaCoCo 自带的 `output=tcpclient` 有两个改不了的行为 —— 启动时连不上收集端，agent 初始化抛异常，
+**被测 JVM 直接起不来**（hub 停机维护期间谁都发不了版）；连接断了之后**不再重连**，hub 一重启，
+所有 push 实例此后的覆盖率都取不到，直到被测服务各自重启。
+
+- 新增 `lib/covhub-agent.jar`（源码 `agent/`，一个类、零依赖、Java 8 字节码，`agent/build.sh` 构建（Windows 脚本见「未发布」），产物进
+  版本库）。它与 `jacocoagent.jar` **并列挂在被测 JVM 上**：JaCoCo 改用 `output=none` 只插桩，`covhub-agent`
+  在 daemon 线程里连 hub 的收集端，数据经 JaCoCo 的公开入口 `org.jacoco.agent.rt.RT` 取（只用反射，不绑定
+  JaCoCo 版本）。线上仍是 JaCoCo 的 remote control 协议 —— **收集端、exec 格式、JaCoCo 的 jar 都没改**。
+- 连不上就后台退避重试（1 秒起、30 秒封顶，只在第一次失败时打一行日志）；断了自己连回来；`idle` 秒没收到
+  hub 的指令也重连，兜住收不到 FIN 的断线（hub 掉电、NAT 回收空闲连接）。任何失败都只打 `[covhub-agent]`
+  前缀的日志，不影响被测应用。
+- 新配置项 `covhubAgent`（和 `jacocoAgent` 一样填**被测端**路径，`init` 的模板默认带）。配了它，push 服务的
+  `agent-opts` 就是**空格隔开的两个 `-javaagent`**，`excludes` 末尾自动追加 `covhub.agent.*` 与
+  `org.jacoco.agent.rt.*`（实测不排除的话这两个类会被插桩、混进 exec）。`idle` 按三轮 `watch.intervalSeconds`
+  给，不低于 180 秒。pull 通道不受影响。
+- 新增 `GET /api/covhub-agent.jar`、`covhub-client.sh fetch-covhub-agent [目标路径]`、groovy
+  `covhub.fetchCovhubAgent(dest:)`；`Jenkinsfile.deploy` 在参数串有两个 `-javaagent` 时把两个 jar 下到同一个目录。
+  K8s initContainer 片段改成下两个 jar。
+- **升级不强制**：没配 `covhubAgent` 的老配置原样生成 `output=tcpclient`，已经在跑的实例不受影响；hub 启动时
+  会提醒一行。要换上：`covhub.yaml` 加一行 `covhubAgent: <被测端路径>`，被测端 `fetch-covhub-agent`，
+  重新取 `agent-opts`，下次重启被测服务时生效。
+- 没做的：进程退出时主动推最后一段数据（仍靠 `predeploy` 在停服前结算）；class / 版本由 agent 自报。
+
+## v2.5.0（2026-10-05）
+
+**diff 由 hub 比对两版源码生成，流水线不再在构建节点上算 git diff。** 原来构建节点要有
+上一版 commit 的历史：Jenkins `cleanWs` 过的工作区、浅克隆、只拉一个 tag，`rev-parse` 就找不到
+基线，diff 静默变空、新增代码覆盖率永远算不出来。hub 手里按版本存着 `upload-sources` 传来的
+源码，两棵树一比就是 diff，和历史深度、工作区死活都没关系。
+
+- `POST /api/upload-sources` 存好源码后默认就生成这一版的 diff（`git diff --no-index -M`，识别重命名，
+  输出与流水线那条命令同形，剥掉路径里的版本目录、丢掉 `.roots.json`）；加 `diff=skip` 只存源码，
+  `base=<版本>` 指定基线。返回体多 `diff` / `diffReason`。生成不了（第一次接入没有基线、hub 没装 git）
+  不算上传失败，`diffReason` 说原因。**hub 机器要装 git**。
+- `POST /api/diff` 加 `from=sources`（不读正文）：显式让 hub 比对、指定基线或重做；`base` 改为可选
+  （上传 git diff 时仍必填，缺了 400）。返回体多 `baseReason`。
+- 基线自动定：服务当前 `version`（线上跑着的那版）→ 最近结算的版本 → 最近上传过源码的版本，取第一个
+  传过源码的。
+- `diffs` 表加 `origin`（`upload` / `sources`，迁移 `0003`）：**自动生成的不覆盖流水线上传的**，显式
+  `from=sources` 才覆盖。DBA 建表 SQL 同步。
+- CLI：`diff <svc> [ver] --from-sources [--base V]`、`upload-sources ... [--base V] [--no-diff]`；
+  `covhub-client.sh` 同样；groovy `covhub.pushDiff(fromSources: true, base:)`、
+  `covhub.uploadSources(base:, diff:)`。`Jenkinsfile.build` 去掉整段 git diff，只剩 `uploadSources`。
+  `DIFF_BASE` 的含义从 commit 变成版本号。
+- `lastVersion` / `last-version` / `GET /api/services/{name}/versions` 保留，给仍自己算 git diff 的项目定基线。
+
+## v2.4.0（2026-09-28）
+
+**源码按版本上传。** hub 独立部署后本机没有源码，原来只能在 hub 上 checkout 仓库、把
+`sourcefiles` 指过去 —— 要 git 权限，每次发版有人去切版本，且一个目录只能对一个版本
+（旧版本的新增代码因此看不到源码）。
+
+- 新增 `POST /api/upload-sources?service&version`、`covhub-client.sh upload-sources <svc> <ver> [包]`、
+  groovy `covhub.uploadSources`、CLI `covhub upload-sources <svc> [ver] <包或目录>`。客户端不给包时在当前
+  git 仓库里现打受版本控制的 `.java/.kt/.groovy/.scala`（去掉 `src/test/`，路径相对仓库根、与 git diff 一致）。
+  `Jenkinsfile.build` 的 `Push to covhub` 阶段已带上这一步。
+- hub 存到 `data/<svc>/sources/<版本>/`：**只收源码扩展名**（配置文件混进包里也不落盘），不剥顶层目录
+  （单模块仓库的模块目录是 diff 路径的一部分），按每个文件的 `package` 声明识别源码根 —— 多模块、非标准
+  目录、sources.jar 平铺都不用配。同版本重传整份替换，解到临时目录再换上，传坏了旧的还在。
+- 出报告按服务当前 `version` 取源码根传给 `--sourcefiles`：JaCoCo 类页面有逐行红绿标记，HTML 生成时内嵌
+  源码，归档报告不再依赖它。归档 `manifest.json` 多记一项 `sourcefiles`（实际用的源码根）。
+- 看板「新增代码」点开可「展开全文」（`GET /api/services/{name}/source` 加 `full=1`，返回体加
+  `sourceVersion` / `fullAvailable` / `full` / `totalLines`）；服务发了新版本之后旧版本的也照样对得上。
+  详情页在这一版没传源码时给提示（`detail` 的 `runtime.sourcesUploaded`）。
+- 服务配置里的 `sourcefiles` 降为兜底，且**只对服务当前 `version` 生效** —— 它是会跟着发版改掉的目录，
+  拿它去对旧版本只会错位（原先的源码视图会这么做）。
+- `/<svc>/sources/` 不经静态路径外发（按 resolve 后的路径判断，`//`、`..` 绕不过去），源码只通过报告与
+  源码视图接口出去，都要令牌。nginx 模板本就不反代它。
+
+## v2.3.2（2026-09-22）
+
+- 新增 `covhub export [--out FILE] [--json]` 与 `GET /api/export`：把库里的项目与服务配置导成
+  `import` 能吃的文件。服务配置在数据库里，换一个库（比如在 `covhub_dev` 上调完切回生产库）
+  配置不会自己长出来，之前只能逐个 `service add` 重登记。导出的是入库原文：相对路径不展开、
+  None 的标量不出现，导回去不会给 `bindAddress` 等填上默认值。
+- `import` 同时认 `projects` 段；服务引用的项目在目标库不存在时按名字自动建出（旧
+  `targets.yaml` 没有项目这一层，不该卡在「先 `project add`」上）。返回体多了 `projects` 计数。
+
 ## v2.3.1（2026-09-16）
 
 - 启动日志多一行「看板由谁托管」：未配 `serve.webDir` 时说明本进程只发 API 与报告目录，

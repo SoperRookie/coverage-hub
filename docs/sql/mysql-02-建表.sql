@@ -1,13 +1,13 @@
--- covhub 2.1 · MySQL 8 建表
--- 与 covhub/db/models.py 及 Alembic 迁移 0001 + 0002 完全等价（列、约束、索引、外键均一致）。
--- 最后写入 alembic_version = 0002，之后 hub 启动时的 `covhub db upgrade` 会认为结构已是最新，
+-- covhub 2.6 · MySQL 8 建表（表结构自 2.5.0 的迁移 0003 起未变）
+-- 与 covhub/db/models.py 及 Alembic 迁移 0001 + 0002 + 0003 完全等价（列、约束、索引、外键均一致）。
+-- 最后写入 alembic_version = 0003，之后 hub 启动时的 `covhub db upgrade` 会认为结构已是最新，
 -- 不会再重复建表；将来升级 covhub 时照常 `covhub db upgrade` 即可。
 --
 -- 用法（在 covhub 库里执行）：
 --   mysql -u covhub -p covhub < mysql-02-建表.sql
 --
 -- 也可以不用这个文件：给账号 DDL 权限后 `python covhub.py db upgrade`（或直接 serve）会自动建出同样的表。
--- 两条路只能走一条 —— 表已存在时再跑 db upgrade 会因为「表已存在」失败。
+-- 两条路只走一条 —— 手工建表别漏掉末尾的 alembic_version，否则 db upgrade 会再去建表并因「表已存在」失败。
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS `diffs` (
   `at`          DATETIME     NOT NULL,
   `files`       INT          NOT NULL COMMENT '涉及的源码文件数',
   `added_lines` INT          NOT NULL COMMENT '新增行数',
+  `origin`      VARCHAR(20)  NOT NULL DEFAULT 'upload' COMMENT 'upload：流水线上传的 git diff；sources：hub 比对两版源码生成',
   CONSTRAINT `pk_diffs` PRIMARY KEY (`id`),
   CONSTRAINT `uq_diffs_service_version` UNIQUE (`service_id`, `version`),
   CONSTRAINT `fk_diffs_service_id_services`
@@ -188,14 +189,14 @@ CREATE TABLE IF NOT EXISTS `diffs` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci COMMENT='git diff 摘要';
 
 -- ---------------------------------------------------------------------------
--- Alembic 版本标记：告诉 covhub 表结构已经是 0002（2.1.0 的最新迁移）
+-- Alembic 版本标记：告诉 covhub 表结构已经是 0003（2.5.0 加的，到 2.6.0 仍是最新迁移）
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `alembic_version` (
   `version_num` VARCHAR(32) NOT NULL,
   CONSTRAINT `alembic_version_pkc` PRIMARY KEY (`version_num`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
-INSERT INTO `alembic_version` (`version_num`) VALUES ('0002')
-  ON DUPLICATE KEY UPDATE `version_num` = '0002';
+INSERT INTO `alembic_version` (`version_num`) VALUES ('0003')
+  ON DUPLICATE KEY UPDATE `version_num` = '0003';
 
 SET FOREIGN_KEY_CHECKS = 1;

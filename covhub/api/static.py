@@ -13,7 +13,7 @@ dataDir 路径可枚举；反过来一个叫 assets 的服务会把面板打瘸�
 生的 exec。`?token=` 种 Cookie 再 302 的逻辑两边都保留 —— 直接分享出去的报告链接还
 靠它（看板自己的登录走 POST /api/login）。
 
-不给未知路径回落到 index.html：push-runtime.sh、Jenkins 库用 curl -sSf 取
+不给未知路径回落到 index.html：covhub-client.sh、Jenkins 库用 curl -sSf 取
 /<svc>/versions/<v>/jacoco.xml，404 才是它们要的失败信号。
 """
 
@@ -117,8 +117,13 @@ def static(path: str, request: Request, cfg: dict = Depends(get_hub_cfg)):
     denied = static_gate(request, cfg)
     if denied is not None:
         return denied
+    # 按版本上传的源码不经静态路径外发：它只该通过报告（生成时已内嵌）和源码视图接口出去，
+    # 目录列表一开，整个仓库的源码就能被逐个下载
+    # （按 resolve 之后的路径判断，svc//sources、svc/x/../sources 这类写法绕不过去）
     root = Path(cfg["dataDir"]).resolve()
     target = _inside(root, path)
+    if target is not None and target.relative_to(root).parts[1:2] == ("sources",):
+        return error(404, "未知路径")
     if target is None or not target.exists():
         return error(404, "未知路径")
 

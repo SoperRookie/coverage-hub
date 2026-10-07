@@ -33,12 +33,12 @@ void run(Map args) {
  *
  * 必填：image, containerName, javaToolOptions
  * 选填：appPort（如 '8080:8080'）、agentPort（默认 '6300:6300'）、
- *      agentLibDir（宿主机上 jacocoagent.jar 所在目录，挂进容器）、
+ *      agentLibDir（宿主机上 jacocoagent.jar 所在目录，挂进容器；push 通道的 covhub-agent.jar 也放这里）、
  *      agentMountPath（容器内挂载点，默认 /opt/jacoco）、
  *      extraArgs（追加到 docker run 的其他参数）、network、envs（Map）
  *
  * 注意：hub 配置里该服务的 jacocoAgent 必须写成【容器内】路径，
- * 也就是 agentMountPath 下的 jacocoagent.jar —— agent 是在容器里加载的。
+ * 也就是 agentMountPath 下的 jacocoagent.jar —— agent 是在容器里加载的。covhubAgent 同理。
  */
 void docker(Map args) {
     assert args.image : 'docker 方式需要 image'
@@ -119,7 +119,7 @@ void compose(Map args) {
  *      image、rolloutTimeout（默认 5m）、kubeconfig
  *
  * 前置：agent jar 必须在 Pod 里可达。业务镜像不方便改时，标准做法是给
- * Deployment 加一个 initContainer 把 jacocoagent.jar 拷进 emptyDir 共享卷，
+ * Deployment 加一个 initContainer 把 jacocoagent.jar（push 通道还有 covhub-agent.jar）拷进 emptyDir 共享卷，
  * 见 integration/deployment-snippets.md。这一步属于 Deployment 清单的一次性
  * 改造，不在本流水线范围内。
  *
@@ -135,17 +135,28 @@ void k8s(Map args) {
     String kc = args.kubeconfig ? "--kubeconfig='${args.kubeconfig}'" : ''
     String timeout = args.rolloutTimeout ?: '5m'
 
-    List<String> steps = []
+    String dep = "kubectl ${kc} -n ${ns}"
+    // set image 和 set env 各是一次 patch，不 pause 的话会连滚两轮：先 pause，改完一起 resume
+    // 才是一次滚动更新。中间任何一步失败也要 resume，否则 deployment 停在 paused 状态，
+    // 下次发版 rollout status 会一直等
+    List<String> patch = []
     if (args.image) {
-        steps << "kubectl ${kc} -n ${ns} set image deployment/${args.deployment} ${container}='${args.image}'"
+        patch << "${dep} set image deployment/${args.deployment} ${container}='${args.image}'"
     }
-    // set env 本身会触发一次滚动更新；与 set image 合并成一次更新，避免连滚两轮
-    steps << "kubectl ${kc} -n ${ns} set env deployment/${args.deployment} " +
-             "-c ${container} JAVA_TOOL_OPTIONS='${args.javaToolOptions}'"
-    steps << "kubectl ${kc} -n ${ns} rollout status deployment/${args.deployment} --timeout=${timeout}"
-    steps << "kubectl ${kc} -n ${ns} get pods -l app=${args.deployment} -o wide"
+    patch << "${dep} set env deployment/${args.deployment} -c ${container} JAVA_TOOL_OPTIONS='${args.javaToolOptions}'"
 
-    sh "set -e\n" + steps.join('\n')
+    sh """
+        set -e
+        ${dep} rollout pause deployment/${args.deployment}
+        set +e
+        ${patch.join(' && ')}
+        rc=\$?
+        set -e
+        ${dep} rollout resume deployment/${args.deployment}
+        [ "\$rc" -eq 0 ]
+        ${dep} rollout status deployment/${args.deployment} --timeout=${timeout}
+        ${dep} get pods -l app=${args.deployment} -o wide
+    """
 }
 
 // --------------------------------------------------------------- systemd

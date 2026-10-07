@@ -70,9 +70,14 @@ class AgentOpts(BaseModel):
     ok: bool = True
     service: str
     agentOpts: str = Field(
-        description="塞进被测服务 JAVA_TOOL_OPTIONS 的参数串",
+        description="塞进被测服务 JAVA_TOOL_OPTIONS 的参数串。push 通道且 hub 配了 covhubAgent 时是"
+                    "空格隔开的两个 -javaagent（JaCoCo 只插桩，covhub-agent 连 hub 并断线重连），"
+                    "赋值时整串要带引号",
         examples=["-javaagent:/opt/jacoco/jacocoagent.jar=output=tcpserver,address=0.0.0.0,"
-                  "port=6300,includes=com.example.*,sessionid=1.4.2"])
+                  "port=6300,includes=com.example.*,sessionid=1.4.2",
+                  "-javaagent:/opt/jacoco/jacocoagent.jar=output=none,includes=com.example.*,"
+                  "excludes=covhub.agent.*:org.jacoco.agent.rt.*,sessionid=order-service "
+                  "-javaagent:/opt/jacoco/covhub-agent.jar=address=covhub.internal,port=6400,idle=900"])
 
 
 class Session(BaseModel):
@@ -153,8 +158,16 @@ class ServiceListResponse(BaseModel):
 class ImportResult(BaseModel):
     ok: bool = True
     log: str
+    projects: dict[str, str] = Field(description="每个项目的处理结果：added / updated / skipped / invalid")
     services: dict[str, str] = Field(description="每个服务的处理结果：added / updated / skipped / invalid")
     state: dict[str, dict[str, int]] = Field(description="每个服务导入的历史计数")
+
+
+class ExportResult(BaseModel):
+    """与 covhub export 的文件同形，去掉 ok 后可直接作 import 的输入。"""
+    ok: bool = True
+    projects: list[ProjectSpec]
+    services: list[ServiceSpec] = Field(description="入库原文：classfiles / sourcefiles 的相对路径不展开")
 
 
 class ProjectOut(ProjectSpec):
@@ -218,12 +231,34 @@ class DiffOut(BaseModel):
     at: str
     files: int
     addedLines: int
+    origin: str = Field(description="upload：流水线上传的 git diff；sources：hub 比对两版已上传的源码生成")
+
+
+class SourcesStored(BaseModel):
+    path: str = Field(description="源码在 hub 上的落点（data/<svc>/sources/<版本>/）")
+    files: int = Field(description="收下的源码文件数（只收 .java/.kt/.groovy/.scala，测试代码除外）")
+    roots: list[str] = Field(description="按 package 声明识别出的源码根（相对落点，空串是落点本身）")
+
+
+class SourcesUploadResult(BaseModel):
+    ok: bool = True
+    service: str
+    version: str
+    sources: SourcesStored
+    matchesCurrentVersion: bool = Field(description="与服务当前 version 是否一致；不一致时出报告用不上这一份，retarget 后才用")
+    currentVersion: str | None = None
+    diff: DiffOut | None = Field(default=None, description="该版本现在的 diff：默认由 hub 比对基线版本的源码生成；已有流水线上传的则保留；null 表示没有")
+    diffReason: str | None = Field(default=None, description="没有生成 diff 时的原因（第一次接入没有基线、hub 没装 git、调用方 diff=skip……）")
+    runtime: IncrementalBrief | None = Field(default=None, description="该版本有 diff 时重算的运行时新增覆盖")
+    unit: IncrementalBrief | None = None
+    log: str
 
 
 class DiffResult(BaseModel):
     ok: bool = True
     service: str
     diff: DiffOut
+    baseReason: str | None = Field(default=None, description="from=sources 时基线取自哪里（调用方指定 / 服务当前 version / 最近结算的版本 / 最近上传过源码的版本）")
     matchesCurrentVersion: bool = Field(description="diff 的版本与服务当前 version 是否一致；不一致时运行时快照算不出新增覆盖")
     currentVersion: str | None = None
     runtime: IncrementalBrief | None = Field(default=None, description="重算后的运行时新增覆盖（该版本还没有快照时为 null）")

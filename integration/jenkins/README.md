@@ -6,7 +6,7 @@
 |---|---|
 | `vars/covhub.groovy` | Shared Library，把 covhub 命令封装成 pipeline 步骤 |
 | `vars/deployTarget.groovy` | Shared Library，五种部署方式的实现 |
-| `Jenkinsfile.build` | 构建期：跑测试 → 聚合报告 → **推单测报告与 git diff 给 hub** → 归档 class 产物（聚合模块**要改研发的 pom**，不能改就跳过聚合与单测那几步，diff 那一步不需要 pom） |
+| `Jenkinsfile.build` | 构建期：跑测试 → 聚合报告 → **推单测报告与源码给 hub**（diff 由 hub 比对两版源码生成）→ 归档 class 产物（聚合模块**要改研发的 pom**，不能改就删掉 Coverage Report 阶段和 `pushUnitCoverage` 那一行，`uploadSources` 那一步不依赖聚合模块） |
 | `Jenkinsfile.deploy` | 发版：结算旧版本 → 部署 → 指向新产物 → 确认采集恢复 |
 
 ## 一、安装 Shared Library
@@ -30,11 +30,11 @@
 | 依赖 | 说明 |
 |---|---|
 | `curl` | 就这一个。不需要 Python、不需要 java、不需要配置文件 |
-| 环境变量 `COVHUB_URL` | hub 地址，如 `http://covhub.internal:8900`。已写在 `Jenkinsfile.deploy` 的 `environment` 块里，改成你们的 |
+| 环境变量 `COVHUB_URL` | hub 地址，如 `http://covhub.internal:8900`。已写在两个 Jenkinsfile 的 `environment` 块里，改成你们的 |
 | 凭据（可选） | hub 配了 `serve.token` 时，建一个 Secret text 凭据存令牌，把 ID 填进 `COVHUB_TOKEN_ID` |
-| Jenkins 插件 | Pipeline Utility Steps（`covhub.diagnose` 用它的 `readJSON`）、Copy Artifacts；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
+| Jenkins 插件 | Pipeline Utility Steps（`covhub.diagnose` / `covhub.lastVersion` 用它的 `readJSON`）、Copy Artifacts；`Jenkinsfile.build` 里的 `jacoco` 步骤需要 JaCoCo 插件（可选，去掉不影响） |
 | Config File Provider | 提供 Maven `settings.xml`，`fileId` 按你们实际的改 |
-| 构建节点的 git | `Jenkinsfile.build` 要 `git diff <上一版>..HEAD`，浅克隆（`depth 1`、不拉 tags）找不到基线 —— 检出配置里关掉浅克隆，或流水线先 `git fetch --unshallow --tags` |
+| 构建节点的 git | 只用来打源码包（`git ls-files`），不需要历史：浅克隆、`cleanWs` 过的工作区都行。diff 由 hub 比对两版上传的源码生成，**hub 机器**要有 git |
 
 发版节点**不需要**能连到被测服务的 agent 端口 —— 连 agent 的是 hub。它只要能连上 hub 的 8900。
 也**不需要**本地的 class 产物库：新产物传给 hub，旧产物要用时
@@ -43,7 +43,9 @@
 > **本地模式（兜底）**：Jenkins agent 恰好就跑在 hub 那台机器上时，可以给各步骤传
 > `home: '/opt/coverage-hub'` 而不是 `hub:`，库会退回到直接调 `covhub.py`。
 > 此时才需要节点上有 Python 3、java 和 hub 的配置文件。没设 `COVHUB_URL` 也没传
-> `hub:` 时自动走这条路。
+> `hub:` 时自动走这条路。只有 `agentOpts` / `predeploy` / `dump` / `status` / `online` / `diagnose` /
+> `requireMatch` / `retarget` 支持本地模式；上传、下载、构建期那几步（`uploadClasses` / `pushUnitCoverage` /
+> `pushDiff` / `uploadSources` / `lastVersion` / `fetchAgent` / `fetchCovhubAgent` / `fetchClasses` / `fetchReport`）必须有 `hub:` 或 `COVHUB_URL`。
 
 ## 三、构建期流水线要点
 
@@ -53,15 +55,20 @@
 
 `API_VERSION=1.44` 这一条针对用 Testcontainers 的项目：Docker Engine 29+ 的最低 API 版本是 1.40，而 Testcontainers 1.21.x 内置的 docker-java 默认用 1.32，会被服务端以 HTTP 400 拒绝，症状是 `Could not find a valid Docker environment`。注意属性名是 `api.version`，不是 docker CLI 的 `DOCKER_API_VERSION`（后者设了完全无效）。
 
-**`Push to covhub` 阶段：单测报告 + git diff。** 版本串（`REVISION`）必须和发版流水线 `predeploy` /
-`retarget` 用的一致，hub 才能把 diff 和运行时快照对上。基线默认问 hub「上一次结算的版本对应哪个
-commit」（`covhub.lastVersion`），问不到退回 `origin/main`；`DIFF_BASE` 可以写死。这两步用
-`failOnError: false`（默认）—— hub 停机不该卡住所有构建，单测报告下次构建还会有；这和 `predeploy`
+**`Push to covhub` 阶段：单测报告 + 源码。** 版本串（`REVISION`）必须和发版流水线 `predeploy` /
+`retarget` 用的一致，hub 才能把 diff 和运行时快照对上。diff 不在构建节点上算：源码传上去之后 hub
+拿基线版本的源码比对生成（`git diff --no-index -M`，识别重命名），所以浅克隆、`cleanWs`、找不到
+上一版 commit 都不影响。基线默认由 hub 定（服务当前 version → 最近结算的版本 → 最近上传过源码的
+版本），`DIFF_BASE` 可以写死成某个版本号。第一次接入没有基线，diff 为空属正常。仍想自己算 git diff
+的话 `covhub.pushDiff(file:, base:)` 还在，而且人工上传的优先，不会被自动生成的覆盖。这两步用
+`failOnError: false`（默认）—— hub 停机不该卡住所有构建，下次构建还会有；这和 `predeploy`
 必须卡住不同，exec 不会再有第二次。
 
 **归档 class 产物那一步现在是可选的。** 运行期出报告时 `--classfiles` 必须是当时运行的那份 class（JaCoCo 按 CRC64 class id 匹配，对不上报告全是"未覆盖"），但 v1.1.0 起这份 class 由 agent 的 `classDumpDir` 在运行期自己交出，不再需要构建流水线配合。
 
-保留构建期归档只对「愿意改构建、想两份都留着」的项目有意义；两份都有时 covhub 优先用 classdumpdir 那份 —— 它是运行时真相，还包含构建产物里根本不存在的动态生成类。
+保留构建期归档只对「愿意改构建、想两份都留着」的项目有意义。注意两份传的是同一个 `artifacts/<版本>/` 目录，后传的整份覆盖先传的，hub 不会自动挑 —— 想以 classdumpdir 那份为准（它是运行时真相，还包含构建产物里根本不存在的动态生成类）就让它最后传。
+
+删掉归档这一步的话，`Jenkinsfile.deploy` 的第 2、4 步（`copyArtifacts` 是 `optional: false`，没有包会失败）要改成从被测端 `classDumpDir` 打包再 `uploadClasses`（见 `deployment-snippets.md` 部署脚本的第 3 步）。
 
 ## 四、发版流水线的顺序
 
@@ -90,8 +97,8 @@ commit」（`covhub.lastVersion`），问不到退回 `origin/main`；`DIFF_BASE
 | 方式 | 做法 | 关键参数 |
 |---|---|---|
 | `docker` | `docker rm -f` 旧容器 → `pull` → `run` 带 `-e JAVA_TOOL_OPTIONS` | `IMAGE`、`CONTAINER_NAME`、`APP_PORT`、`AGENT_PORT`、`AGENT_LIB_DIR`（留空则从 hub 下载 agent 到工作区） |
-| `compose` | 生成 `docker-compose.covhub.yml` override 注入环境变量与端口，**不改原始 compose 文件** → `compose up -d` | `COMPOSE_FILE`、`COMPOSE_SERVICE`、`IMAGE`、`AGENT_PORT` |
-| `k8s` | `kubectl set image` + `set env` 合并成一次滚动更新 → `rollout status` 等待完成 | `K8S_NAMESPACE`、`K8S_DEPLOYMENT`、`K8S_CONTAINER`、`IMAGE` |
+| `compose` | 生成 `docker-compose.covhub.yml` override 注入环境变量与端口，**不改原始 compose 文件** → `compose up -d` | `COMPOSE_FILE`、`COMPOSE_SERVICE`、`IMAGE`、`AGENT_PORT`、`AGENT_LIB_DIR` |
+| `k8s` | `rollout pause` → `kubectl set image` + `set env` → `rollout resume`（合成一次滚动更新，失败也会 resume）→ `rollout status` 等待完成 | `K8S_NAMESPACE`、`K8S_DEPLOYMENT`、`K8S_CONTAINER`、`IMAGE` |
 | `systemd` | 写 drop-in 片段 `/etc/systemd/system/<unit>.d/covhub.conf` 注入环境变量，**不改原始 unit 文件** → `daemon-reload` + `restart` | `SYSTEMD_UNIT`、`ARTIFACT_SRC`、`ARTIFACT_DEST` |
 | `script` | 调你们自己的部署脚本，参数以**环境变量**传入（避免命令行转义问题） | `DEPLOY_SCRIPT`，脚本内可用 `$COVHUB_JAVA_TOOL_OPTIONS`、`$COVHUB_SERVICE`、`$COVHUB_VERSION` |
 
@@ -100,15 +107,16 @@ commit」（`covhub.lastVersion`），问不到退回 `origin/main`；`DIFF_BASE
 `docker` 和 `compose` 会把宿主机的 `AGENT_LIB_DIR` 挂到容器内（默认 `/opt/jacoco`）。
 此时 **hub 配置里的 `jacocoAgent` 必须写成容器内路径**（如
 `/opt/jacoco/jacocoagent.jar`），因为 agent 是在容器里被 JVM 加载的；而 `jacocoCli`
-仍然是执行采集那台机器上的路径。两者不在同一个文件系统里。
+仍然是执行采集那台机器上的路径。两者不在同一个文件系统里。push 通道的 `covhubAgent` 同理
+（`/opt/jacoco/covhub-agent.jar`）—— `AGENT_LIB_DIR` 留空时流水线会把两个 jar 都下到同一个目录。
 
-另外 `AGENT_PORT` 必须映射出来，否则 covhub 连不到 agent —— 且配置里
+另外 pull 通道下 `AGENT_PORT` 必须映射出来（push 通道不需要），否则 covhub 连不到 agent —— 且配置里
 该服务的 `bindAddress` 要是 `0.0.0.0`，绑回环地址时容器外无法访问。
 
 ### K8s 的两点额外要求
 
 **一、agent jar 要能进 Pod。** 业务镜像不方便改时，标准做法是给 Deployment 加一个
-initContainer，把 `jacocoagent.jar` 拷进 `emptyDir` 共享卷。清单片段见
+initContainer，把 `jacocoagent.jar`（push 通道还有 `covhub-agent.jar`）拷进 `emptyDir` 共享卷。清单片段见
 `../deployment-snippets.md`。这属于 Deployment 的一次性改造，不在流水线范围内。
 
 **二、结算必须在滚动更新之前。** 滚动更新直接杀旧 Pod，`preStop` 钩子来不及做完整的
@@ -132,7 +140,7 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 
 | 步骤 | 用途 |
 |---|---|
-| `covhub.agentOpts(service:)` | 取该服务应注入的 `-javaagent` 参数串 |
+| `covhub.agentOpts(service:)` | 取该服务应注入的 `-javaagent` 参数串（push 通道是空格隔开的两个，拼进 `JAVA_TOOL_OPTIONS` 时带引号） |
 | `covhub.predeploy(service:, version:, allowMissing:)` | 结算并归档，**停服之前**调用 |
 | `covhub.dump(service:)` | 拉一次快照（累加） |
 | `covhub.status([service:])` | 打印连通性与最新覆盖率 |
@@ -140,13 +148,15 @@ dump + 归档。流水线第 1 步就是干这个的，顺序不能调整。
 | `covhub.retarget(service:, version:, classfiles:)` | 更新 hub 配置里的版本与 class 路径 |
 | `covhub.uploadClasses(service:, version:, archive:, retarget:)` | 把 class 产物压缩包传给 hub |
 | `covhub.fetchAgent(dest:)` | 从 hub 下载 `jacocoagent.jar` |
+| `covhub.fetchCovhubAgent(dest:)` | 从 hub 下载 `covhub-agent.jar`（push 通道、参数串里有两个 `-javaagent` 时才需要） |
 | `covhub.fetchClasses(service:, version:, dest:)` | 从 hub 取回某版本的 class 产物并解包，返回目录 |
 | `covhub.diagnose(service:, version:)` | 诊断 exec 与 class 是否对得上，返回含 `matchRate` / `verdict` 的 Map |
 | `covhub.requireMatch(service:, min:)` | 指纹匹配率低于 `min`（默认 90）就让流水线失败 |
-| `covhub.fetchReport(service:, version:, dest:)` | 从 hub 取回某版本的 `jacoco.xml` |
+| `covhub.fetchReport(service:, version:, dest:)` | 从 hub 取回某版本的 `jacoco.xml`（走报告目录 `/<服务>/versions/<版本>/jacoco.xml`，带令牌） |
 | `covhub.pushUnitCoverage(service:, version:, xml:, group:, failOnError:)` | 把单测 jacoco.xml 传给 hub（`services: 'a,b'` 一份落多个服务） |
-| `covhub.pushDiff(service:, version:, base:, head:, file:, failOnError:)` | 把 git diff 传给 hub，用于新增代码覆盖率 |
-| `covhub.lastVersion(service:)` | 问 hub 最近结算的版本与其 diff 的 head，用来定 diff 基线 |
+| `covhub.pushDiff(service:, version:, fromSources: true, base:, failOnError:)` | 让 hub 比对该版本与基线版本的源码生成 diff（`uploadSources` 默认已做，这里用于指定基线或重做）；传 `file:` + `base:`（commit）则是上传自己算的 git diff |
+| `covhub.uploadSources(service:, version:, archive:, base:, diff:, failOnError:)` | 按版本把源码传给 hub（不给 `archive` 就在工作区 git 仓库里现打），并由 hub 生成这一版的 diff；`diff: 'skip'` 只存源码 |
+| `covhub.lastVersion(service:)` | 问 hub 最近结算的版本与其 diff 的 head，自己算 git diff 时定基线用 |
 
-除 `agentOpts` / `online` / `status` / `pushUnitCoverage` / `pushDiff`（默认只警告）外，任何一步在
+除 `pushUnitCoverage` / `pushDiff` / `uploadSources`（默认 `failOnError: false`，只警告）外，任何一步（含 `agentOpts` / `status` / `online`）在
 hub 返回非 2xx 时都会让流水线失败 —— 覆盖率结算失败必须停住发版，而不是带着已丢失的数据继续。
