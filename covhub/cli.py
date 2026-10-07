@@ -399,7 +399,9 @@ def main():
 
     p = sub.add_parser("diff", help="某版本的 diff（新增代码覆盖率的依据）：hub 比对两版源码生成，或收流水线的 git diff")
     p.add_argument("service")
-    p.add_argument("version", nargs="?", help="版本标识，缺省取服务当前 version")
+    # version 不能像 unit-coverage 那样可选：后面的 file 也是可选位置参数，省掉 version 时
+    # argparse 会把文件名当版本、再报「没给 diff 文件」
+    p.add_argument("version", help="版本标识（和 upload-sources / predeploy 用的一致）")
     p.add_argument("file", nargs="?", help="git diff 输出文件（--from-sources 时不给）")
     p.add_argument("--from-sources", action="store_true",
                    help="由 hub 比对该版本与基线版本经 upload-sources 传上来的源码生成，不需要 diff 文件")
@@ -481,13 +483,12 @@ def main():
             cfg = load_runtime(args.config)
     except CovhubError as exc:
         die(str(exc))
-    needs = {"agent-opts": ("jacocoAgent",), "status": (), "retarget": (), "service": (),
-             "project": (), "import": (), "export": (), "db": (), "openapi": (), "unit-coverage": (),
-             "diff": (), "recompute": (), "upload-sources": ()}.get(
-        args.cmd, ("jacocoCli", "jacocoAgent"))
-    for key in needs:
-        if not os.path.isfile(cfg.get(key, "")):
-            die("配置项 %s 指向的文件不存在：%s" % (key, cfg.get(key)))
+    # 只有要起 java 出报告的命令才检查 jacocoCli。jacocoAgent / covhubAgent 填的是**被测端**路径，
+    # 只用来拼参数串，hub 本机读它们只在 /api/agent.jar 下载时 —— 这里不检查，否则按文档把它改成
+    # 容器内路径后 serve / dump 都起不来
+    if args.cmd in ("dump", "predeploy", "report", "diagnose", "watch", "serve") \
+            and not os.path.isfile(cfg.get("jacocoCli", "")):
+        die("配置项 jacocoCli 指向的文件不存在：%s" % cfg.get("jacocoCli"))
     os.makedirs(cfg["dataDir"], exist_ok=True)
 
     handlers = {

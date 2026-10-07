@@ -7,7 +7,7 @@
 --   mysql -u covhub -p covhub < mysql-02-建表.sql
 --
 -- 也可以不用这个文件：给账号 DDL 权限后 `python covhub.py db upgrade`（或直接 serve）会自动建出同样的表。
--- 两条路只能走一条 —— 表已存在时再跑 db upgrade 会因为「表已存在」失败。
+-- 两条路只走一条 —— 手工建表别漏掉末尾的 alembic_version，否则 db upgrade 会再去建表并因「表已存在」失败。
 
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;

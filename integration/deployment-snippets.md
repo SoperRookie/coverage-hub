@@ -17,7 +17,7 @@ alias covhub='/opt/bin/covhub-client.sh'      # integration/covhub-client.sh，�
 
 > **参数串不要手写。** 一律用 `covhub agent-opts <服务名>` 生成 —— 它会按 hub 上的
 > 配置带上 `includes`、`classdumpdir`、`sessionid`，以及正确的通道（pull 是 `tcpserver`；
-> push 是 `output=none` 外加第二个 `-javaagent:covhub-agent.jar`）。手写最容易漏掉
+> push 在 hub 配了 `covhubAgent` 时是 `output=none` 外加第二个 `-javaagent:covhub-agent.jar`，未配则退回 `output=tcpclient`）。手写最容易漏掉
 > `classdumpdir`，那会让报告全红。
 
 ## 先选通道
@@ -25,7 +25,7 @@ alias covhub='/opt/bin/covhub-client.sh'      # integration/covhub-client.sh，�
 | | 什么时候用 | agent 输出 | 端口 |
 |---|---|---|---|
 | **pull**（默认） | hub 能连到被测端 | `output=tcpserver` | 被测端开 6300，且要能被 hub 访问 |
-| **push** | 不能开入站端口 / 容器只出不进 / 多副本自动扩缩 | `output=none` + `covhub-agent.jar` | 被测端不开端口，连 hub 的 6400 |
+| **push** | 不能开入站端口 / 容器只出不进 / 多副本自动扩缩 | `output=none` + `covhub-agent.jar`（hub 没配 `covhubAgent` 时是 `output=tcpclient`） | 被测端不开端口，连 hub 的 6400 |
 
 通道在 hub 的配置里配（`channel: push`），被测端的注入方式两者完全一样。
 下面以 pull 为例；改 push 只需去掉端口映射那几行，参数串由 `agent-opts` 自动切换。
@@ -149,8 +149,9 @@ dump + 归档。正确做法是在触发滚动更新**之前**，先跑
 ```ini
 [Service]
 # 值用 covhub agent-opts my-service 生成
-Environment="JAVA_TOOL_OPTIONS=-javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,classdumpdir=/tmp/covhub-classes/my-service"
+Environment="JAVA_TOOL_OPTIONS=-javaagent:/opt/jacoco-lib/jacocoagent.jar=output=tcpserver,address=0.0.0.0,port=6300,includes=com.example.*,classdumpdir=/tmp/covhub-classes/my-service,sessionid=1.4.2"
 Environment="COVHUB_URL=http://covhub.internal:8900"
+Environment="COVHUB_TOKEN=<hub 上配的 serve.token>"   # hub 配了令牌时必填，否则 ExecStop 的结算会 401
 # 停服前先结算。这里只是一条 curl —— 本机不需要 Python、java 和配置文件。
 # 超时保护避免 hub 无响应时卡住重启。
 ExecStop=/usr/bin/timeout 60 /opt/bin/covhub-client.sh predeploy my-service
@@ -182,7 +183,11 @@ rm -rf cls.tgz /tmp/covhub-classes/my-service
 # 4. 确认新实例的 agent 已就绪
 covhub wait-online my-service
 
-# 5. 体检：确认这一版的 class 真的对得上
+# 5. 打一个基线快照：刚结算过的新周期还没有 exec，不先 dump 的话 diagnose 只会说「还没有任何 exec 数据」
+covhub dump my-service
+
+# 6. 体检：确认这一版的 class 真的对得上（只打印结果、不会让脚本失败，匹配率要人看；
+#    想自动卡住用 Jenkins 库的 covhub.requireMatch）
 covhub diagnose my-service
 ```
 
@@ -190,11 +195,11 @@ covhub diagnose my-service
 checkout 里跑 `covhub upload-sources my-service "$NEW_VERSION"`（见 `Jenkinsfile.build`）。
 部署节点上通常没有源码。
 
-整个脚本没有一行 Python —— 五步都是发给 hub 的 HTTP 请求，任何一步非 2xx 都会因
-`set -e` 中断部署。
+整个脚本没有一行 Python —— 六步都是发给 hub 的 HTTP 请求，前五步任何一步非 2xx 都会因
+`set -e` 中断部署（`diagnose` 总是 200，它的结果要人看）。
 
 第 3 步是最容易被漏掉的：**class 产物必须跟着版本一起换**，否则新版本的 exec 会和旧
-class 对不上，报告全是"未覆盖"**且不会报错**。第 5 步就是为了兜住它 —— 匹配率低会
+class 对不上，报告全是"未覆盖"**且不会报错**。第 6 步就是为了兜住它 —— 匹配率低会
 当场看出来，而不是等一个月后才发现归档的全是废数据。
 
 （`predeploy` 自己也会在归档前做一次同样的体检，匹配率低时告警但**不阻断结算** ——
@@ -230,8 +235,9 @@ location ~ ^/[^/]+/(current|versions|unit|artifacts|diff)/ { proxy_pass http://1
 - **看板前端免令牌，`/api/*` 与报告目录仍要令牌**，别在 nginx 层再加一套 basic auth
   （hub 的 Cookie 流程会被打断）。第一次打开看板会弹令牌输入框，它调 `POST /api/login`
   换一个 `HttpOnly` Cookie，之后报告链接也一起放行。
-- **`COVHUB_URL` 是 hub 的 API 地址，不是看板地址。** `covhub-client.sh` 和 Jenkins 共享库
-  只打 `/api/*`，指 nginx（`http://covhub.internal`）或直连 hub（`http://hub:8900`）都行；
+- **`COVHUB_URL` 是 hub 的 API 地址，不是看板地址。** `covhub-client.sh` 只打 `/api/*`；Jenkins 共享库
+  除 `fetchReport` 取 `/<服务>/versions/<版本>/jacoco.xml` 外也只打 `/api/*`（指 nginx 时这条路径由报告目录那条
+  location 反代，同样可用）。指 nginx（`http://covhub.internal`）或直连 hub（`http://hub:8900`）都行；
   直连能少一跳，也不受 nginx 超时限制。
 
 ### 不想装 nginx

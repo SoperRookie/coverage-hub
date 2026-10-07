@@ -7,13 +7,14 @@
  * 做四件事：
  *   1. 跑测试并产出各模块 jacoco.exec
  *   2. 由聚合模块产出 jacoco-aggregate/jacoco.xml
- *   3. 把 jacoco.xml 和 git diff 推给 hub —— 看板上「单测覆盖率」与「新增代码
- *      覆盖率」两列就来自这里（hub 停机时只警告，不卡构建）
+ *   3. 把 jacoco.xml 和源码推给 hub（diff 由 hub 比对两版源码生成）—— 看板上「单测覆盖率」
+ *      与「新增代码覆盖率」两列就来自这里（hub 停机时只警告，不卡构建）
  *   4. 归档 class 产物（可选，见下）
  *
  * 【前置】被测项目已加入 integration/maven-aggregate-module 那个聚合模块 ——
- * 这要改研发的 pom。不能改的话这整条流水线都用不上，运行期覆盖率不依赖它，
- * 直接看 Jenkinsfile.deploy 即可。
+ * 这要改研发的 pom。不能改的话删掉 Coverage Report 阶段和 pushUnitCoverage 那一行，
+ * uploadSources（源码 + diff）不依赖聚合模块，照样能用；运行期覆盖率也不依赖它，
+ * 见 Jenkinsfile.deploy。
  *
  * 【归档那一步现在是可选的】v1.1.0 起 class 由 agent 的 classDumpDir 在运行期
  * 自己交出，与 exec 的指纹必然匹配。构建期归档保留下来只是给「愿意改构建、
@@ -96,7 +97,7 @@ pipeline {
         }
 
         stage('Push to covhub') {
-            // 单测报告 + git diff + 源码送给 hub。版本串必须和发版时 predeploy / retarget 用的
+            // 单测报告 + 源码送给 hub（diff 由 hub 比对源码生成）。版本串必须和发版时 predeploy / retarget 用的
             // 一致（这里都是 REVISION），否则 hub 找不到对应的快照，新增覆盖永远算不出来。
             steps {
                 script {
@@ -118,8 +119,9 @@ pipeline {
             //
             // v1.1.0 起这不再是唯一来源：agent 的 classDumpDir 会在运行期把实际
             // 加载到的 class 落盘，指纹必然匹配，且不需要构建流水线配合。
-            // 这一步保留给「愿意改构建、想两份都留着」的项目 —— 两份都有时
-            // covhub 优先用 classdumpdir 那份。整段删掉不影响运行期覆盖率。
+            // 这一步保留给「愿意改构建、想两份都留着」的项目 —— 两份传的是同一个
+            // artifacts/<版本>/ 目录，后传的覆盖先传的。整段删掉不影响运行期覆盖率，
+            // 但 Jenkinsfile.deploy 第 2 步的 copyArtifacts 要跟着改（见 jenkins/README）。
             steps {
                 sh '''
                     rm -rf coverage-artifacts && mkdir -p coverage-artifacts
@@ -138,7 +140,7 @@ pipeline {
 
     post {
         success {
-            echo "单测报告与 diff 已推给 hub；class 产物已归档（运行期另有 classDumpDir 一路，不依赖这里）。"
+            echo "单测报告与源码已推给 hub（diff 由 hub 生成）；class 产物已归档（运行期另有 classDumpDir 一路，不依赖这里）。"
         }
     }
 }

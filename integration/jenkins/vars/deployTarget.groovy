@@ -135,17 +135,28 @@ void k8s(Map args) {
     String kc = args.kubeconfig ? "--kubeconfig='${args.kubeconfig}'" : ''
     String timeout = args.rolloutTimeout ?: '5m'
 
-    List<String> steps = []
+    String dep = "kubectl ${kc} -n ${ns}"
+    // set image 和 set env 各是一次 patch，不 pause 的话会连滚两轮：先 pause，改完一起 resume
+    // 才是一次滚动更新。中间任何一步失败也要 resume，否则 deployment 停在 paused 状态，
+    // 下次发版 rollout status 会一直等
+    List<String> patch = []
     if (args.image) {
-        steps << "kubectl ${kc} -n ${ns} set image deployment/${args.deployment} ${container}='${args.image}'"
+        patch << "${dep} set image deployment/${args.deployment} ${container}='${args.image}'"
     }
-    // set env 本身会触发一次滚动更新；与 set image 合并成一次更新，避免连滚两轮
-    steps << "kubectl ${kc} -n ${ns} set env deployment/${args.deployment} " +
-             "-c ${container} JAVA_TOOL_OPTIONS='${args.javaToolOptions}'"
-    steps << "kubectl ${kc} -n ${ns} rollout status deployment/${args.deployment} --timeout=${timeout}"
-    steps << "kubectl ${kc} -n ${ns} get pods -l app=${args.deployment} -o wide"
+    patch << "${dep} set env deployment/${args.deployment} -c ${container} JAVA_TOOL_OPTIONS='${args.javaToolOptions}'"
 
-    sh "set -e\n" + steps.join('\n')
+    sh """
+        set -e
+        ${dep} rollout pause deployment/${args.deployment}
+        set +e
+        ${patch.join(' && ')}
+        rc=\$?
+        set -e
+        ${dep} rollout resume deployment/${args.deployment}
+        [ "\$rc" -eq 0 ]
+        ${dep} rollout status deployment/${args.deployment} --timeout=${timeout}
+        ${dep} get pods -l app=${args.deployment} -o wide
+    """
 }
 
 // --------------------------------------------------------------- systemd

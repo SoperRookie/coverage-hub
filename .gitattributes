@@ -7,8 +7,8 @@
 *.groovy    text eol=lf
 Jenkinsfile* text eol=lf
 
-# 批处理反过来：必须 CRLF。LF 结尾的 .cmd 在 cmd.exe 里 goto / 括号块会跳错位置。
-*.cmd       text eol=crlf
+# Windows 专用的 PowerShell 脚本按 Windows 习惯走 CRLF（PowerShell 本身两种都认）。
+*.ps1       text eol=crlf
 
 # 二进制
 *.jar       binary

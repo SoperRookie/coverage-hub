@@ -1,5 +1,17 @@
 # 更新日志
 
+## 未发布
+
+- Windows 的 covhub-agent 构建脚本由 cmd 批处理 `agent\build.cmd` 换成 PowerShell `agent\build.ps1`
+  （`powershell -ExecutionPolicy Bypass -File agent\build.ps1`；带 UTF-8 BOM，注释可以是中文）。两个脚本仍然等价。
+- 文档按当前实现逐项对账：README 的命令一览 / 接口表补齐漏掉的参数，ONBOARDING 里过时的返回体示例、
+  迁移号、版本号、`classfiles` 必填与否、`Jenkinsfile.deploy` 的实际阶段等改正；integration 下各模板的注释同步。
+- 对账顺手修掉的几处：CLI 不再要求 `jacocoAgent` 在 hub 本机存在（它是被测端路径，按文档改成容器内路径后
+  `serve` / `dump` 会拒绝启动）；`diff` 子命令的 `version` 改为必填（原来省掉它时文件名会被当成版本）；
+  Jenkins 库 `fetchReport` 带上令牌（hub 配了 `serve.token` 时原来必 401）；`Jenkinsfile.deploy` 的 `IMAGE`
+  不带 tag 时由流水线补 `:NEW_VERSION`（参数默认值里的 `${NEW_VERSION}` 不会被展开）；k8s 方式 `rollout pause`
+  后再改镜像与环境变量，合成一次滚动；`diffs.origin` 在 models 里补 `server_default`，与迁移 0003 一致。
+
 ## v2.6.0（2026-10-06）
 
 **push 通道换上自带的薄 agent `covhub-agent.jar`：hub 不在时被测服务照常启动，hub 重启后自己重连。**
@@ -7,7 +19,7 @@ JaCoCo 自带的 `output=tcpclient` 有两个改不了的行为 —— 启动时
 **被测 JVM 直接起不来**（hub 停机维护期间谁都发不了版）；连接断了之后**不再重连**，hub 一重启，
 所有 push 实例此后的覆盖率都取不到，直到被测服务各自重启。
 
-- 新增 `lib/covhub-agent.jar`（源码 `agent/`，一个类、零依赖、Java 8 字节码，`agent/build.sh` 或 Windows 下的 `agent\build.cmd` 构建，产物进
+- 新增 `lib/covhub-agent.jar`（源码 `agent/`，一个类、零依赖、Java 8 字节码，`agent/build.sh` 构建（Windows 脚本见「未发布」），产物进
   版本库）。它与 `jacocoagent.jar` **并列挂在被测 JVM 上**：JaCoCo 改用 `output=none` 只插桩，`covhub-agent`
   在 daemon 线程里连 hub 的收集端，数据经 JaCoCo 的公开入口 `org.jacoco.agent.rt.RT` 取（只用反射，不绑定
   JaCoCo 版本）。线上仍是 JaCoCo 的 remote control 协议 —— **收集端、exec 格式、JaCoCo 的 jar 都没改**。

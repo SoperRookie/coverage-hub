@@ -45,7 +45,7 @@ hub 重启后它自己重连。
 
 | 机器 | 需要什么 | 不需要什么 |
 |---|---|---|
-| **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里，`web/dist`） |
+| **hub 那一台**（唯一的服务端） | Python 3.12、`java`（8+）、`git`（比对源码生成 diff）、本仓库（`pip install .`）、一个数据库（MySQL 8 / PostgreSQL；单机试用可用自带的 SQLite）、一份 hub 配置文件 | Node（前端产物已在仓库里，`web/dist`） |
 | **看板那一台**（可以就是 hub 那台） | nginx 之类的静态服务器 + `web/dist` 的内容（模板见 `integration/nginx/covhub.conf`）。不想单独部署就配 `serve.webDir`，让 hub 一起托管 | Node、Python |
 | **被测服务所在机器** | `jacocoagent.jar`（`covhub-client.sh fetch-agent` 下载）；push 通道再加 `covhub-agent.jar`（`fetch-covhub-agent`）；pull 通道要能被 hub 连上 agent 端口 | Python、covhub、配置文件 |
 | **发版节点 / 流水线** | `curl`（用 `integration/covhub-client.sh` 包一层） | Python、java、配置文件、历史 class 产物 |
@@ -79,6 +79,7 @@ hub 重启后它自己重连。
 | hub 的 Python | 3.12 | `pip install .` 装 FastAPI、SQLAlchemy、Alembic、pydantic、PyYAML、PyMySQL。内网机器提前准备 wheel |
 | hub 的数据库 | MySQL 8（主验证）/ PostgreSQL | 存服务配置、覆盖率历史、归档元数据。exec / 报告 / class 产物仍在磁盘。单机试用可不配，用配置文件旁的 SQLite |
 | hub 的 `java` | 8+ | 跑 `lib/jacococli.jar` 出报告。`java -version` 能出来即可，不需要 JDK |
+| hub 的 `git` | 任意版本 | `upload-sources` 之后 hub 用 `git diff --no-index` 比对两版源码生成 diff；没装则 diff 生成不了（返回体 `diffReason` 说明），新增代码覆盖率出不来 |
 | 被测服务的 JVM | 8+ | `lib/jacocoagent.jar` 的 manifest 写着 `Java-Version: 8`；`lib/covhub-agent.jar`（push 通道）同样是 Java 8 字节码 |
 | JaCoCo 版本 | 0.8.16.1（`lib/` 自带） | 能插桩多高版本的 class 由它决定。被测服务用了比它更新的 Java，agent 启动时会报 `Unsupported class file major version`，届时按 `CLAUDE.md` 里的说明换 `lib/` 下 JaCoCo 的两个 jar（`covhub-agent.jar` 不绑定 JaCoCo 版本，不用换） |
 | 被测机器 | 能改环境变量或 JVM 参数 | 这是唯一的硬要求。容器、systemd、K8s、裸 `java -jar` 都满足 |
@@ -103,7 +104,7 @@ hub 重启后它自己重连。
 | `collect.advertiseAddress` | **被测端能访问到的** hub 地址 | push 通道 agent 连回来用 | hub 的对外 IP / 域名，不是 `127.0.0.1` |
 
 一个小验证：`jacocoAgent` 填的路径 hub 本机不存在也没关系 —— `agent-opts` 照样输出
-正确的参数串；只有 `fetch-agent`（从 hub 下载 agent）会因为找不到文件而 404。
+正确的参数串，hub 自己只检查它要跑的 `jacocoCli`；只有 `fetch-agent`（从 hub 下载 agent）会因为找不到文件而 404。
 `covhubAgent` 与 `fetch-covhub-agent` 同理。
 
 ### 1.3 网络放行清单
@@ -153,7 +154,7 @@ order-service-uat
 
 两条配置各自独立，互不影响；发版流水线里传对应环境的名字即可。
 
-服务名只用字母、数字、`-`、`_`、`.` —— 它会出现在 URL 路径和目录名里。
+服务名只用字母、数字、`-`、`_`、`.`，且不能以 `.` 或 `-` 开头 —— 它会出现在 URL 路径和目录名里。
 
 ---
 
@@ -164,7 +165,7 @@ order-service-uat
 **只需要一台**，整个团队共用。要求：
 
 - 能连到所有 pull 通道服务的 agent 端口；push 通道的被测端能连到它
-- 装有 Python 3.12 和 java 8+
+- 装有 Python 3.12、java 8+ 和 git（hub 比对两版源码生成 diff 要用）
 - 磁盘留出余量：`data/` 会持续增长（§8.2 有估算）
 
 通常放测试环境的一台管理机。被测服务和发版节点都不在这台机器上跑任何 covhub
@@ -259,7 +260,7 @@ collect:                                # 只有要用 push 通道才需要；�
 
 ```bash
 python3 covhub.py db upgrade
-# 数据库结构已升到 0002（mysql+pymysql://covhub:***@10.0.0.6:3306/covhub?charset=utf8mb4）
+# 数据库结构已升到 0003（mysql+pymysql://covhub:***@10.0.0.6:3306/covhub?charset=utf8mb4）
 ```
 
 `autoUpgrade: true` 时 `serve` 启动也会自动做这一步；关掉它则表结构不是最新时拒绝启动。
@@ -439,7 +440,7 @@ sudo cp -r web/dist/* /opt/covhub-web/        # 或 /opt/covhub/web
 
 ```bash
 curl -s http://127.0.0.1:8900/api/health
-# {"ok": true, "version": "2.3.0", ...}
+# {"ok": true, "version": "2.6.0", "services": [...]}
 
 curl -s http://127.0.0.1:8900/order-service/current/jacoco.xml
 # {"ok": false, "error": "..."}  ← 401，说明令牌生效了；返回 404 或文件内容都说明没生效
@@ -532,8 +533,8 @@ recompute <service> [version]                  按已有 diff 重算新增代码
 ```
 
 环境变量除 `COVHUB_URL` / `COVHUB_TOKEN` 外还有 `COVHUB_TIMEOUT`（单次请求最长秒数，默认 600，
-predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。退出码：0 成功、1 hub 返回非 2xx
-（业务失败，响应体的 `log` 里有原因）、2 连不上 hub 或参数错。只有 GET 会自动重试，`dump` / `predeploy`
+predeploy 大服务要几分钟）、`COVHUB_CONNECT_TIMEOUT`（默认 10）和 `COVHUB_POLL_INTERVAL`（`wait-online` 的轮询
+间隔秒数，默认 5）。退出码：0 成功、1 hub 返回非 2xx（业务失败，响应体的 `log` 里有原因）或 `wait-online` 超时、2 连不上 hub 或参数错。只有 GET 会自动重试，`dump` / `predeploy`
 这类会改状态的不重试。
 
 ---
@@ -583,7 +584,8 @@ predeploy 大服务要几分钟）和 `COVHUB_CONNECT_TIMEOUT`（默认 10）。
 
 服务配置在数据库里，用 CLI 登记（在 hub 本机；也可以用 `POST /api/services`，字段名一样）。
 先建项目（可选，看板按它分组），再登记服务。项目也可以在看板「项目总览 → 新建项目」里建，
-服务归入哪个项目可以事后在项目面板「添加服务」里勾选 —— 登记时不给 `--project` 的服务会进「未分组」：
+服务归入哪个项目可以事后在项目面板「添加服务」里勾选 —— 登记时不给 `--project` 的服务会进「未分组」
+（已属于别的项目的服务要先移出，`service update <svc> --no-project` 或面板里「移出」，再归入新项目）：
 
 ```bash
 python3 covhub.py project add shop --title "商城"
@@ -612,7 +614,7 @@ bindAddress: 0.0.0.0      # pull：agent 在被测端监听的地址
 includes:
   - com.example.order.*
 classDumpDir: /tmp/covhub-classes/order-service     # 被测端路径
-classfiles:               # 先随便填一个，Step 7 upload-classes --retarget 会自动改
+classfiles:               # 可以先不填（或随便填一个），Step 7 upload-classes --retarget 会自动改
   - ./data/order-service/artifacts/1.4.2
 reportExcludes:
   - com/example/order/**/dto/**
@@ -639,7 +641,7 @@ python3 covhub.py service add order-service --channel push --includes 'com.examp
 
 | 字段 | 必填 | 说明 |
 |---|---|---|
-| `name` | 是 | 主键，见 §1.5。`api`、`assets`、`index.html` 这几个是保留名 |
+| `name` | 是 | 主键，见 §1.5。`api`、`assets`、`index.html`、`favicon.ico`、`agent.jar`、`docs`、`swagger` 是保留名（不区分大小写） |
 | `project` | 否 | 所属项目名，看板按它分组；先 `project add` |
 | `version` | 建议 | 当前在线版本。`predeploy` 不带版本号时用它做归档目录名；pull 通道还会作为 agent 的 `sessionid`。发版流水线里的 `retarget` / `upload-classes --retarget` 会自动更新它 |
 | `channel` | 否 | `pull`（默认）或 `push` |
@@ -648,7 +650,7 @@ python3 covhub.py service add order-service --channel push --includes 'com.examp
 | `includes` | 强烈建议 | 传给 agent，决定**哪些类插桩**。类名用 `.` 分隔，`*` 匹配任意字符（含 `.`），`?` 匹配一个字符。多项工具会用 `:` 拼起来。**不配就插桩所有类**，把 Spring、MyBatis 全插一遍，启动慢几倍还撑大 exec |
 | `excludes` | 否 | 同上，反向。被排除的类连数据都不产生，**事后找不回**，改了要重启服务 |
 | `classDumpDir` | 强烈建议 | **被测端**路径。agent 把加载到的每个 class 落在这里，文件名自带指纹（`OrderService.3f2a91c4e8b70d15.class`）。不配就得靠构建期归档 class，见 §6 |
-| `classfiles` | 是 | **hub 上**出报告用的 class 目录（可多个），必须是运行中那一份产物。走 `upload-classes --retarget` 会自动填成 `data/order-service/artifacts/<版本>/` |
+| `classfiles` | 否（出报告前必须有） | **hub 上**出报告用的 class 目录（可多个），必须是运行中那一份产物。登记时可以不填，走 `upload-classes --retarget` 会自动填成 `data/order-service/artifacts/<版本>/` |
 | `sourcefiles` | 否 | **hub 本机**的源码根目录（`src/main/java` 那一级）。只在该版本没 `upload-sources` 时兜底，且只对当前版本生效；独立部署用 Step 8 的上传即可 |
 | `reportExcludes` | 否 | 报告端过滤，Ant 路径风格用 `/`：`**` 跨目录、`*` 不跨目录。只影响统计口径，改了跑一次 `report` 即可 |
 | `sourceEncoding` | 否 | 默认 `UTF-8`。源码页乱码时看这里 |
@@ -910,7 +912,7 @@ POD=$(kubectl -n prod get pod -l app=order-service -o name | head -1)
 kubectl -n prod cp "${POD#pod/}:/tmp/covhub-classes/order-service" ./cls && tar czf cls.tgz -C ./cls .
 
 covhub-client.sh upload-classes order-service 1.4.2 cls.tgz --retarget
-# {"ok": true, "log": "order-service：已接收 1.4.2 的 class 产物 1832 个 -> /opt/coverage-hub/data/order-service/artifacts/1.4.2\norder-service -> version=1.4.2 classfiles=['/opt/coverage-hub/data/order-service/artifacts/1.4.2']", ...}
+# {"ok": true, "service": "order-service", "version": "1.4.2", "path": "/opt/coverage-hub/data/order-service/artifacts/1.4.2", "classes": 1832, "retarget": "[10:20:11] order-service -> version=1.4.2 classfiles=['/opt/coverage-hub/data/order-service/artifacts/1.4.2']\n"}
 
 rm -rf cls cls.tgz
 ```
@@ -928,12 +930,13 @@ Step 3 里 `classfiles` 随便填的那个值到这里被自动纠正。两台�
 - **换了版本必须重新传**（`predeploy` → 部署 → `upload-classes --retarget`，§5）
 - **传完就删被测端那份**，别让它一直占磁盘。用 `includes` 收窄范围后，典型服务在几十 MB 量级
 - 包里的**顶层目录会自动剥掉**：`tar czf cls.tgz cls/` 和 `tar czf cls.tgz -C cls .` 两种打法都行
-- 支持 `tar.gz` 和 `zip`；返回体里 `已接收 ... 0 个` 说明打包方式不对，检查包里是不是真有 `.class`
+- 支持 `tar.gz` 和 `zip`；返回体里 `"classes": 0` 说明打包方式不对（hub 日志里会有「包里一个 .class 都没有」），检查包里是不是真有 `.class`
 - **动态生成的类也在里面** —— Spring AOP、MyBatis 代理这类构建产物里根本没有的类，只有 agent 见过
 
 > **仍然想走构建期归档？** 也支持：构建流水线打包 `target/classes` 后同样用
-> `upload-classes` 传上来即可（`Jenkinsfile.build` 里有现成的一步）。两者都有时优先
-> 用 classdumpdir 那份 —— 它才是运行时真相。
+> `upload-classes` 传上来即可（`Jenkinsfile.build` 里有现成的一步）。两份传的是同一个
+> `artifacts/<版本>/` 目录，**后传的整份覆盖先传的**，hub 不会自动挑；想以 classdumpdir 那份
+> 为准（它才是运行时真相），就让它最后传。
 
 日后要在别处用某个版本的 class（重出报告、比对）时，从 hub 取回来即可，本机不必囤：
 
@@ -993,12 +996,12 @@ covhub-client.sh status order-service
 
 # 2. 拉一次快照
 covhub-client.sh dump order-service
-# {"ok": true, "log": "order-service：dump\n  指令 1.3%（412/31680）  分支 0.4%  触达类 1103/1832\n..."}
+# {"ok": true, "log": "[10:23:41] order-service：dump\n[10:23:42]   class 过滤：保留 1790，按 reportExcludes 剔除 42\n[10:23:44]   指令 1.3%（412/31680）  分支 0.4%  触达类 1103/1790\n..."}
 #   触达类不为 0 就说明 exec 和 class 对上了
 
 # 3. 诊断：确认 exec 与 class 对得上
 covhub-client.sh diagnose order-service
-# {"ok": true, "matchRate": 100.0, "verdict": "正常", ...}
+# {"ok": true, "diagnose": {"matchRate": 100.0, "verdict": "正常", ...}}
 
 # 4. 看板
 #   打开看板（分离部署是 nginx 的地址，配了 serve.webDir 则是 http://<hub>:8900/），在弹窗里填令牌；
@@ -1009,8 +1012,8 @@ covhub-client.sh diagnose order-service
 都实例化了（构造器算覆盖），但业务方法一个没调。**手工点几下页面再 dump，数字应该
 明显上涨** —— 涨了就说明整条链路通了。
 
-之后不用再手工 dump：hub 每 `watch.intervalSeconds`（默认 300 秒）自动采一轮，看板
-每 60 秒刷新。测试同学跑完一轮用例想立刻看数，不用找运维敲命令 —— 服务详情页右上角的
+之后不用再手工 dump：hub 每 `watch.intervalSeconds`（默认 300 秒）自动采一轮，项目总览与项目面板
+每 60 秒自动刷新（服务详情页不自动刷新，手动刷新或点「立即采集」）。测试同学跑完一轮用例想立刻看数，不用找运维敲命令 —— 服务详情页右上角的
 **「立即采集」**就是这条 `dump`，点完 hub 的执行日志会弹出来。
 
 ---
@@ -1032,6 +1035,7 @@ $ python3 covhub.py service add order-service --version 1.4.2 \
     --report-excludes 'com/example/order/**/dto/**'
 [10:14:02]   classfiles 里的相对路径 ./data/order-service/artifacts/1.4.2 将相对 /opt/coverage-hub 解析
 [10:14:02] 已登记服务 order-service（pull）
+{ ...入库后的整条配置（JSON，stdout）... }
 $ grep jacocoAgent covhub.yaml
 jacocoAgent: /opt/jacoco-lib/jacocoagent.jar        # 已按被测端路径改过
 
@@ -1073,7 +1077,7 @@ $ curl -s localhost:8080/api/orders/1 > /dev/null      # 随便调几个接口�
 
 $ tar czf cls.tgz -C /tmp/covhub-classes/order-service .
 $ covhub-client.sh upload-classes order-service 1.4.2 cls.tgz --retarget
-{"ok": true, "log": "order-service：已接收 1.4.2 的 class 产物 1832 个 -> /opt/coverage-hub/data/order-service/artifacts/1.4.2\norder-service -> version=1.4.2 classfiles=['/opt/coverage-hub/data/order-service/artifacts/1.4.2']"}
+{"ok": true, "service": "order-service", "version": "1.4.2", "path": "/opt/coverage-hub/data/order-service/artifacts/1.4.2", "classes": 1832, "retarget": "[10:20:11] order-service -> version=1.4.2 classfiles=['/opt/coverage-hub/data/order-service/artifacts/1.4.2']\n"}
 $ rm -f cls.tgz
 ```
 
@@ -1161,9 +1165,11 @@ covhub-client.sh diagnose "$SVC"
 
 ### 5.3 Jenkins 版
 
-装好 Shared Library 后（`integration/jenkins/README.md`），`Jenkinsfile.deploy` 就是
-上面这个顺序的模板，`DEPLOY_MODE` 参数选部署方式，`DIAGNOSE_MIN_MATCH`（默认 90）
-控制第 5 步的匹配率阈值 —— 低于它流水线失败。
+装好 Shared Library 后（`integration/jenkins/README.md`），`Jenkinsfile.deploy` 是同一思路的模板，但 class 的来源不同：
+它的五个阶段是结算 → 从构建任务（`BUILD_JOB`，需要 Copy Artifact 插件，且 `Jenkinsfile.build` 保留了「Archive for runtime coverage」
+那一步）取**构建期归档的 class 包** → 部署 → `uploadClasses` 并 retarget → 等在线、打一次基线 `dump`、按 `DIAGNOSE_MIN_MATCH`
+（默认 90，填 0 不校验）校验匹配率，低于它流水线失败。要像上面这样用 classDumpDir，就按 §5.2 把第 2、4 步换成在被测端打包上传。
+`DEPLOY_MODE` 参数选部署方式。
 
 ### 5.4 手工发版 / 没有流水线
 
@@ -1281,7 +1287,7 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 - [ ] 不带令牌访问 `http://<hub>:8900/<service>/current/jacoco.xml` 返回 401
 - [ ] 运维知道 stderr 会多一行 `Picked up JAVA_TOOL_OPTIONS`，不会当成告警
 - [ ] 看板上能找到该服务，详情页四个环形指标里至少「运行时 · 总覆盖」有值
-- [ ] （要单测 / 新增代码覆盖率的话）构建流水线已加 `unit-coverage` 与 `diff` 两步，详情页「新增代码明细」有文件列表
+- [ ] （要单测 / 新增代码覆盖率的话）构建流水线已加 `unit-coverage` 与 `upload-sources` 两步（diff 由 hub 比对源码生成），详情页「新增代码明细」有文件列表
 - [ ] （要看源码的话）构建流水线已加 `upload-sources`，新增代码点开能「展开全文」
 
 ### 看板每一块数据从哪来
@@ -1317,7 +1323,7 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 | hub 的采集 / API 日志 | `serve` 进程的 stderr：`nohup … 2>&1` 方式是 `covhub.log`，systemd 方式是 `journalctl -u covhub` |
 | 每次 API 调用的执行日志 | 也在返回体的 `log` 字段里，流水线输出中直接能看 |
 | agent 自己的错误 | 被测 JVM 的 stderr。agent 启动失败（jar 路径错、class 版本不支持）会在 `Picked up` 那行之后紧跟一段异常 |
-| 看板的状态徽章 | 离线 / 采集停了（超过 3 个轮询周期没新数据）/ 有断代 / 混版本 / 未知。在线状态由采集线程每轮写入，没带 `--with-watch` 的 hub 上永远是「未知」 |
+| 看板的状态徽章 | 离线 / 采集停了（超过 3 个轮询周期、且不少于 15 分钟没新数据）/ 有断代 / 混版本 / 未知。在线状态由采集线程每轮写入，没带 `--with-watch` 的 hub 上永远是「未知」 |
 
 `/api/health` 的请求不进日志（它会被反复轮询）。
 
@@ -1343,8 +1349,10 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 要备份的是三样：配置文件、数据库、`data/`。数据库里是服务配置、覆盖率历史、归档元数据
 （用 `mysqldump` 之类常规手段）；`data/` 里最值钱的是 `versions/<版本>/`（报告 + 全部 exec +
 `manifest.json`）—— manifest 记录了该 exec 对应哪份 class，是日后重新出报告的唯一依据。
-`artifacts/` 也一起备，否则 exec 有了 class 没了。库丢了而 `data/` 还在时，`covhub import`
-能从每个服务的 `versions/*/manifest.json` 把归档记录重建出来（快照历史重建不了）。
+`artifacts/` 也一起备，否则 exec 有了 class 没了。另外定期 `python3 covhub.py export --out covhub-services.yaml`
+（或 `GET /api/export`）把项目与服务配置导成文件一起备。库丢了而 `data/` 还在时，`covhub import covhub-services.yaml`
+先重建项目与服务配置，再从每个服务的 `versions/*/manifest.json` 把归档记录重建出来（快照历史重建不了；
+`import` 只认文件里列出的服务，所以没有 export 过的话配置得重新登记）。
 
 ### 8.4 改了配置要不要重启
 
@@ -1357,7 +1365,7 @@ ls coverage-report/target/site/jacoco-aggregate/jacoco.xml   # 应存在
 | `covhubAgent` / `collect.advertiseAddress` / `collect.port`（影响 push 服务的参数串） | 重新取 `agent-opts`，**重启被测服务**才换上（`collect.port` 还要重启 hub）。已经在跑的实例按旧参数继续工作 |
 | `address` / `version` / `classfiles` / `project` | 不用重启，下一轮采集 / 下一次刷新看板生效 |
 | `serve.token` / `serve.webDir` | 不用重启，下一次请求就生效（配置文件每个请求重读）。令牌走环境变量 `COVHUB_TOKEN` 的话要重启进程 |
-| `serve.port` / `watch.intervalSeconds` / `collect.*` / `database.*` | **重启 hub**（这几项在启动时读一次） |
+| `serve.port` / `watch.intervalSeconds` / `collect.port` / `collect.bindAddress` / `database.*` | **重启 hub**（这几项在启动时读一次）。`collect.dumpTimeoutSeconds` 不用重启，下一轮取数即生效 |
 | 加 / 删一条 service | 不用重启 hub。删的话先跑一次 `predeploy` 把数据结算掉；`service remove` 只删配置，`data/<service>/` 和库里的历史不动 |
 
 ### 8.5 换令牌
@@ -1432,7 +1440,7 @@ hub 启动日志里有「未配置 covhubAgent」的提醒就是这种情况，�
 | 客户端报 `HTTP 401` | —— | `COVHUB_TOKEN` 没设或和 `serve.token` 对不上 |
 | 客户端报「连不上 hub」 | `curl -v $COVHUB_URL/api/health` | `COVHUB_URL` 写错；hub 没起；8900 被防火墙挡了 |
 | `fetch-agent` / `fetch-covhub-agent` 报 404 | hub 上看 `jacocoAgent` / `covhubAgent` 指的文件在不在 | 配的是被测端路径，hub 本机不存在这个文件（或 `covhubAgent` 根本没配）。改回 `./lib/` 下的默认值下载一次，或直接从版本库 `lib/` 拷 |
-| `upload-classes` 返回「已接收 0 个」 | `tar tzf cls.tgz \| head` | 包里没有 `.class`：打错了目录，或服务还没加载任何匹配 `includes` 的类 |
+| `upload-classes` 返回体里 `"classes": 0` | `tar tzf cls.tgz \| head` | 包里没有 `.class`：打错了目录，或服务还没加载任何匹配 `includes` 的类 |
 
 ### 数据阶段
 
@@ -1454,7 +1462,7 @@ hub 启动日志里有「未配置 covhubAgent」的提醒就是这种情况，�
 | push：某个副本的数据突然不见了 | hub 日志找「已断开（timed out）」 | 取数超时（默认 20 秒）后该实例的连接被 hub 丢弃。挂 `covhub-agent` 的实例随后自己连回来，计数器一直在 JVM 里，下一轮照常取到（只是这一轮少一份快照）；用 `output=tcpclient` 的实例不会回来，直到被测服务重启，期间的覆盖率取不到 |
 | `predeploy` 报 409 | —— | 目标已不可达。服务已经停了？那这段数据已经丢了。确实要跳过用 `--allow-missing` |
 | `predeploy` 日志「指纹匹配率只有 x%」但仍归档 | `diagnose <svc> <版本>` | 这是有意的：exec 不可再生，对不上也先留下。把 class 对上后可以重出这一版的报告 |
-| 看板「新增代码」一直是「—」 | `diff` 命令返回体里的 `matchesCurrentVersion` | 没传这一版的 diff，或 diff 的版本串和服务当前 `version` 不一致。对上版本串后 `covhub recompute <svc>` |
+| 看板「新增代码」一直是「—」 | `diff` 命令返回体里的 `matchesCurrentVersion` | 没传这一版的 diff，或 diff 的版本串和服务当前 `version` 不一致。对上版本串后 `covhub-client.sh recompute <svc> [版本]`（hub 本机也可 `python3 covhub.py recompute <svc> --version <版本>`） |
 | 新增代码显示「无新增」 | 看 `data/<svc>/diff/<版本>.lines.json` | diff 里的新增行没有一行是 JaCoCo 有探针的（只改了注释 / 配置 / 测试代码），合法 |
 | 详情页提示「N 个新增的源码文件在报告里找不到」 | 对照 `includes` / `excludes` | 这些文件的类没被插桩（`excludes` 排掉、`includes` 没覆盖到），或 class 不在 `classfiles` 里。它们不进分母，数字会偏高 |
 | 单测那一列一直是「—」 | 构建流水线日志里 `unit-coverage` 那一步 | 没传单测报告；或 hub 停机时上传失败（默认只警告不卡构建） |
@@ -1466,7 +1474,7 @@ hub 启动日志里有「未配置 covhubAgent」的提醒就是这种情况，�
 | 服务启动明显变慢 | 看 `includes` | 范围太大，把框架类也插桩了。收窄到自己的业务包 |
 | 上传单测 XML 返回 413 | nginx 日志 | 反代的 `client_max_body_size` 默认 1m，聚合 XML 有几十 MB，调大 |
 | hub 启动日志第一行是 `sqlite:///…` | —— | `database.url` 没配或环境变量没传到进程，跑在了单机试用的 SQLite 上 |
-| 看板卡片提示「采集可能已经停了」 | hub 日志 | 超过 3 个轮询周期没新数据：hub 进程挂了、`--with-watch` 没带、或服务下线了 |
+| 看板卡片提示「采集可能已经停了」 | hub 日志 | 超过 3 个轮询周期（且不少于 15 分钟）没新数据：hub 进程挂了、`--with-watch` 没带、或服务下线了 |
 | 浏览器打开看板弹「需要访问令牌」 | —— | 配了 `serve.token`。填一次换到 Cookie，之后不再问 |
 | 打开 hub 的 `/` 看到一页说明而不是看板 | —— | 正常：前后端分离时看板在 nginx 那边。要让 hub 自己托管就配 `serve.webDir` |
 | 打开看板是 404 / 白屏 | nginx 日志 | `web/dist` 没同步到 nginx 的 root 目录，或 root 配错；产物换版本后要整个目录覆盖 |

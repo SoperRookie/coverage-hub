@@ -9,6 +9,7 @@
 #   COVHUB_TOKEN     hub 上配了 serve.token 时必填
 #   COVHUB_TIMEOUT   单个请求的最长秒数，默认 600（predeploy 要 dump + merge + 出报告，大服务要几分钟）
 #   COVHUB_CONNECT_TIMEOUT   连接超时秒数，默认 10
+#   COVHUB_POLL_INTERVAL     wait-online 的轮询间隔秒数，默认 5
 #
 # 用法：
 #   covhub-client.sh health
@@ -32,7 +33,7 @@
 #   covhub-client.sh last-version <service> [--plain]  最近结算的版本与其 diff 的 head（自己算 git diff 时定基线用）
 #   covhub-client.sh recompute <service> [version]     按已有 diff 重算新增代码覆盖
 #
-# 退出码：0 成功；1 hub 返回非 2xx（业务失败，响应体里的 log 有原因）；2 连不上 hub / 参数错。
+# 退出码：0 成功；1 hub 返回非 2xx（业务失败，响应体里的 log 有原因）或 wait-online 超时；2 连不上 hub / 参数错。
 # 非零一律让部署脚本停下来，而不是静默丢数据。
 
 set -e
