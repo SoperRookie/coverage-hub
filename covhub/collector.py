@@ -68,6 +68,13 @@ class PushCollector:
         # （配置每次重读是硬约束），而收集端不该知道配置来自文件还是数据库。
         self.cfg_loader = cfg_loader
         self.conns = {}
+        # 按服务记的两组「JVM 会话起点」（SessionInfo 的 start，毫秒；它就是一个 JVM 的身份，
+        # 重启才会变，--reset 也会把它推到清零那一刻）：
+        #   dropped      掉线后还没回来的实例
+        #   missed_reset 结算清零时不在线（或取数失败被丢弃）的实例 —— 它们的计数器还是上一
+        #                周期的，重连时握手带回来的数据属于已归档的旧版本，不能混进新周期
+        self.dropped = {}
+        self.missed_reset = {}
         self.lock = threading.Lock()
         self.seq = 0
         self.srv = None
@@ -140,10 +147,39 @@ class PushCollector:
                 return
 
             log('push：%s 连入，认领为服务 %s（sessionid "%s"）' % (who, service, sessionid))
-            # 握手那一次拿到的数据本身就是有效数据，直接存下，别浪费
             svc = find_service(cfg, service)
+            start = sessions[0][1] if sessions else None
+            self._retire_twin(cid, service, peer[0], start)
+            with self.lock:
+                self.dropped.get(service, set()).discard(start)
+                stale = start is not None and start in self.missed_reset.get(service, set())
+                if stale:
+                    self.missed_reset[service].discard(start)
+            if stale:
+                # 这个 JVM 错过了结算时的清零：握手拿到的是上一周期（已归档）的累计数据，
+                # 写进新周期只会把新版本的数字抬高、指纹匹配率拉低。清零，从头累加
+                log("push：%s 错过了 %s 上次结算的清零，握手带回的是上一周期的数据 —— 丢弃并清零"
+                    % (who, service))
+                remote_dump(rfile, wfile, reset=True)
+                with self.lock:
+                    if cid in self.conns:
+                        self.conns[cid]["sessionStart"] = None      # 下次取数时读到新的
+                        self.conns[cid]["classes"] = {}
+                return
             with LOCK:
-                self._store(cfg, svc, cid, sessions, execdata)
+                with self.lock:
+                    dumped = cid in self.conns and self.conns[cid]["last"] is not None
+                if dumped:
+                    # 登记和拿到 LOCK 之间采集线程已经取过这条连接（可能还带 --reset）：
+                    # 握手那份比它旧，带 reset 时更是上一周期的，不能再写
+                    return
+                # 握手那一次拿到的数据本身就是有效数据，直接存下，别浪费
+                try:
+                    self._store(cfg, svc, cid, sessions, execdata)
+                except Exception as exc:
+                    # 取到了却写不下去是 hub 这边的问题（磁盘满、权限），别把实例当断线踢掉：
+                    # covhub-agent 连上就把退避重置回 1 秒，踢掉等于让它 1 秒一次地重连并全量 dump
+                    log("push：%s 的握手数据落盘失败 —— %s" % (who, exc))
         except (Exception, SystemExit) as exc:
             why = str(exc) or type(exc).__name__
             log("push：来自 %s 的连接没能接住 —— %s" % (who, why))
@@ -176,12 +212,20 @@ class PushCollector:
         root = ensure_dirs(cfg, svc)
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
         path = os.path.join(root, "exec", "%s-push%d.exec" % (ts, cid))
+        n = 1
+        while os.path.exists(path):
+            # 握手落盘紧跟在一轮取数之后时会同秒同 cid：覆盖掉的是更新的那份
+            n += 1
+            path = os.path.join(root, "exec", "%s-push%d-%d.exec" % (ts, cid, n))
         write_exec_file(path, sessions, execdata)
         with self.lock:
             if cid in self.conns:
                 self.conns[cid]["last"] = datetime.now().isoformat(timespec="seconds")
                 # 这一版跑的是哪份 class，跟着每次取数刷新（见 mixed_versions）
                 self.conns[cid]["classes"] = _classes_in(execdata)
+                if sessions:
+                    # --reset 会把会话起点推到清零那一刻，之后它就是这个 JVM 的新身份
+                    self.conns[cid]["sessionStart"] = sessions[0][1]
         return path
 
     def mixed_versions(self, service):
@@ -222,9 +266,25 @@ class PushCollector:
         with self.lock:
             return [c for c in self.conns.values() if c["service"] == service]
 
-    def drop(self, cid, why):
+    def _retire_twin(self, cid, service, host, start):
+        """同一个 JVM 重连上来（idle 到点、网络抖动）：它的旧连接已经死了，但这边没读过
+        所以不知道。不清掉的话，到下一次取数把它丢弃之前，看板和 instances 都会把一个 JVM
+        数成两个，混版本记录里的实例数也虚高。同服务、同主机、同会话起点 = 同一个 JVM。"""
+        if start is None:
+            return
+        with self.lock:
+            twins = [c["id"] for c in self.conns.values()
+                     if c["id"] != cid and c["service"] == service
+                     and c.get("sessionStart") == start and c["peer"].rsplit(":", 1)[0] == host]
+        for old in twins:
+            self.drop(old, "同一个 JVM 已重新连入", forget=False)
+
+    def drop(self, cid, why, forget=True):
         with self.lock:
             conn = self.conns.pop(cid, None)
+            if conn and forget and conn.get("service") and conn.get("sessionStart") is not None:
+                # 记住它走了：下次结算时它若还没回来，就是错过了清零（见 dump_service）
+                self.dropped.setdefault(conn["service"], set()).add(conn["sessionStart"])
         if conn:
             log("push：实例 %s 已断开（%s）" % (conn["peer"], why))
             for key in ("rfile", "wfile", "sock"):
@@ -272,6 +332,15 @@ class PushCollector:
             w.start()
         for w in workers:
             w.join()
+        if reset:
+            # 清零这一刻没应答的（取数失败已被丢弃）和之前掉线还没回来的，计数器都还是
+            # 上一周期的：记下来，等它们重连时把握手数据丢掉并清零（见 _claim）
+            answered = {conn["id"] for conn, _, _ in got}
+            with self.lock:
+                missed = self.missed_reset.setdefault(svc["name"], set())
+                missed.update(c["sessionStart"] for c in conns
+                              if c["id"] not in answered and c.get("sessionStart") is not None)
+                missed.update(self.dropped.pop(svc["name"], set()))
 
         written = 0
         for conn, sessions, execdata in got:

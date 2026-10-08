@@ -269,6 +269,9 @@ def test_login_exchanges_token_for_cookie(hub):
     assert r.status_code == 200 and r.json() == {"ok": True, "tokenRequired": True}
     assert "covhub_token=secret" in r.headers["set-cookie"]
     assert "HttpOnly" in r.headers["set-cookie"]
+    # Lax 不是 Strict：跨站点开的 ?token= 报告链接 302 之后那一跳要带得上 Cookie；写接口都是
+    # POST / PATCH / DELETE，Lax 照样不带
+    assert "samesite=lax" in r.headers["set-cookie"].lower()
     # 拿到的 Cookie 对 /api/* 和报告目录都好使
     jar = {"covhub_token": "secret"}
     assert hub.get("/api/status", cookies=jar).status_code == 200
@@ -535,6 +538,41 @@ def test_version_string_validated_before_it_becomes_a_directory(hub):
     assert hub.get("/api/services/svc", headers=H).json()["service"]["version"] == "1.4"
     r = hub.post("/api/predeploy?service=svc&version=release/1.5", headers=H)
     assert r.status_code == 409 and "目录名" in r.text
+
+
+def test_percent_in_token_accepted_by_both_gates(tmp_path, monkeypatch, db_url_for_app):
+    """令牌里含 %xx 时，同一个头打 /api/* 和报告路径都要能过：只有 Cookie 写入时 quote 过，
+    头和 query 是原文，静态门禁原来对头也 unquote 了一次。"""
+    data = tmp_path / "data" / "svc" / "current"
+    data.mkdir(parents=True)
+    (data / "jacoco.xml").write_text("<report/>", encoding="utf-8")
+    cfg = {"jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
+           "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
+           "dataDir": str(tmp_path / "data"), "database": {"url": db_url_for_app},
+           "serve": {"token": "p%41ss"}}
+    cfg_path = tmp_path / "covhub.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.delenv("COVHUB_TOKEN", raising=False)
+    monkeypatch.delenv("COVHUB_DATABASE_URL", raising=False)
+    with TestClient(create_app(str(cfg_path)), base_url="http://hub") as client:
+        hdr = {"X-Covhub-Token": "p%41ss"}
+        client.post("/api/services", headers=hdr, json=PULL)
+        assert client.get("/api/status", headers=hdr).status_code == 200
+        assert client.get("/svc/current/jacoco.xml", headers=hdr).status_code == 200
+        assert client.get("/svc/current/jacoco.xml", headers={"X-Covhub-Token": "pAss"}).status_code == 401
+        r = client.post("/api/login", headers=hdr)
+        jar = {"covhub_token": r.headers["set-cookie"].split(";")[0].split("=", 1)[1]}
+        assert client.get("/svc/current/jacoco.xml", cookies=jar).status_code == 200
+
+
+def test_push_dump_in_process_without_collector_is_409(hub):
+    """直接跑 CLI / 没配 collect.port 的进程里对 push 服务 dump / predeploy：数据没丢，只是不在
+    这个进程里 —— 要说清楚，不能报「服务已经停了、数据已丢失」。"""
+    hub.post("/api/services", headers=H, json={"name": "pushed", "channel": "push"})
+    r = hub.post("/api/dump?service=pushed", headers=H)
+    assert r.status_code == 409 and "没有收集端" in r.text
+    r = hub.post("/api/predeploy?service=pushed&version=1&allowMissing=1", headers=H)
+    assert r.status_code == 409 and "没有收集端" in r.text
 
 
 def test_compare_versions(hub, tmp_path):

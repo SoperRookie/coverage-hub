@@ -18,6 +18,10 @@ from ..runtime import load_runtime
 
 # 浏览器里点开报告时带令牌用的 Cookie。报告页里全是相对链接，不可能每条都
 # 挂上 ?token=，所以带对一次就种下它，后续静态请求靠它放行。
+# Lax 而不是 Strict：从 Jenkins 页面 / IM 点开 ...?token=xxx 的报告链接，hub 302 到干净地址，
+# 这一跳是跨站发起的顶层导航，Strict 不带 Cookie 就落到 401（用户刚加过令牌，像是令牌错了）。
+# Lax 只在顶层 GET 导航时带 Cookie，跨站的 POST / PATCH / DELETE 照样不带，写接口不受影响
+COOKIE_SAMESITE = "lax"
 TOKEN_COOKIE = "covhub_token"
 
 token_header = APIKeyHeader(
@@ -74,11 +78,13 @@ def static_gate(request: Request, cfg: dict):
             target += "?" + urllib.parse.urlencode(query)
         resp = RedirectResponse(target, status_code=302)
         resp.set_cookie(TOKEN_COOKIE, urllib.parse.quote(expected), path="/",
-                        httponly=True, samesite="strict")
+                        httponly=True, samesite=COOKIE_SAMESITE)
         return resp
-    given = (request.headers.get("X-Covhub-Token") or request.cookies.get(TOKEN_COOKIE)
-             or from_query)
-    if not token_ok(urllib.parse.unquote(given or ""), expected):
+    ck = request.cookies.get(TOKEN_COOKIE)
+    # 只有 Cookie 写入时 quote 过，头和 query 是原文 —— 对头也 unquote 的话，令牌里含 %xx
+    # 时同一个头打 /api/* 能过、打报告路径 401
+    given = request.headers.get("X-Covhub-Token") or from_query or (urllib.parse.unquote(ck) if ck else "")
+    if not token_ok(given, expected):
         raise HTTPException(401, {
             "error": "令牌无效或缺失",
             "hint": "浏览器：在地址后加 ?token=<serve.token>，之后靠 Cookie 放行；"

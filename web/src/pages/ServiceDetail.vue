@@ -33,6 +33,8 @@ const nav = inject<Nav>("nav")!;
 // 放在 URL 里而不是组件状态里，历史版本的页面才能被收藏、被贴给别人。
 const version = computed<string | null>(() => (typeof route.query.v === "string" && route.query.v) || null);
 const viewingHistory = computed(() => !!d.value?.viewingVersion);
+// 没配 version 的服务按版本找不到源码：提示要说「去配 version」，而不是「传了也没用」
+const noVersion = computed(() => !!d.value && !viewingHistory.value && !d.value.version);
 
 async function load() {
   loading.value = true;
@@ -58,7 +60,11 @@ watch(() => [props.name, version.value], load);
 // el-select 把空串当「没选」显示占位符，所以「当前周期」用一个哨兵值
 const CURRENT = "__current";
 function switchVersion(v: string) {
-  router.push({ query: v && v !== CURRENT ? { v } : {} });
+  // 只换 v，别把 ?tab= 一起丢了 —— 切版本后复制出去的链接还得落在同一个页签
+  const q: Record<string, any> = { ...route.query };
+  delete q.v;
+  if (v && v !== CURRENT) q.v = v;
+  router.push({ query: q });
 }
 
 // ---- 手动触发：跑完用例点一下就把这一刻的覆盖率拉下来，不用等下一轮轮询 ----
@@ -194,7 +200,7 @@ const crumbs = computed(() => [
       <a href="#" @click.prevent="switchVersion('')">回到当前周期</a>
     </div>
     <div v-if="d.stale" class="notice">最后一次采集在 {{ ago(d.ageSeconds) }}，采集可能已经停了 —— 确认 hub 的 --with-watch 还在跑。</div>
-    <div v-for="b in d.runtime.breaks.slice(-3).reverse()" :key="b.at" class="notice">
+    <div v-for="(b, i) in d.runtime.breaks.slice(-3).reverse()" :key="i" class="notice">
       <template v-if="b.sealedAs">{{ when(b.at) }}：检测到未结算的重启，已自动结算为 <b>{{ b.sealedAs }}</b>（{{ b.from }} → {{ b.to }}）。重启前最后一个轮询周期的数据已丢失。</template>
       <template v-else>{{ when(b.at) }}：在线实例跑着两份不同的 class（{{ b.instances }} 个实例），多半是滚动发版正在进行 —— 发版流程里补一次 predeploy。</template>
     </div>
@@ -251,7 +257,7 @@ const crumbs = computed(() => [
           <el-radio-button value="unit">单测</el-radio-button>
         </el-radio-group>
         <span class="hint">点开一行看源码与逐行执行状态</span>
-        <span v-if="!d.runtime.sourcesUploaded" class="hint">· {{ viewingHistory ? "这一版" : "当前版本" }}没传源码（<code>upload-sources</code>），看不了全文，JaCoCo 报告也只到方法级</span>
+        <span v-if="!d.runtime.sourcesUploaded" class="hint">· {{ noVersion ? "服务没配 version（retarget 后才能按版本找源码）" : (viewingHistory ? "这一版" : "当前版本") + "没传源码（upload-sources）" }}，看不了全文，JaCoCo 报告也只到方法级</span>
       </div>
       <div class="card-body">
         <IncrementalTable v-if="incTab === 'runtime'" :view="d.runtime.incremental" :service="name" kind="runtime" :version="version" :on-error="onError"
@@ -313,7 +319,7 @@ const crumbs = computed(() => [
           <el-descriptions-item label="excludes"><span class="mono">{{ (d.config.excludes as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="reportExcludes"><span class="mono">{{ (d.config.reportExcludes as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="classfiles"><span class="mono">{{ (d.config.classfiles as string[]).join("  ") || "—" }}</span></el-descriptions-item>
-          <el-descriptions-item label="源码"><span>{{ d.runtime.sourcesUploaded ? "这一版已上传（upload-sources）" : "这一版没上传" }}</span></el-descriptions-item>
+          <el-descriptions-item label="源码"><span>{{ d.runtime.sourcesUploaded ? "这一版已上传（upload-sources）" : noVersion ? "服务没配 version，无法按版本找源码" : "这一版没上传" }}</span></el-descriptions-item>
           <el-descriptions-item label="sourcefiles"><span class="mono">{{ (d.config.sourcefiles as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="classDumpDir"><span class="mono">{{ d.config.classDumpDir || "—" }}</span></el-descriptions-item>
         </el-descriptions>
