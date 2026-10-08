@@ -53,11 +53,17 @@ def _diff_brief(diff):
             "files": diff["files"], "at": diff["at"], "origin": diff["origin"]}
 
 
-def service_row(cfg, svc, stale_after):
-    """总览里的一行。运维状态（在线 / 采集停了 / 断代 / 混版本）是语义色的唯一来源。"""
+def service_row(cfg, svc, stale_after, pre=None):
+    """总览里的一行。运维状态（在线 / 采集停了 / 断代 / 混版本）是语义色的唯一来源。
+
+    pre 是 repo.overview_data() 里这个服务那一份；不给就单独查一次（详情页、报表用）。
+    总览页**必须**批量预取后传进来 —— 逐服务查是 18 条 SQL 一行，服务多了首页要好几秒。
+    """
     name = svc["name"]
     channel = service_channel(svc)
-    latest = repo.latest(name)
+    if pre is None:
+        pre = repo.overview_data([name]).get(name) or repo.blank_overview()
+    latest = pre["latest"]
     age = _age_seconds(latest["at"]) if latest else None
 
     if channel == "push":
@@ -68,12 +74,9 @@ def service_row(cfg, svc, stale_after):
             online, unknown = bool(collector_instances(name)), False
         online_at = None
     else:
-        online, online_at = repo.get_online(name)
+        online, online_at = pre["online"], pre["onlineAt"]
         unknown = online is None
 
-    state = repo.get_state(name)
-    unit = repo.latest_unit_report(name)
-    diff = repo.latest_diff(name)
     return {
         "name": name,
         "project": svc.get("project"),
@@ -86,11 +89,11 @@ def service_row(cfg, svc, stale_after):
         "instances": len(collector_instances(name)) if channel == "push" else None,
         "ageSeconds": age,
         "stale": age is not None and age > stale_after,
-        "pushMixed": state["pushMixed"],
+        "pushMixed": pre["pushMixed"],
         "runtime": _brief(latest),
-        "unit": _brief(unit),
-        "diff": _diff_brief(diff),
-        "breaks": len(repo.breaks(name, 3)),
+        "unit": _brief(pre["unit"]),
+        "diff": _diff_brief(pre["diff"]),
+        "breaks": pre["breaks"],
         "hasReport": os.path.isfile(os.path.join(svc_dir(cfg, svc), "current", "html", "index.html")),
     }
 
@@ -98,7 +101,9 @@ def service_row(cfg, svc, stale_after):
 def overview(cfg):
     interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
     stale_after = max(interval * 3, 900)
-    rows = {svc["name"]: service_row(cfg, svc, stale_after) for svc in cfg.get("services", [])}
+    services = cfg.get("services", [])
+    pre = repo.overview_data([svc["name"] for svc in services])
+    rows = {svc["name"]: service_row(cfg, svc, stale_after, pre.get(svc["name"])) for svc in services}
 
     projects = []
     assigned = set()
@@ -137,9 +142,10 @@ def service_detail(cfg, name, version=None):
     数字来自结算快照，新增代码明细来自归档目录里的 incremental.json，报告链接指向归档。"""
     svc = find_service(cfg, name)
     interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
-    row = service_row(cfg, svc, max(interval * 3, 900))
+    pre = repo.overview_data([name]).get(name) or repo.blank_overview()
+    row = service_row(cfg, svc, max(interval * 3, 900), pre)
     versions = repo.versions(name, 20)
-    latest = repo.latest(name)
+    latest = pre["latest"]
 
     base = "/%s" % name
     viewing = None
@@ -159,7 +165,7 @@ def service_detail(cfg, name, version=None):
         runtime_version = svc.get("version")
         report_dir = "%s/current" % base
         has_report = row["hasReport"]
-        unit = repo.latest_unit_report(name)
+        unit = pre["unit"]
     unit_inc = build.read_incremental(cfg, svc, "unit/%s" % unit["version"]) if unit else None
     # 「数据来源」卡片要的是**正在看的这一版**的 diff，不是最近收到的那条：看历史归档时
     # 尤其如此，否则卡片上的版本号、行数和上面的新增覆盖对不上。没配 version 才回落最近一条
@@ -362,13 +368,15 @@ def project_report(cfg, project, days=30):
     interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
     stale_after = max(interval * 3, 900)
     by_name = {s["name"]: s for s in cfg.get("services", [])}
+    pre = repo.overview_data(names)
 
-    services = []
+    services, rows = [], []
     for name in names:
         svc = by_name.get(name)
         if not svc:
             continue
-        row = service_row(cfg, svc, stale_after)
+        row = service_row(cfg, svc, stale_after, pre.get(name))
+        rows.append(row)
         versions = repo.versions_since(name, since)
         units = repo.unit_reports_since(name, since)
         services.append({
@@ -388,7 +396,7 @@ def project_report(cfg, project, days=30):
         "since": since.isoformat(timespec="seconds") if since else None,
         "generatedAt": datetime.now().isoformat(timespec="seconds"),
         "services": services,
-        "counts": _counts([service_row(cfg, by_name[n], stale_after) for n in names if n in by_name]),
+        "counts": _counts(rows),
     }
 
 

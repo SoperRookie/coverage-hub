@@ -8,7 +8,7 @@
 import os
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from ..errors import CovhubError, ServiceNotFound
@@ -329,6 +329,57 @@ def breaks(name, limit=50):
         rows = s.scalars(select(Break).where(Break.service_id == sid)
                          .order_by(Break.id.desc()).limit(limit)).all()
         return [_break_dict(r) for r in reversed(rows)]
+
+
+def blank_overview():
+    """overview_data() 里一个服务什么都还没有时的形态。"""
+    return {"latest": None, "unit": None, "diff": None, "online": None, "onlineAt": None,
+            "sessionStart": None, "pushMixed": False, "breaks": 0}
+
+
+def overview_data(names=None):
+    """看板总览一次性要的东西，按服务名给：最新快照 / 运行态 / 最新单测 / 最新 diff / 断代数。
+
+    原来每个服务查 6 个会话 18 条 SQL（每条都带一次 _get），几十个服务就是上千次往返 ——
+    MySQL 在另一台机器上时总览页要好几秒，而且侧栏和页面各打一次。这里按表各一条
+    「每个服务取 max(id)」的查询，服务数再多也只有 6 条 SQL、一个会话。
+    names 为 None 时给全部服务；不在库里的名字不出现在结果里。
+    """
+    with session_scope() as s:
+        q = select(Service.id, Service.name)
+        if names is not None:
+            if not names:
+                return {}
+            q = q.where(Service.name.in_(list(names)))
+        ids = {sid: name for sid, name in s.execute(q).all()}
+        if not ids:
+            return {}
+        out = {name: blank_overview() for name in ids.values()}
+        sids = list(ids)
+
+        def newest(model):
+            # 「每组最新一条」用 max(id) 子查询回连，MySQL / PostgreSQL / SQLite 都认；
+            # 窗口函数 SQLite 旧版没有，DISTINCT ON 只有 PostgreSQL 有
+            sub = (select(model.service_id.label("sid"), func.max(model.id).label("mid"))
+                   .where(model.service_id.in_(sids)).group_by(model.service_id).subquery())
+            return s.scalars(select(model).join(sub, model.id == sub.c.mid)).all()
+
+        for row in newest(Snapshot):
+            out[ids[row.service_id]]["latest"] = _snapshot_dict(row)
+        for row in newest(UnitReport):
+            out[ids[row.service_id]]["unit"] = _unit_dict(row)
+        for row in newest(Diff):
+            out[ids[row.service_id]]["diff"] = _diff_dict(row)
+        for st in s.scalars(select(ServiceState).where(ServiceState.service_id.in_(sids))).all():
+            d = out[ids[st.service_id]]
+            d["sessionStart"], d["pushMixed"] = st.session_start, bool(st.push_mixed)
+            if st.online is not None:
+                d["online"], d["onlineAt"] = bool(st.online), _iso(st.online_at)
+        counts = s.execute(select(Break.service_id, func.count()).where(Break.service_id.in_(sids))
+                           .group_by(Break.service_id)).all()
+        for sid, n in counts:
+            out[ids[sid]]["breaks"] = int(n)
+        return out
 
 
 def get_state(name):

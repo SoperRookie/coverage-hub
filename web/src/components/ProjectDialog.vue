@@ -3,6 +3,7 @@ import { reactive, ref, watch } from "vue";
 import { ElMessage } from "element-plus";
 import "element-plus/es/components/message/style/css";
 import { api, type Project } from "../api";
+import { invalidate } from "../store";
 
 // 新建 / 编辑项目。编辑时 name 不可改：它是 URL 段和服务的归属键。
 const props = defineProps<{ modelValue: boolean; editing: Project | null; onError: (err: unknown) => boolean }>();
@@ -34,6 +35,7 @@ async function save() {
       await api.createProject({ name: form.name, ...body });
     }
     ElMessage.success(props.editing ? "已保存" : `已创建项目 ${form.name}`);
+    invalidate();                // 新项目要立刻出现在侧栏和它自己的面板里，不能吃到几秒前的缓存
     emit("update:modelValue", false);
     emit("saved", props.editing ? props.editing.name : form.name);
   } catch (err) {

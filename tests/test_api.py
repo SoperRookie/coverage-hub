@@ -721,3 +721,49 @@ def test_auto_diff_base_falls_back_to_last_uploaded_sources(hub):
     assert r.status_code == 200 and r.json()["diff"]["base"] == "1.0"
     r = hub.post("/api/diff?service=svc&version=1.1&from=sources", headers=H)
     assert r.json()["baseReason"] == "最近上传过源码的版本"
+
+
+def test_overview_query_count_does_not_grow_with_services(hub):
+    """总览原来每个服务查 6 个会话 18 条 SQL，几十个服务首页就要几秒。现在按表各一条批量取，
+    SQL 条数不随服务数增长。"""
+    from sqlalchemy import event
+    from covhub.db import engine
+
+    hub.post("/api/projects", headers=H, json={"name": "shop"})
+    for i in range(12):
+        hub.post("/api/services", headers=H,
+                 json={"name": "s%d" % i, "address": "127.0.0.1", "port": 60000 + i, "project": "shop"})
+    hub.post("/api/diff?service=s0&version=2.0&base=v1", headers=H, content=DIFF.encode())
+    hub.post("/api/unit-coverage?service=s0&version=2.0", headers=H, content=XML.encode())
+
+    count = {"n": 0}
+
+    def _tick(*_a, **_k):
+        count["n"] += 1
+    eng = engine.get_engine()
+    event.listen(eng, "before_cursor_execute", _tick)
+    try:
+        r = hub.get("/api/overview", headers=H)
+    finally:
+        event.remove(eng, "before_cursor_execute", _tick)
+    assert r.status_code == 200
+    rows = r.json()["projects"][0]["services"]
+    assert len(rows) == 12 and rows[0]["unit"]["incremental"]["pct"] == 100.0 and rows[0]["diff"]["base"] == "v1"
+    assert rows[1]["unit"] is None and rows[1]["diff"] is None
+    # 配置 + 项目 + 批量的 6 条，留点余量；原来 12 个服务是 200 多条
+    assert count["n"] <= 20, count["n"]
+
+
+def test_json_is_gzipped_only_when_asked(hub):
+    """看板带 Accept-Encoding: gzip 时返回体压缩；curl 默认不带，covhub-client.sh 和 Jenkins 库
+    grep '"online": true' 的那几处拿到的仍是 indent=2 的明文。"""
+    hub.post("/api/projects", headers=H, json={"name": "shop"})
+    for i in range(8):
+        hub.post("/api/services", headers=H, json={"name": "s%d" % i, "channel": "push", "project": "shop"})
+    plain = hub.get("/api/overview", headers={**H, "Accept-Encoding": "identity"})
+    assert plain.status_code == 200 and "content-encoding" not in plain.headers
+    assert '"online": ' in plain.text                       # indent=2、冒号后带空格
+    zipped = hub.get("/api/overview", headers={**H, "Accept-Encoding": "gzip"})
+    assert zipped.status_code == 200 and zipped.headers.get("content-encoding") == "gzip"
+    assert zipped.json() == plain.json()                    # httpx 自动解压
+    assert int(zipped.headers["content-length"]) < len(plain.content) // 3

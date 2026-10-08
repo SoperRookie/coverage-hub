@@ -5,6 +5,7 @@ import { ElMessage, ElMessageBox } from "element-plus";
 import "element-plus/es/components/message/style/css";
 import "element-plus/es/components/message-box/style/css";
 import { api, type Overview, type Project, type ServiceRow } from "../api";
+import { invalidate, loadSnapshot } from "../store";
 import ProjectDialog from "../components/ProjectDialog.vue";
 import ServiceTable from "../components/ServiceTable.vue";
 import PageHeader from "../components/PageHeader.vue";
@@ -24,11 +25,12 @@ const project = ref<Project | null>(null);
 const loading = ref(true);
 let timer: number | undefined;
 
-async function load() {
+async function load(force = false) {
   try {
-    const [o, p] = await Promise.all([api.overview(), api.projects()]);
-    data.value = o;
-    project.value = p.projects.find((x) => x.name === props.name) ?? null;
+    const snap = await loadSnapshot(force);
+    data.value = snap.overview;
+    allProjects.value = snap.projects;
+    project.value = snap.projects.find((x) => x.name === props.name) ?? null;
     if (props.name !== UNASSIGNED && !project.value) {
       ElMessage.warning(`没有名为 ${props.name} 的项目`);
       router.replace("/");
@@ -39,9 +41,9 @@ async function load() {
     loading.value = false;
   }
 }
-onMounted(() => { load(); timer = window.setInterval(load, 60_000); });
+onMounted(() => { load(); timer = window.setInterval(() => load(true), 60_000); });
 onBeforeUnmount(() => window.clearInterval(timer));
-watch(() => props.name, load);
+watch(() => props.name, () => load());
 
 const isPool = computed(() => props.name === UNASSIGNED);
 const rows = computed<ServiceRow[]>(() => {
@@ -51,15 +53,8 @@ const rows = computed<ServiceRow[]>(() => {
 });
 const counts = computed(() => data.value?.projects.find((p) => p.name === props.name)?.counts ?? null);
 const unassigned = computed(() => data.value?.unassigned ?? []);
+// 未分组池里「归入项目」的下拉要全部项目：和总览一起从共享缓存拿，不单独再请求
 const allProjects = ref<Project[]>([]);
-watch(data, async () => {
-  if (!isPool.value) return;
-  try {
-    allProjects.value = (await api.projects()).projects;
-  } catch (err) {
-    props.onError(err);          // 401 要能弹出令牌框，不能变成 unhandled rejection
-  }
-});
 
 // ---- 添加服务：列出全部服务，勾上就归进来、取消就移出，立即生效，不用再点确认 ----
 const addOpen = ref(false);
@@ -74,7 +69,7 @@ async function toggle(row: ServiceRow, checked: boolean) {
   try {
     await api.assignService(row.name, checked ? props.name : null);
     ElMessage.success(checked ? `${row.name} 已归入本项目` : `${row.name} 已移出`);
-    await load();
+    await load(true);
   } catch (err) {
     if (!props.onError(err)) ElMessage.error(err instanceof Error ? err.message : String(err));
   } finally {
@@ -86,7 +81,7 @@ async function remove(row: ServiceRow) {
   try {
     await api.assignService(row.name, null);
     ElMessage.success(`${row.name} 已移出项目（配置与采集数据不动）`);
-    await load();
+    await load(true);
   } catch (err) {
     if (!props.onError(err)) ElMessage.error(err instanceof Error ? err.message : String(err));
   }
@@ -98,7 +93,7 @@ async function assignTo(row: ServiceRow, target: string) {
   try {
     await api.assignService(row.name, target);
     ElMessage.success(`${row.name} 已归入 ${target}`);
-    await load();
+    await load(true);
   } catch (err) {
     if (!props.onError(err)) ElMessage.error(err instanceof Error ? err.message : String(err));
   }
@@ -117,6 +112,7 @@ async function removeProject() {
   try {
     await api.deleteProject(p.name);
     ElMessage.success(`已删除项目 ${p.name}`);
+    invalidate();
     router.replace("/");
   } catch (err) {
     if (!props.onError(err)) ElMessage.error(err instanceof Error ? err.message : String(err));
@@ -141,7 +137,7 @@ async function removeProject() {
         <el-button size="small" @click="editOpen = true">编辑</el-button>
         <el-button size="small" type="danger" plain @click="removeProject">删除项目</el-button>
       </template>
-      <el-button size="small" @click="load">刷新</el-button>
+      <el-button size="small" @click="load(true)">刷新</el-button>
     </template>
   </PageHeader>
 
@@ -199,5 +195,5 @@ async function removeProject() {
     <template #footer><el-button @click="addOpen = false">关闭</el-button></template>
   </el-dialog>
 
-  <ProjectDialog v-model="editOpen" :editing="project" :on-error="onError" @saved="load" />
+  <ProjectDialog v-model="editOpen" :editing="project" :on-error="onError" @saved="load(true)" />
 </template>

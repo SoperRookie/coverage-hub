@@ -2,6 +2,7 @@
 import { computed, onMounted, provide, reactive, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ApiError, api, login, type Project } from "./api";
+import { loadSnapshot } from "./store";
 import { theme } from "./ui/theme";
 
 // 壳：左侧栏（品牌、项目选择、导航）+ 内容区。层级是项目 → 服务，所以项目选择固定在侧栏。
@@ -20,9 +21,10 @@ const UNASSIGNED = "__unassigned";
 
 async function loadProjects() {
   try {
-    const [p, o] = await Promise.all([api.projects(), api.overview()]);
-    projects.value = p.projects;
-    unassignedCount.value = o.unassigned.length;
+    // 走共享缓存：页面自己也会要这份数据，别让壳再打一次最重的接口
+    const snap = await loadSnapshot();
+    projects.value = snap.projects;
+    unassignedCount.value = snap.overview.unassigned.length;
   } catch (err) {
     onError(err);
   }
