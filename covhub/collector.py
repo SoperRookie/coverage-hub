@@ -269,4 +269,14 @@ def get_collector():
 
 
 def collector_instances(service):
-    return _COLLECTOR.instances(service) if _COLLECTOR else []
+    """给收集端之外的调用方（看板、status、断代检测）看的在线实例列表。
+
+    只给能直接进 JSON 的几个字段。conns 里的原始记录握着 socket / 文件对象和
+    classIds 集合 —— 2.6 之前曾把它原样塞进详情接口的返回体，push 服务一有在线实例
+    详情页就 500（socket 不能序列化）。sock 之类只有收集端自己该碰。
+    """
+    if not _COLLECTOR:
+        return []
+    return [{"id": c["id"], "peer": c["peer"], "sessionid": c["sessionid"],
+             "since": c["since"], "last": c["last"], "sessionStart": c.get("sessionStart")}
+            for c in _COLLECTOR.instances(service)]

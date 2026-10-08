@@ -422,6 +422,36 @@ def test_overview_and_detail_shapes(hub):
     assert r.status_code == 200 and r.json()["latest"] is None
 
 
+def test_detail_with_online_push_instance_is_serializable(hub, monkeypatch):
+    """push 服务有在线实例时详情接口要能出 JSON。收集端的连接记录握着 socket，
+    曾被原样塞进返回体，详情页一打开就 500（2.6.0 部署后实测）。"""
+    import socket
+    from covhub import collector as col
+
+    hub.post("/api/services", headers=H, json={"name": "pushed", "channel": "push"})
+    pc = col.PushCollector(lambda: {})
+    sock = socket.socket()
+    pc.conns[7] = {"id": 7, "peer": "10.0.0.8:40001", "sessionid": "pushed", "service": "pushed",
+                   "since": "2026-10-08T10:00:00", "last": None, "sock": sock, "rfile": None,
+                   "wfile": None, "sessionStart": "2026-10-08T09:59:00", "classIds": {1, 2}}
+    monkeypatch.setattr(col, "_COLLECTOR", pc)
+    try:
+        r = hub.get("/api/services/pushed/detail", headers=H)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["online"] is True and d["instances"] == 1
+        assert d["runtime"]["instances"] == [{"id": 7, "peer": "10.0.0.8:40001", "sessionid": "pushed",
+                                              "since": "2026-10-08T10:00:00", "last": None,
+                                              "sessionStart": "2026-10-08T09:59:00"}]
+        r = hub.get("/api/status?service=pushed", headers=H)
+        assert r.status_code == 200
+        assert r.json()["services"][0]["instances"] == [{"peer": "10.0.0.8:40001",
+                                                         "since": "2026-10-08T10:00:00", "last": None}]
+        assert hub.get("/api/overview", headers=H).status_code == 200
+    finally:
+        sock.close()
+
+
 def test_detail_and_source_can_view_archived_version(hub, tmp_path):
     """历史版本：detail?version= 切到归档的数字与明细，source 用归档里存下的源码片段。"""
     from covhub.db import repo

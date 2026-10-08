@@ -2,6 +2,9 @@
 
 ## 未发布
 
+- 修复：push 服务一有在线实例，看板详情页就 500。详情接口把收集端的连接记录原样放进返回体，
+  里面握着 socket 对象，JSON 序列化失败。`collector_instances()` 现在只给 peer / since / last 等
+  能序列化的字段，总览与 `status` 不受影响（它们只数个数）。2.6 之前 push 实例常年连不上才没暴露。
 - Windows 的 covhub-agent 构建脚本由 cmd 批处理 `agent\build.cmd` 换成 PowerShell `agent\build.ps1`
   （`powershell -ExecutionPolicy Bypass -File agent\build.ps1`；带 UTF-8 BOM，注释可以是中文）。两个脚本仍然等价。
 - 文档按当前实现逐项对账：README 的命令一览 / 接口表补齐漏掉的参数，ONBOARDING 里过时的返回体示例、
