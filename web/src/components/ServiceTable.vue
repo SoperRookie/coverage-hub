@@ -2,7 +2,7 @@
 import type { ServiceRow } from "../api";
 import CovCell from "./CovCell.vue";
 import StatusTag from "./StatusTag.vue";
-import { SERIES, ago } from "../ui/colors";
+import { SERIES, ago, where } from "../ui/colors";
 
 // 一个项目（或未分组池）下的服务表。列分两组：运行时（总 / 新增）、单测（总 / 新增），
 // 数字用文字色、色条用系列色。行上的动作由父页面决定。
@@ -16,7 +16,7 @@ const asRow = (r: unknown) => r as ServiceRow;
     <el-table-column label="服务" min-width="150">
       <template #default="{ row }">
         <router-link :to="`/services/${encodeURIComponent(row.name)}`" style="font-weight: 600">{{ row.name }}</router-link>
-        <div class="muted mono" style="font-size: 11px">{{ row.channel }} · {{ row.endpoint }}</div>
+        <div class="muted mono" style="font-size: 11px">{{ where(asRow(row)) }}</div>
       </template>
     </el-table-column>
     <el-table-column label="状态" min-width="110">

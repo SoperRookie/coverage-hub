@@ -10,7 +10,7 @@ import ServiceTable from "../components/ServiceTable.vue";
 import PageHeader from "../components/PageHeader.vue";
 import Kpi from "../components/Kpi.vue";
 import type { Nav } from "../App.vue";
-import { SERIES } from "../ui/colors";
+import { SERIES, where } from "../ui/colors";
 
 // 一个项目的面板：它下面的服务，以及往里加 / 移出服务。name 为 __unassigned 时是未分组池。
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
@@ -52,7 +52,14 @@ const rows = computed<ServiceRow[]>(() => {
 const counts = computed(() => data.value?.projects.find((p) => p.name === props.name)?.counts ?? null);
 const unassigned = computed(() => data.value?.unassigned ?? []);
 const allProjects = ref<Project[]>([]);
-watch(data, async () => { if (isPool.value) allProjects.value = (await api.projects()).projects; });
+watch(data, async () => {
+  if (!isPool.value) return;
+  try {
+    allProjects.value = (await api.projects()).projects;
+  } catch (err) {
+    props.onError(err);          // 401 要能弹出令牌框，不能变成 unhandled rejection
+  }
+});
 
 // ---- 添加服务：列出全部服务，勾上就归进来、取消就移出，立即生效，不用再点确认 ----
 const addOpen = ref(false);
@@ -184,7 +191,7 @@ async function removeProject() {
                    @change="(v: boolean | string | number) => toggle(r, !!v)">
         <span class="mono">{{ r.name }}</span>
       </el-checkbox>
-      <span class="muted" style="font-size: 12px">{{ r.channel }} · {{ r.endpoint }}</span>
+      <span class="muted" style="font-size: 12px">{{ where(r) }}</span>
       <span class="spacer"></span>
       <span v-if="r.project && r.project !== name" class="muted" style="font-size: 12px">在 {{ r.project }} 里，先从那边移出</span>
       <span v-else-if="!r.project" class="muted" style="font-size: 12px">未分组</span>

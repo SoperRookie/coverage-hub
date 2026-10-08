@@ -46,6 +46,13 @@ def _brief(entry):
     return out
 
 
+def _diff_brief(diff):
+    if not diff:
+        return None
+    return {"version": diff["version"], "base": diff["base"], "addedLines": diff["addedLines"],
+            "files": diff["files"], "at": diff["at"], "origin": diff["origin"]}
+
+
 def service_row(cfg, svc, stale_after):
     """总览里的一行。运维状态（在线 / 采集停了 / 断代 / 混版本）是语义色的唯一来源。"""
     name = svc["name"]
@@ -82,8 +89,7 @@ def service_row(cfg, svc, stale_after):
         "pushMixed": state["pushMixed"],
         "runtime": _brief(latest),
         "unit": _brief(unit),
-        "diff": {"version": diff["version"], "base": diff["base"], "addedLines": diff["addedLines"],
-                 "files": diff["files"], "at": diff["at"]} if diff else None,
+        "diff": _diff_brief(diff),
         "breaks": len(repo.breaks(name, 3)),
         "hasReport": os.path.isfile(os.path.join(svc_dir(cfg, svc), "current", "html", "index.html")),
     }
@@ -155,6 +161,10 @@ def service_detail(cfg, name, version=None):
         has_report = row["hasReport"]
         unit = repo.latest_unit_report(name)
     unit_inc = build.read_incremental(cfg, svc, "unit/%s" % unit["version"]) if unit else None
+    # 「数据来源」卡片要的是**正在看的这一版**的 diff，不是最近收到的那条：看历史归档时
+    # 尤其如此，否则卡片上的版本号、行数和上面的新增覆盖对不上。没配 version 才回落最近一条
+    if runtime_version:
+        row["diff"] = _diff_brief(repo.get_diff(name, runtime_version))
 
     return {
         **row,
@@ -429,9 +439,11 @@ def compare(cfg, name, a, b):
 
     def delta(key, sub=None):
         sa, sb = ma["summary"], mb["summary"]
-        va = (sa.get(sub) or {}).get(key) if sub else (sa or {}).get(key)
-        vb = (sb.get(sub) or {}).get(key) if sub else (sb or {}).get(key)
-        if sa is None or sb is None or va is None or vb is None:
+        if sa is None or sb is None:        # 一侧还没有任何快照（刚登记的服务看「历史对比」）
+            return None
+        va = (sa.get(sub) or {}).get(key) if sub else sa.get(key)
+        vb = (sb.get(sub) or {}).get(key) if sub else sb.get(key)
+        if va is None or vb is None:
             return None
         return round(vb - va, 2)
 

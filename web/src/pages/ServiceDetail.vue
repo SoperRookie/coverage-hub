@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import "element-plus/es/components/message/style/css";
 import "element-plus/es/components/message-box/style/css";
-import { api, type Brief, type CommandResult, type Detail } from "../api";
+import { ApiError, api, type Brief, type CommandResult, type Detail } from "../api";
 import type { Nav } from "../App.vue";
 import CompareView from "../components/CompareView.vue";
 import CovCell from "../components/CovCell.vue";
@@ -13,7 +13,7 @@ import Donut from "../components/Donut.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusTag from "../components/StatusTag.vue";
 import TrendChart from "../components/TrendChart.vue";
-import { SERIES, ago, num, pct, when } from "../ui/colors";
+import { SERIES, ago, num, pct, when, where } from "../ui/colors";
 import { exportPdf } from "../ui/pdf";
 
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
@@ -40,10 +40,13 @@ async function load() {
     d.value = await api.detail(props.name, version.value);
     nav.project = d.value.project ?? "__unassigned";
   } catch (err) {
-    if (!props.onError(err) && version.value) {
-      // 归档不存在（被清理了？）就退回当前周期，别卡在一个空页面上
-      ElMessage.warning(err instanceof Error ? err.message : String(err));
+    if (version.value && err instanceof ApiError && err.status === 409) {
+      // 归档不存在（被清理了？）就退回当前周期，别卡在一个空页面上。
+      // 这条自己处理，不再交给全局 onError —— 否则同一句话弹两次
+      ElMessage.warning(err.message);
       router.replace({ query: {} });
+    } else {
+      props.onError(err);
     }
   } finally {
     loading.value = false;
@@ -153,7 +156,7 @@ const crumbs = computed(() => [
     <template #meta>
       <template v-if="d">
         <StatusTag :row="d" />
-        <span>{{ d.channel }} · <span class="mono">{{ d.endpoint }}</span></span>
+        <span><span class="mono">{{ where(d) }}</span></span>
         <span>版本 <span class="mono">{{ d.version || "—" }}</span></span>
         <span>最后采集 {{ ago(d.ageSeconds) }}</span>
       </template>
@@ -227,9 +230,14 @@ const crumbs = computed(() => [
         <div class="card-head"><h2>数据来源</h2></div>
         <div class="card-body sub" style="font-size: 12px; line-height: 1.8">
           <div>运行时数据来自被测进程的真实执行；单测数据来自构建流水线传上来的 jacoco.xml。</div>
-          <div>「新增代码」指本版本 git diff 里新增的行，分母只算 JaCoCo 有探针的行（空行、注释、import 不计）。</div>
-          <div v-if="d.diff">当前 diff：版本 <span class="mono">{{ d.diff.version }}</span>，基线 <span class="mono">{{ d.diff.base }}</span>，{{ d.diff.files }} 个源码文件 {{ d.diff.addedLines }} 行新增，{{ when(d.diff.at) }} 收到。</div>
-          <div v-else>还没有收到这个服务的 git diff —— 构建流水线里加一步 <code>covhub-client.sh diff</code>。</div>
+          <div>「新增代码」指本版本相对基线版本新增的行（hub 比对两版上传的源码生成 diff，流水线也可以自己传 git diff），分母只算 JaCoCo 有探针的行（空行、注释、import 不计）。</div>
+          <div v-if="d.diff">
+            {{ viewingHistory ? "这一版" : "当前" }}的 diff：版本 <span class="mono">{{ d.diff.version }}</span>，基线 <span class="mono">{{ d.diff.base }}</span>，{{ d.diff.files }} 个源码文件 {{ d.diff.addedLines }} 行新增，{{ when(d.diff.at) }}{{ d.diff.origin === "sources" ? " 由 hub 比对源码生成" : " 由流水线上传" }}。
+          </div>
+          <div v-else-if="d.runtime.incremental?.version || d.version">
+            版本 <span class="mono">{{ d.runtime.incremental?.version || d.version }}</span> 还没有 diff —— 构建流水线里加一步 <code>covhub-client.sh upload-sources</code>（上传这一版源码，hub 自己和基线版本比对）。
+          </div>
+          <div v-else>还没有收到这个服务的 diff —— 构建流水线里加一步 <code>covhub-client.sh upload-sources</code>，并给服务配上 version（retarget）。</div>
         </div>
       </div>
     </template>

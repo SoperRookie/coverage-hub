@@ -9,6 +9,9 @@ import re
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .errors import CovhubError
+from .layout import safe_segment
+
 # 服务名是目录名、URL 段、push 通道的 sessionid 前缀，字符集要保守
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 # 项目名只是显示与 URL 参数（会编码），允许中文：\w 在 Python 里含 CJK；仍不能以 . 或 - 开头
@@ -71,8 +74,16 @@ class ServiceSpec(BaseModel):
     @field_validator("version", mode="before")
     @classmethod
     def _version(cls, v):
-        # YAML 里裸写的 1.4 会被读成数字，这里统一收成字符串，别让它带着 float 进库
-        return None if v is None else str(v)
+        # YAML 里裸写的 1.4 会被读成数字，这里统一收成字符串，别让它带着 float 进库。
+        # 版本串要当目录名（versions/<v>/、sources/<v>/），进库前就得过 safe_segment：
+        # 否则 release/1.4 这种要到归档那一刻才炸 —— 自动断代会每轮重试、predeploy 则是
+        # 计数器已清零才报错
+        if v is None:
+            return None
+        try:
+            return safe_segment(str(v))
+        except CovhubError as exc:
+            raise ValueError(str(exc))
 
     @field_validator("channel")
     @classmethod

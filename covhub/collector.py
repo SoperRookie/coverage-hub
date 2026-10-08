@@ -4,6 +4,7 @@ from datetime import datetime
 import os
 import re
 import socket
+import contextvars
 import threading
 import time
 
@@ -45,9 +46,13 @@ def _close_quietly(*targets):
             pass
 
 
-def _class_ids_in(execdata):
-    """一次 dump 里出现过的 class id 集合。id 就是 JaCoCo 的 CRC64 指纹。"""
-    return frozenset(cid for cid, _, _ in execdata)
+def _classes_in(execdata):
+    """一次 dump 里出现过的类：{类名: class id}。id 就是 JaCoCo 的 CRC64 指纹。
+
+    注意这是「到此为止**执行过**的类」，不是已加载的类 —— JaCoCo 的 ExecutionDataWriter
+    只写 hasHits() 的条目。所以两份数据不能拿 id 集合比包含关系，得按类名对 id。
+    """
+    return {name: cid for cid, name, _ in execdata}
 def _sessionid_to_service(cfg, sessionid):
     """sessionid 形如 <服务名> 或 <服务名>#<任意后缀>，取前段去匹配服务。"""
     head = re.split(r"[#@]", sessionid or "", 1)[0]
@@ -125,12 +130,13 @@ class PushCollector:
                     "since": datetime.now().isoformat(timespec="seconds"),
                     "last": None, "sock": sock, "rfile": rfile, "wfile": wfile,
                     "sessionStart": sessions[0][1] if sessions else None,
-                    "classIds": _class_ids_in(execdata),
+                    "classes": _classes_in(execdata),
                 }
 
             if not service:
                 log('push：%s 连上来了，但 sessionid "%s" 匹配不到任何服务 —— '
                     "配置里的服务名和 agent 的 sessionid 要对上" % (who, sessionid))
+                self._park(cid, sock, rfile)
                 return
 
             log('push：%s 连入，认领为服务 %s（sessionid "%s"）' % (who, service, sessionid))
@@ -146,6 +152,24 @@ class PushCollector:
             else:
                 self.drop(cid, "认领失败")
 
+    def _park(self, cid, sock, rfile):
+        """sessionid 匹配不到服务的连接：不取数，但也不能登记完就撒手。
+
+        撒手的后果是泄漏：这边没人读它，agent 到 idle 自己断开重连，每次重连都多一条
+        永远不释放的记录和 fd —— 2.6 起 covhub-agent 会一直重连，泄漏没有上限，fd 耗尽后
+        正常实例也连不进来。直接关掉也不好：covhub-agent 连上就把退避重置回 1 秒，会
+        1 秒一次地握手、全量 dump、刷被测端的日志。所以阻塞读到对方断开再释放（agent 不会
+        主动发任何东西，读到的只会是 EOF）；登记上服务之后它下一次重连（最多 idle 秒）就会
+        被认领。
+        """
+        try:
+            sock.settimeout(None)
+            while rfile.read(1):
+                pass
+        except Exception:
+            pass
+        self.drop(cid, "sessionid 匹配不到服务，等它重连后再认领")
+
     # ---- 数据 ----
 
     def _store(self, cfg, svc, cid, sessions, execdata):
@@ -157,7 +181,7 @@ class PushCollector:
             if cid in self.conns:
                 self.conns[cid]["last"] = datetime.now().isoformat(timespec="seconds")
                 # 这一版跑的是哪份 class，跟着每次取数刷新（见 mixed_versions）
-                self.conns[cid]["classIds"] = _class_ids_in(execdata)
+                self.conns[cid]["classes"] = _classes_in(execdata)
         return path
 
     def mixed_versions(self, service):
@@ -168,13 +192,16 @@ class PushCollector:
         照样能 merge —— 只要跑的是**同一份 class**。真正会让报告出错的是滚动发版
         中途：新旧副本的数据落进同一批 exec，对着任何一份 class 产物都只能对上一半。
 
-        判断只看 class id 集合的包含关系：同一份产物、加载进度不同 → 互为子集；
-        真的换了版本 → 双方都有对方没有的 id。这条不依赖任何人填的版本号。
+        判断按类名对 id：两边都执行过的同名类 id 不同 → 换了版本。**不能**比 id 集合的
+        包含关系：exec 里只有执行过的类（JaCoCo 只写 hasHits() 的条目），两个副本各跑各的
+        请求路径，集合天然互有对方没有的 id，按包含关系判会把正常的负载均衡当成混版本
+        （predeploy --reset 之后集合从零长起，更容易分叉）。这条仍不依赖任何人填的版本号。
         """
-        sets = [c["classIds"] for c in self.instances(service) if c.get("classIds")]
-        for i in range(len(sets)):
-            for j in range(i + 1, len(sets)):
-                if (sets[i] - sets[j]) and (sets[j] - sets[i]):
+        seen = [c["classes"] for c in self.instances(service) if c.get("classes")]
+        for i in range(len(seen)):
+            for j in range(i + 1, len(seen)):
+                a, b = seen[i], seen[j]
+                if any(a[name] != b[name] for name in a.keys() & b.keys()):
                     return True
         return False
 
@@ -236,7 +263,10 @@ class PushCollector:
                 # 实例没了。它最后一段数据随进程消失 —— 和 pull 一样没有补救手段
                 self.drop(conn["id"], str(exc))
 
-        workers = [threading.Thread(target=fetch, args=(c,), daemon=True)
+        # copy_context：fetch 里 drop() 打的「实例已断开」要进调用方（HTTP 请求）的日志汇，
+        # 否则 predeploy 掉了一个副本，返回体里一字不提
+        workers = [threading.Thread(target=contextvars.copy_context().run, args=(fetch, c),
+                                    daemon=True)
                    for c in conns]
         for w in workers:
             w.start()

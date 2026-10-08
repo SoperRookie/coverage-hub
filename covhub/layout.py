@@ -33,6 +33,7 @@ def ensure_dirs(cfg, svc):
 
 
 _SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+MAX_SEGMENT = 100       # 与 db/models.py 各表 version 列的 String(100) 一致
 
 
 def safe_segment(value, what="版本"):
@@ -41,4 +42,8 @@ def safe_segment(value, what="版本"):
     if not _SEGMENT_RE.match(text) or text in (".", ".."):
         raise CovhubError("%s %r 不能用作目录名：只能用字母、数字、. _ -，且不能以 . 或 - 开头"
                           % (what, text))
+    if len(text) > MAX_SEGMENT:
+        # 库里的 version 列是 String(100)：MySQL 严格模式下超长是 DataError，
+        # SQLite 不检查长度，测试里看不出来
+        raise CovhubError("%s 太长：%d 个字符，上限 %d" % (what, len(text), MAX_SEGMENT))
     return text

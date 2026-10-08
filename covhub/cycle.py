@@ -10,6 +10,7 @@ from .agent import service_channel
 from .collector import get_collector, collector_instances
 from .db import repo
 from .diagnose import diagnose
+from .errors import CovhubError
 from .jacoco import do_dump, exec_sessions, fingerprint, make_report, merge_execs
 from .layout import ensure_dirs, safe_segment, svc_dir
 from .logbuf import log
@@ -249,15 +250,22 @@ def snapshot(cfg, svc, reset, kind, version=None):
         # 出报告时一起喂给 cli report，等价于隐式 merge —— 这正是 push 通道
         # 在多副本场景比 pull 省事的地方。
         if get_collector() is None:
-            raise RuntimeError("push 通道要求收集端在同一进程里，请用 serve --with-watch 启动")
+            raise CovhubError("push 通道要求收集端在同一进程里，请用 serve --with-watch 启动")
+        expected = len(collector_instances(svc["name"]))
         log("%s：向 %d 个在线实例取数%s"
-            % (svc["name"], len(collector_instances(svc["name"])),
-               "（含 --reset）" if reset else ""))
+            % (svc["name"], expected, "（含 --reset）" if reset else ""))
         got = get_collector().dump_service(cfg, svc, reset=reset)
         if not got:
             # 探活和取数之间实例断开就会走到这儿，属于正常情况，
-            # 交给上层记日志跳过，不能是致命错误
-            raise RuntimeError("%s 当前没有实例在线，取不到数据" % svc["name"])
+            # 交给上层记日志跳过，不能是致命错误（HTTP 是 409 不是 500）
+            raise CovhubError("%s 当前没有实例在线，取不到数据" % svc["name"])
+        if got < expected:
+            # 没应答的实例已被收集端丢弃。它最后一段数据随进程消失了，结算时尤其要让
+            # 流水线日志里看得见 —— 这一步之后没有任何补救手段
+            log("! %s：%d 个实例只有 %d 个应答，没应答的已断开，%s"
+                % (svc["name"], expected, got,
+                   "它们结算前最后一段数据已随进程消失" if reset
+                   else "最后一轮的数据随进程消失（上界 = 轮询间隔）"))
         # push 没有「进程重启 = 计数器归零」这个信号（多副本各自重启是常态），
         # 会让报告出错的是滚动发版中途的混版本 —— 那才是这里要抓的
         detect_push_break(cfg, svc)

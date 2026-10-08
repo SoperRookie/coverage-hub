@@ -514,6 +514,29 @@ def test_detail_and_source_can_view_archived_version(hub, tmp_path):
     assert s["reportUrl"].startswith("/svc/versions/2.0/html/")
 
 
+def test_compare_without_snapshots_is_200(hub):
+    """刚登记的服务打开「历史对比」：两侧都是 current 且没有任何快照，差值全是 null，不能 500。"""
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0"))
+    r = hub.get("/api/services/svc/compare?a=current&b=current", headers=H)
+    assert r.status_code == 200, r.text
+    c = r.json()
+    assert c["a"]["summary"] is None and c["delta"]["incremental"] is None and c["files"] == []
+
+
+def test_version_string_validated_before_it_becomes_a_directory(hub):
+    """版本串要当目录名：登记 / retarget / predeploy 三个入口都在进库和 dump --reset 之前拦住。"""
+    r = hub.post("/api/services", headers=H, json=dict(PULL, version="release/1.4"))
+    assert r.status_code == 400 and "目录名" in r.json()["error"]
+    r = hub.post("/api/services", headers=H, json=dict(PULL, version="v" * 101))
+    assert r.status_code == 400 and "太长" in r.json()["error"]
+    hub.post("/api/services", headers=H, json=dict(PULL, version="1.4"))
+    r = hub.post("/api/retarget?service=svc&version=release/1.5", headers=H)
+    assert r.status_code == 409 and "目录名" in r.text
+    assert hub.get("/api/services/svc", headers=H).json()["service"]["version"] == "1.4"
+    r = hub.post("/api/predeploy?service=svc&version=release/1.5", headers=H)
+    assert r.status_code == 409 and "目录名" in r.text
+
+
 def test_compare_versions(hub, tmp_path):
     """历史对比：归档 vs 当前周期，总量差与按文件差。"""
     from covhub.db import repo

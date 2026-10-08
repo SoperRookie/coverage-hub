@@ -89,7 +89,7 @@ export interface ServiceRow {
   pushMixed: boolean;
   runtime: Brief | null;
   unit: Brief | null;
-  diff: { version: string; base: string; addedLines: number; files: number; at: string } | null;
+  diff: { version: string; base: string; addedLines: number; files: number; at: string; origin: "upload" | "sources" } | null;
   breaks: number;
   hasReport: boolean;
 }

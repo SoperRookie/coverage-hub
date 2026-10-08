@@ -1,5 +1,35 @@
 # 更新日志
 
+## 未发布
+
+- push 通道的混版本检测改为**按类名对 class id**。原来比的是两个实例 class id 集合的包含关系，但 exec 里
+  只有**执行过**的类（JaCoCo 只写有命中的条目），多副本各跑各的请求路径时集合天然互有对方没有的 id，
+  正常的负载均衡就被判成「混版本」，`breaks` 表里反复多出 mixed-versions 记录、看板一直亮「混版本」。
+  现在只有两边都执行过的同名类 id 不同才算换了版本。
+- push 收集端：sessionid 匹配不到任何服务的连接原来登记完就不管了，covhub-agent 到 idle 自己断开重连，
+  每次重连都在 hub 里多留一条永不释放的记录和 fd，没有上限。现在收集端守着这条连接读到对方断开再释放，
+  登记上服务后它下一次重连就会被认领。
+- push 取数的工作线程改用 `contextvars.copy_context().run` 起（CLAUDE.md 一直这么写，代码从没这么做），
+  实例掉线的日志能进 HTTP 返回体；`predeploy` / `dump` 有实例没应答时多打一行「N 个实例只有 M 个应答」，
+  结算时掉了副本在流水线日志里看得见。push 分支两处 `RuntimeError` 改为 `CovhubError`：探活通过后所有
+  实例恰好掉线时 `/api/dump`、`/api/predeploy` 是 409 而不是 500。
+- 版本串在进库前就过 `safe_segment`：`service add` / `update` 的 `version`（400）、`retarget`、`predeploy`
+  的 `version`（409，且在 `dump --reset` 之前）。原来 `release/1.4` 这种要到归档那一刻才报错 —— 自动断代
+  会每轮重复写 seal 快照、新 exec 永远进不了 `exec/`，predeploy 则是计数器已清零才停。`safe_segment` 同时
+  限长 100（与 `version` 列一致，MySQL 严格模式下超长原来是 500）。
+- `GET /api/services/{name}/compare`：一侧没有任何快照（刚登记的服务打开「历史对比」）原来 500，现在差值为 null。
+- `diagnose`：`classfiles` 指向不存在的路径时原来把它交给 `classinfo` 再拿到一个 500，现在 409 并说明
+  「还没 upload-classes / retarget？」。
+- HTTP 层补一个兜底异常处理器：只读接口的意外异常也返回 `{ok: false, error}` 的 JSON 500 并把 traceback
+  打到 stderr，不再是 Starlette 的纯文本。
+- 看板：push 服务的端点原来显示成「push · push · N 个实例」；详情页「数据来源」卡片改为显示**正在看的这一版**
+  的 diff（看历史归档时原来显示的是最近收到的那条）并标明是 hub 比对源码生成还是流水线上传，提示文案由
+  过时的 `covhub-client.sh diff` 改为 `upload-sources`；`?v=` 指向不存在的归档时不再弹两次同一句错误；
+  未分组页刷新项目列表失败时能弹出令牌框。
+- `Jenkinsfile.build` 把构建显示名设成 `REVISION`：`Jenkinsfile.deploy` 的 `copyArtifacts specific(NEW_VERSION)`
+  按构建号或显示名找，原来填版本号找不到构建。其注释里「两份 class 都有时优先用 classdumpdir」改为与
+  实际一致的「后传的覆盖先传的」。
+
 ## v2.6.1（2026-10-08）
 
 - 修复：push 服务一有在线实例，看板详情页就 500。详情接口把收集端的连接记录原样放进返回体，

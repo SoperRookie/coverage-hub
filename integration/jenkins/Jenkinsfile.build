@@ -18,7 +18,8 @@
  *
  * 【归档那一步现在是可选的】v1.1.0 起 class 由 agent 的 classDumpDir 在运行期
  * 自己交出，与 exec 的指纹必然匹配。构建期归档保留下来只是给「愿意改构建、
- * 且想两份都留着」的项目用；两份都有时 covhub 优先用 classdumpdir 那份。
+ * 且想两份都留着」的项目用。两份传的是同一个 artifacts/<版本>/ 目录，后传的整份
+ * 覆盖先传的，hub 不会自动挑 —— 想以 classdumpdir 那份为准就让它最后传。
  */
 
 pipeline {
@@ -54,6 +55,9 @@ pipeline {
                             env.BRANCH_NAME.substring(1) :
                             env.BRANCH_NAME
                     echo "REVISION=${env.REVISION}"
+                    // 构建的显示名就是版本号：Jenkinsfile.deploy 用 copyArtifacts 的
+                    // specific(NEW_VERSION) 取产物，它按构建号或显示名找，不设这一句就只能填构建号
+                    currentBuild.displayName = env.REVISION
                 }
             }
         }

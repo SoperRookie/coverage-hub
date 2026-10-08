@@ -19,7 +19,7 @@ from .db import importer, repo
 from .diagnose import diagnose as _diagnose
 from .errors import CovhubError
 from .jacoco import make_report
-from .layout import ensure_dirs
+from .layout import ensure_dirs, safe_segment
 from .logbuf import log
 from .schemas import ProjectPatch, ProjectSpec, ServicePatch, ServiceSpec
 from .sources import store_sources
@@ -80,6 +80,8 @@ def predeploy(cfg, name, version=None, allow_missing=False):
     """
     svc = find_service(cfg, name)
     version = version or svc.get("version") or datetime.now().strftime("%Y%m%d-%H%M%S")
+    # 先于 dump --reset 校验：归档那一步才发现版本串当不了目录名的话，计数器已经清零了
+    version = safe_segment(version)
 
     if not reachable(svc):
         msg = "取不到 %s（%s）的数据，无法结算版本 %s" % (
@@ -128,7 +130,7 @@ def retarget(cfg, name, version=None, classfiles=None, sourcefiles=None):
     find_service(cfg, name)
     fields = {}
     if version:
-        fields["version"] = str(version)
+        fields["version"] = safe_segment(str(version))
     if classfiles:
         fields["classfiles"] = list(classfiles)
     if sourcefiles:
