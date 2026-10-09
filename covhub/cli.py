@@ -293,7 +293,9 @@ def cmd_export(cfg, args):
 
 def cmd_serve(cfg, args):
     from .api.app import serve
+    from .config import override_watch_interval
     port = args.port or (cfg.get("serve") or {}).get("port", 8900)
+    override_watch_interval(args.interval)      # agent-opts 的 idle 要和实际轮询间隔一致
     serve(args.config, port, with_watch=args.with_watch, interval=args.interval)
 
 

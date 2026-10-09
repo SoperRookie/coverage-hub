@@ -7,8 +7,10 @@
     diff/<version>.lines.json          {路径: [新增行号]}，行号明细只落磁盘不进库
     current/incremental.json           运行时的新增代码覆盖明细，随归档 copytree 进 versions/
 
-三个触发点（快照出报告后、单测 XML 到达、diff 到达）都走 recompute()，
-调用方负责持 LOCK —— make_report() 先 rmtree 再生成，读到半截报告会算错。
+三个触发点真正共用的是 _incremental()：快照出报告后走 incremental_for_report()、单测 XML
+到达走 store_unit_report()，各算自己那一份；只有 diff 到达（和 POST /api/recompute）走
+recompute()，把该版本已有的运行时快照和单测报告一起重算。调用方负责持 LOCK ——
+make_report() 先 rmtree 再生成，读到半截报告会算错。
 """
 
 import os

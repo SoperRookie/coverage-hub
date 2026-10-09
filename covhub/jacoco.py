@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import tempfile
 
+from .errors import CovhubError
 from .layout import svc_dir
 from .logbuf import log
 from .sources import source_roots
@@ -188,8 +189,12 @@ def class_file_ids(cfg, paths):
     from_names = {}
     unresolved = []
     for path in paths:
+        if not os.path.exists(path):
+            # 不存在的路径交给 classinfo 只会得到一个 FileNotFoundException 和非零退出，
+            # HTTP 上是 500；这是接入期最常见的状态（登记了 classfiles 但还没 upload-classes）
+            raise CovhubError("classfiles 路径不存在：%s（还没 upload-classes / retarget？）" % path)
         if not os.path.isdir(path):
-            unresolved.append(path)
+            unresolved.append(path)         # jar 之类的文件，交给 classinfo
             continue
         hits = 0
         for dirpath, _, files in os.walk(path):

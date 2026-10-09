@@ -6,7 +6,7 @@ ISO 串、不带时区，浏览器自己减会差出时区来。
 """
 
 import os
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from . import build
 from .agent import endpoint_label, service_channel
@@ -46,11 +46,24 @@ def _brief(entry):
     return out
 
 
-def service_row(cfg, svc, stale_after):
-    """总览里的一行。运维状态（在线 / 采集停了 / 断代 / 混版本）是语义色的唯一来源。"""
+def _diff_brief(diff):
+    if not diff:
+        return None
+    return {"version": diff["version"], "base": diff["base"], "addedLines": diff["addedLines"],
+            "files": diff["files"], "at": diff["at"], "origin": diff["origin"]}
+
+
+def service_row(cfg, svc, stale_after, pre=None):
+    """总览里的一行。运维状态（在线 / 采集停了 / 断代 / 混版本）是语义色的唯一来源。
+
+    pre 是 repo.overview_data() 里这个服务那一份；不给就单独查一次（详情页、报表用）。
+    总览页**必须**批量预取后传进来 —— 逐服务查是 18 条 SQL 一行，服务多了首页要好几秒。
+    """
     name = svc["name"]
     channel = service_channel(svc)
-    latest = repo.latest(name)
+    if pre is None:
+        pre = repo.overview_data([name]).get(name) or repo.blank_overview()
+    latest = pre["latest"]
     age = _age_seconds(latest["at"]) if latest else None
 
     if channel == "push":
@@ -61,12 +74,9 @@ def service_row(cfg, svc, stale_after):
             online, unknown = bool(collector_instances(name)), False
         online_at = None
     else:
-        online, online_at = repo.get_online(name)
+        online, online_at = pre["online"], pre["onlineAt"]
         unknown = online is None
 
-    state = repo.get_state(name)
-    unit = repo.latest_unit_report(name)
-    diff = repo.latest_diff(name)
     return {
         "name": name,
         "project": svc.get("project"),
@@ -79,12 +89,11 @@ def service_row(cfg, svc, stale_after):
         "instances": len(collector_instances(name)) if channel == "push" else None,
         "ageSeconds": age,
         "stale": age is not None and age > stale_after,
-        "pushMixed": state["pushMixed"],
+        "pushMixed": pre["pushMixed"],
         "runtime": _brief(latest),
-        "unit": _brief(unit),
-        "diff": {"version": diff["version"], "base": diff["base"], "addedLines": diff["addedLines"],
-                 "files": diff["files"], "at": diff["at"]} if diff else None,
-        "breaks": len(repo.breaks(name, 3)),
+        "unit": _brief(pre["unit"]),
+        "diff": _diff_brief(pre["diff"]),
+        "breaks": pre["breaks"],
         "hasReport": os.path.isfile(os.path.join(svc_dir(cfg, svc), "current", "html", "index.html")),
     }
 
@@ -92,7 +101,9 @@ def service_row(cfg, svc, stale_after):
 def overview(cfg):
     interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
     stale_after = max(interval * 3, 900)
-    rows = {svc["name"]: service_row(cfg, svc, stale_after) for svc in cfg.get("services", [])}
+    services = cfg.get("services", [])
+    pre = repo.overview_data([svc["name"] for svc in services])
+    rows = {svc["name"]: service_row(cfg, svc, stale_after, pre.get(svc["name"])) for svc in services}
 
     projects = []
     assigned = set()
@@ -131,9 +142,10 @@ def service_detail(cfg, name, version=None):
     数字来自结算快照，新增代码明细来自归档目录里的 incremental.json，报告链接指向归档。"""
     svc = find_service(cfg, name)
     interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
-    row = service_row(cfg, svc, max(interval * 3, 900))
+    pre = repo.overview_data([name]).get(name) or repo.blank_overview()
+    row = service_row(cfg, svc, max(interval * 3, 900), pre)
     versions = repo.versions(name, 20)
-    latest = repo.latest(name)
+    latest = pre["latest"]
 
     base = "/%s" % name
     viewing = None
@@ -153,8 +165,12 @@ def service_detail(cfg, name, version=None):
         runtime_version = svc.get("version")
         report_dir = "%s/current" % base
         has_report = row["hasReport"]
-        unit = repo.latest_unit_report(name)
+        unit = pre["unit"]
     unit_inc = build.read_incremental(cfg, svc, "unit/%s" % unit["version"]) if unit else None
+    # 「数据来源」卡片要的是**正在看的这一版**的 diff，不是最近收到的那条：看历史归档时
+    # 尤其如此，否则卡片上的版本号、行数和上面的新增覆盖对不上。没配 version 才回落最近一条
+    if runtime_version:
+        row["diff"] = _diff_brief(repo.get_diff(name, runtime_version))
 
     return {
         **row,
@@ -187,6 +203,62 @@ def service_detail(cfg, name, version=None):
             "incremental": _files_view(unit_inc),
             "xmlUrl": ("%s/%s" % (base, unit["xmlPath"])) if unit else None,
         },
+    }
+
+
+# 趋势图一次最多给这么多点：再多屏幕上也画不开，浏览器端排序 / tooltip 反而卡
+TREND_MAX_POINTS = 1500
+# 区间上限一年：按天的索引扫一年也就十万行，再长没有看的意义，也防止一个请求把库拖住
+TREND_MAX_DAYS = 366
+
+
+def _parse_day(value, what):
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise CovhubError("%s 要是 YYYY-MM-DD 的日期：%r" % (what, value))
+
+
+def _day_range(start, end, max_days=None):
+    """接口上的 from / to（YYYY-MM-DD，两端都含）→ 规整后的两个 date 和本地日历日的 [lo, hi) 两个 datetime。
+
+    都不给是今天；只给一端另一端取同一天。库里的时刻是本地时间、不带时区（见模块说明），
+    所以日界也按 hub 的本地日历切，和看板上显示的时刻一致。"""
+    today = date.today()
+    s = _parse_day(start, "from") if start else None
+    e = _parse_day(end, "to") if end else None
+    if s is None and e is None:
+        s = e = today
+    elif s is None:
+        s = e
+    elif e is None:
+        e = s
+    if e < s:
+        raise CovhubError("to 不能早于 from")
+    if max_days and (e - s).days >= max_days:
+        raise CovhubError("区间最长 %d 天" % max_days)
+    lo = datetime.combine(s, datetime.min.time())
+    hi = datetime.combine(e + timedelta(days=1), datetime.min.time())
+    return s, e, lo, hi
+
+
+def trend(cfg, name, start=None, end=None):
+    """某服务在 [start, end] 这些天里的采集轨迹（两端都含，按本地日历日，见 _day_range）。
+
+    点多了均匀抽稀但**首尾两点保留**，返回体里 sampled 标出来 —— 画出来的线是轮廓，不是每次采集。"""
+    find_service(cfg, name)
+    s, e, lo, hi = _day_range(start, end, TREND_MAX_DAYS)
+    rows = repo.history_between(name, lo, hi)
+    total = len(rows)
+    sampled = total > TREND_MAX_POINTS
+    if sampled:
+        step = total / float(TREND_MAX_POINTS - 1)
+        picked = [rows[int(i * step)] for i in range(TREND_MAX_POINTS - 1)] + [rows[-1]]
+        rows = picked
+    return {
+        "from": s.isoformat(), "to": e.isoformat(),
+        "count": total, "sampled": sampled,
+        "points": [_brief(h) | {"kind": h["kind"]} for h in rows],
     }
 
 
@@ -334,13 +406,13 @@ def incremental_source(cfg, name, kind, path, context=3, version=None, full=Fals
     }
 
 
-def project_report(cfg, project, days=30):
+def project_report(cfg, project, days=30, start=None, end=None):
     """项目维度的报表：每个服务的最新数字 + 时间范围内的已结算版本与单测报告。
 
-    days=0 表示不限时间。不算项目平均覆盖率 —— 各服务的百分比平均起来只会误导，
-    报表给的是逐服务、逐版本的原始数字，汇总由看的人按自己的口径做。
+    时间范围两种给法：days（最近多少天，0 不限）或 from / to 日期（YYYY-MM-DD，两端都含，按本地
+    日历日切，见 _day_range）；给了日期就不看 days。不算项目平均覆盖率 —— 各服务的百分比平均起来
+    只会误导，报表给的是逐服务、逐版本的原始数字，汇总由看的人按自己的口径做。
     """
-    from datetime import timedelta
     if project == "__unassigned":
         names = [s["name"] for s in cfg.get("services", []) if not s.get("project")]
         title = "未分组"
@@ -348,19 +420,25 @@ def project_report(cfg, project, days=30):
         proj = repo.get_project(project)
         names = proj["services"]
         title = proj.get("title") or project
-    since = datetime.now() - timedelta(days=days) if days and days > 0 else None
+    day_from = day_to = until = None
+    if start or end:
+        day_from, day_to, since, until = _day_range(start, end)
+    else:
+        since = datetime.now() - timedelta(days=days) if days and days > 0 else None
     interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
     stale_after = max(interval * 3, 900)
     by_name = {s["name"]: s for s in cfg.get("services", [])}
+    pre = repo.overview_data(names)
 
-    services = []
+    services, rows = [], []
     for name in names:
         svc = by_name.get(name)
         if not svc:
             continue
-        row = service_row(cfg, svc, stale_after)
-        versions = repo.versions_since(name, since)
-        units = repo.unit_reports_since(name, since)
+        row = service_row(cfg, svc, stale_after, pre.get(name))
+        rows.append(row)
+        versions = repo.versions_since(name, since, until=until)
+        units = repo.unit_reports_since(name, since, until)
         services.append({
             "name": name, "channel": row["channel"], "version": row["version"],
             "online": row["online"], "unknown": row["unknown"], "stale": row["stale"],
@@ -375,10 +453,14 @@ def project_report(cfg, project, days=30):
         })
     return {
         "project": project, "title": title, "days": days,
+        # 按日期区间查时 from / to 是规整后的日期（只给一端时两者相同）；按 days 查时为 None
+        "from": day_from.isoformat() if day_from else None,
+        "to": day_to.isoformat() if day_to else None,
         "since": since.isoformat(timespec="seconds") if since else None,
+        "until": until.isoformat(timespec="seconds") if until else None,
         "generatedAt": datetime.now().isoformat(timespec="seconds"),
         "services": services,
-        "counts": _counts([service_row(cfg, by_name[n], stale_after) for n in names if n in by_name]),
+        "counts": _counts(rows),
     }
 
 
@@ -429,9 +511,11 @@ def compare(cfg, name, a, b):
 
     def delta(key, sub=None):
         sa, sb = ma["summary"], mb["summary"]
-        va = (sa.get(sub) or {}).get(key) if sub else (sa or {}).get(key)
-        vb = (sb.get(sub) or {}).get(key) if sub else (sb or {}).get(key)
-        if sa is None or sb is None or va is None or vb is None:
+        if sa is None or sb is None:        # 一侧还没有任何快照（刚登记的服务看「历史对比」）
+            return None
+        va = (sa.get(sub) or {}).get(key) if sub else sa.get(key)
+        vb = (sb.get(sub) or {}).get(key) if sub else sb.get(key)
+        if va is None or vb is None:
             return None
         return round(vb - va, 2)
 

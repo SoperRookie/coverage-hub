@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import "element-plus/es/components/message/style/css";
 import "element-plus/es/components/message-box/style/css";
-import { api, type Brief, type CommandResult, type Detail } from "../api";
+import { ApiError, api, type Brief, type CommandResult, type Detail, type Trend } from "../api";
 import type { Nav } from "../App.vue";
 import CompareView from "../components/CompareView.vue";
 import CovCell from "../components/CovCell.vue";
@@ -13,7 +13,8 @@ import Donut from "../components/Donut.vue";
 import PageHeader from "../components/PageHeader.vue";
 import StatusTag from "../components/StatusTag.vue";
 import TrendChart from "../components/TrendChart.vue";
-import { SERIES, ago, num, pct, when } from "../ui/colors";
+import { SERIES, ago, num, pct, when, where } from "../ui/colors";
+import { DAY_SHORTCUTS, daysAgo, noFuture, spanText } from "../ui/dates";
 import { exportPdf } from "../ui/pdf";
 
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
@@ -33,17 +34,47 @@ const nav = inject<Nav>("nav")!;
 // 放在 URL 里而不是组件状态里，历史版本的页面才能被收藏、被贴给别人。
 const version = computed<string | null>(() => (typeof route.query.v === "string" && route.query.v) || null);
 const viewingHistory = computed(() => !!d.value?.viewingVersion);
+// 没配 version 的服务按版本找不到源码：提示要说「去配 version」，而不是「传了也没用」
+const noVersion = computed(() => !!d.value && !viewingHistory.value && !d.value.version);
+
+// ---- 运行时趋势：按天 / 按日期区间看，默认今天 ----
+// 趋势不再跟着 detail 一起下发「最近 40 次」：5 分钟一轮的话 40 次只有三个多小时，
+// 既看不出一天的走势，也没法回看某一天。区间选好后单独打 /trend，和 detail 互不拖累。
+const range = ref<[string, string]>([daysAgo(0), daysAgo(0)]);
+const trend = ref<Trend | null>(null);
+const trendLoading = ref(false);
+async function loadTrend() {
+  trendLoading.value = true;
+  try {
+    trend.value = await api.trend(props.name, range.value[0], range.value[1]);
+  } catch (err) {
+    props.onError(err);
+  } finally {
+    trendLoading.value = false;
+  }
+}
+watch(range, loadTrend);
+const trendHint = computed(() => {
+  const t = trend.value;
+  if (!t) return "";
+  return `${spanText(t.from, t.to)} · ${t.count} 次采集${t.sampled ? `（抽稀为 ${t.points.length} 点）` : ""}`;
+});
 
 async function load() {
   loading.value = true;
+  // 趋势和详情并行拉；详情页的手动操作（采集 / 结算）之后也顺带刷新趋势
+  void loadTrend();
   try {
     d.value = await api.detail(props.name, version.value);
     nav.project = d.value.project ?? "__unassigned";
   } catch (err) {
-    if (!props.onError(err) && version.value) {
-      // 归档不存在（被清理了？）就退回当前周期，别卡在一个空页面上
-      ElMessage.warning(err instanceof Error ? err.message : String(err));
+    if (version.value && err instanceof ApiError && err.status === 409) {
+      // 归档不存在（被清理了？）就退回当前周期，别卡在一个空页面上。
+      // 这条自己处理，不再交给全局 onError —— 否则同一句话弹两次
+      ElMessage.warning(err.message);
       router.replace({ query: {} });
+    } else {
+      props.onError(err);
     }
   } finally {
     loading.value = false;
@@ -55,7 +86,11 @@ watch(() => [props.name, version.value], load);
 // el-select 把空串当「没选」显示占位符，所以「当前周期」用一个哨兵值
 const CURRENT = "__current";
 function switchVersion(v: string) {
-  router.push({ query: v && v !== CURRENT ? { v } : {} });
+  // 只换 v，别把 ?tab= 一起丢了 —— 切版本后复制出去的链接还得落在同一个页签
+  const q: Record<string, any> = { ...route.query };
+  delete q.v;
+  if (v && v !== CURRENT) q.v = v;
+  router.push({ query: q });
 }
 
 // ---- 手动触发：跑完用例点一下就把这一刻的覆盖率拉下来，不用等下一轮轮询 ----
@@ -153,7 +188,7 @@ const crumbs = computed(() => [
     <template #meta>
       <template v-if="d">
         <StatusTag :row="d" />
-        <span>{{ d.channel }} · <span class="mono">{{ d.endpoint }}</span></span>
+        <span><span class="mono">{{ where(d) }}</span></span>
         <span>版本 <span class="mono">{{ d.version || "—" }}</span></span>
         <span>最后采集 {{ ago(d.ageSeconds) }}</span>
       </template>
@@ -191,7 +226,7 @@ const crumbs = computed(() => [
       <a href="#" @click.prevent="switchVersion('')">回到当前周期</a>
     </div>
     <div v-if="d.stale" class="notice">最后一次采集在 {{ ago(d.ageSeconds) }}，采集可能已经停了 —— 确认 hub 的 --with-watch 还在跑。</div>
-    <div v-for="b in d.runtime.breaks.slice(-3).reverse()" :key="b.at" class="notice">
+    <div v-for="(b, i) in d.runtime.breaks.slice(-3).reverse()" :key="i" class="notice">
       <template v-if="b.sealedAs">{{ when(b.at) }}：检测到未结算的重启，已自动结算为 <b>{{ b.sealedAs }}</b>（{{ b.from }} → {{ b.to }}）。重启前最后一个轮询周期的数据已丢失。</template>
       <template v-else>{{ when(b.at) }}：在线实例跑着两份不同的 class（{{ b.instances }} 个实例），多半是滚动发版正在进行 —— 发版流程里补一次 predeploy。</template>
     </div>
@@ -213,23 +248,32 @@ const crumbs = computed(() => [
     <template v-if="tab === 'overview' || printAll">
       <div class="card">
         <div class="card-head">
-          <h2>运行时趋势</h2><span class="hint">最近 {{ d.runtime.history.length }} 次采集</span>
+          <h2>运行时趋势</h2><span class="hint">{{ trendHint }}</span>
           <span class="spacer"></span>
           <span class="legend"><i :style="{ background: SERIES.total }"></i>总覆盖</span>
           <span class="legend"><i class="dash" :style="{ background: `repeating-linear-gradient(90deg, ${SERIES.inc} 0 3px, transparent 3px 5px)` }"></i>新增代码</span>
+          <el-date-picker v-model="range" type="daterange" size="small" class="no-print" unlink-panels :clearable="false"
+                          value-format="YYYY-MM-DD" range-separator="～" start-placeholder="开始日期" end-placeholder="结束日期"
+                          :shortcuts="DAY_SHORTCUTS" :disabled-date="noFuture" style="width: 240px" />
         </div>
         <div class="card-body">
-          <TrendChart v-if="d.runtime.history.length" :history="d.runtime.history" />
-          <div v-else class="empty">还没有采集记录</div>
+          <TrendChart v-if="trend && trend.points.length" :history="trend.points" :from="trend.from" :to="trend.to" />
+          <div v-else-if="trend" class="empty">{{ trend.from === trend.to ? "这一天" : "这段时间" }}没有采集记录</div>
+          <div v-else class="empty">加载中…</div>
         </div>
       </div>
       <div class="card">
         <div class="card-head"><h2>数据来源</h2></div>
         <div class="card-body sub" style="font-size: 12px; line-height: 1.8">
           <div>运行时数据来自被测进程的真实执行；单测数据来自构建流水线传上来的 jacoco.xml。</div>
-          <div>「新增代码」指本版本 git diff 里新增的行，分母只算 JaCoCo 有探针的行（空行、注释、import 不计）。</div>
-          <div v-if="d.diff">当前 diff：版本 <span class="mono">{{ d.diff.version }}</span>，基线 <span class="mono">{{ d.diff.base }}</span>，{{ d.diff.files }} 个源码文件 {{ d.diff.addedLines }} 行新增，{{ when(d.diff.at) }} 收到。</div>
-          <div v-else>还没有收到这个服务的 git diff —— 构建流水线里加一步 <code>covhub-client.sh diff</code>。</div>
+          <div>「新增代码」指本版本相对基线版本新增的行（hub 比对两版上传的源码生成 diff，流水线也可以自己传 git diff），分母只算 JaCoCo 有探针的行（空行、注释、import 不计）。</div>
+          <div v-if="d.diff">
+            {{ viewingHistory ? "这一版" : "当前" }}的 diff：版本 <span class="mono">{{ d.diff.version }}</span>，基线 <span class="mono">{{ d.diff.base }}</span>，{{ d.diff.files }} 个源码文件 {{ d.diff.addedLines }} 行新增，{{ when(d.diff.at) }}{{ d.diff.origin === "sources" ? " 由 hub 比对源码生成" : " 由流水线上传" }}。
+          </div>
+          <div v-else-if="d.runtime.incremental?.version || d.version">
+            版本 <span class="mono">{{ d.runtime.incremental?.version || d.version }}</span> 还没有 diff —— 构建流水线里加一步 <code>covhub-client.sh upload-sources</code>（上传这一版源码，hub 自己和基线版本比对）。
+          </div>
+          <div v-else>还没有收到这个服务的 diff —— 构建流水线里加一步 <code>covhub-client.sh upload-sources</code>，并给服务配上 version（retarget）。</div>
         </div>
       </div>
     </template>
@@ -243,7 +287,7 @@ const crumbs = computed(() => [
           <el-radio-button value="unit">单测</el-radio-button>
         </el-radio-group>
         <span class="hint">点开一行看源码与逐行执行状态</span>
-        <span v-if="!d.runtime.sourcesUploaded" class="hint">· {{ viewingHistory ? "这一版" : "当前版本" }}没传源码（<code>upload-sources</code>），看不了全文，JaCoCo 报告也只到方法级</span>
+        <span v-if="!d.runtime.sourcesUploaded" class="hint">· {{ noVersion ? "服务没配 version（retarget 后才能按版本找源码）" : (viewingHistory ? "这一版" : "当前版本") + "没传源码（upload-sources）" }}，看不了全文，JaCoCo 报告也只到方法级</span>
       </div>
       <div class="card-body">
         <IncrementalTable v-if="incTab === 'runtime'" :view="d.runtime.incremental" :service="name" kind="runtime" :version="version" :on-error="onError"
@@ -305,7 +349,7 @@ const crumbs = computed(() => [
           <el-descriptions-item label="excludes"><span class="mono">{{ (d.config.excludes as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="reportExcludes"><span class="mono">{{ (d.config.reportExcludes as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="classfiles"><span class="mono">{{ (d.config.classfiles as string[]).join("  ") || "—" }}</span></el-descriptions-item>
-          <el-descriptions-item label="源码"><span>{{ d.runtime.sourcesUploaded ? "这一版已上传（upload-sources）" : "这一版没上传" }}</span></el-descriptions-item>
+          <el-descriptions-item label="源码"><span>{{ d.runtime.sourcesUploaded ? "这一版已上传（upload-sources）" : noVersion ? "服务没配 version，无法按版本找源码" : "这一版没上传" }}</span></el-descriptions-item>
           <el-descriptions-item label="sourcefiles"><span class="mono">{{ (d.config.sourcefiles as string[]).join("  ") || "—" }}</span></el-descriptions-item>
           <el-descriptions-item label="classDumpDir"><span class="mono">{{ d.config.classDumpDir || "—" }}</span></el-descriptions-item>
         </el-descriptions>

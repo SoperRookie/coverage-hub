@@ -35,6 +35,11 @@ export function ago(seconds: number | null | undefined): string {
   return `${Math.floor(seconds / 86400)} 天前`;
 }
 
+/** 一行说明服务在哪儿取数。push 的 endpoint 后端已带「push ·」前缀，别再拼一次 channel。 */
+export function where(row: { channel: string; endpoint: string }): string {
+  return row.channel === "push" ? row.endpoint : `${row.channel} · ${row.endpoint}`;
+}
+
 export function when(iso: string | null | undefined): string {
   return iso ? iso.replace("T", " ") : "—";
 }

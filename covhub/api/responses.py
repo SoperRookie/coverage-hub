@@ -6,6 +6,7 @@ JSON 一律 indent=2 —— covhub-client.sh 的 wait-online 和 Jenkins 库的 
 """
 
 import json
+import traceback
 
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
@@ -13,6 +14,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from ..errors import ConfigError, CovhubError, ServiceNotFound
+from ..logbuf import log
 
 
 class PrettyJSONResponse(JSONResponse):
@@ -66,6 +68,15 @@ def install_handlers(app: FastAPI):
             detail = "该接口不支持这个方法"
         return PrettyJSONResponse({"ok": False, "error": str(detail)},
                                   status_code=exc.status_code, headers=exc.headers)
+
+    @app.exception_handler(Exception)
+    async def _unexpected(request, exc):
+        # 只读视图（overview / detail / compare / source / diagnose …）没有写接口那层
+        # run_command 的兜底。不接的话是 Starlette 的纯文本 "Internal Server Error"：
+        # 脚本和看板拿不到 {ok:false}，也不进访问日志。traceback 打到 stderr。
+        log("! %s %s 内部错误：%s\n%s" % (request.method, request.url.path, exc,
+                                         "".join(traceback.format_exception(exc)).rstrip()))
+        return error(500, "hub 内部错误：%s" % exc)
 
     # FastAPI 自己的 HTTPException 是 Starlette 的子类，上面那条已经覆盖；
     # 显式注册一次免得以后有人给它单独加处理器时顺序出问题

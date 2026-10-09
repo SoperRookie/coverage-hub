@@ -22,7 +22,7 @@ from ..errors import CovhubError
 from ..locks import LOCK
 from ..logbuf import capture_logs, log
 from . import schemas
-from .auth import TOKEN_COOKIE, get_cfg, require_token, token_header, token_ok
+from .auth import COOKIE_SAMESITE, TOKEN_COOKIE, get_cfg, require_token, token_header, token_ok
 from .params import as_list, merged_params, truthy
 from .responses import PrettyJSONResponse, error
 
@@ -101,7 +101,7 @@ async def login(request: Request, hdr: str | None = Security(token_header)):
         raise HTTPException(401, "令牌无效或缺失")
     resp = PrettyJSONResponse({"ok": True, "tokenRequired": True})
     resp.set_cookie(TOKEN_COOKIE, urllib.parse.quote(expected), path="/",
-                    httponly=True, samesite="strict")
+                    httponly=True, samesite=COOKIE_SAMESITE)
     return resp
 
 

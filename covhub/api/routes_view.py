@@ -30,6 +30,17 @@ def service_detail(name: str,
     return PrettyJSONResponse({"ok": True, **views.service_detail(cfg, name, version)})
 
 
+@router.get("/api/services/{name}/trend", summary="服务的采集趋势：某天或某个日期区间内的快照",
+            responses={**ERR, 409: {"model": schemas.Error, "description": "日期不合法、to 早于 from、或区间超过一年"}})
+def trend(name: str,
+          start: str | None = Query(None, alias="from", description="起始日 YYYY-MM-DD（含）；不给是今天"),
+          end: str | None = Query(None, alias="to", description="结束日 YYYY-MM-DD（含）；不给与 from 同一天"),
+          cfg: dict = Depends(get_cfg)):
+    """按 hub 本地日历日切区间，两端都含；一次最多 1500 个点，更多时均匀抽稀（首尾保留）并置 sampled。
+    每个点是 detail 里 history 的同形态（总覆盖 / 新增覆盖 / 版本 / kind）。"""
+    return PrettyJSONResponse({"ok": True, **views.trend(cfg, name, start, end)})
+
+
 @router.get("/api/services/{name}/compare", summary="两个版本的覆盖率对比", responses=ERR)
 def compare(name: str,
             a: str = Query("current", description="基准：current 或归档目录名"),
@@ -39,12 +50,16 @@ def compare(name: str,
     return PrettyJSONResponse({"ok": True, **views.compare(cfg, name, a, b)})
 
 
-@router.get("/api/projects/{name}/report", summary="项目报表：各服务的数字与时间范围内的已结算版本", responses=ERR)
+@router.get("/api/projects/{name}/report", summary="项目报表：各服务的数字与时间范围内的已结算版本",
+            responses={**ERR, 409: {"model": schemas.Error, "description": "from / to 日期不合法或 to 早于 from"}})
 def project_report(name: str,
-                   days: int = Query(30, ge=0, le=3650, description="只看最近多少天的结算版本与单测报告；0 表示不限"),
+                   days: int = Query(30, ge=0, le=3650, description="只看最近多少天的结算版本与单测报告；0 表示不限。给了 from / to 时忽略"),
+                   start: str | None = Query(None, alias="from", description="起始日 YYYY-MM-DD（含，按 hub 本地日历）；只给它时 to 取同一天"),
+                   end: str | None = Query(None, alias="to", description="结束日 YYYY-MM-DD（含）；只给它时 from 取同一天"),
                    cfg: dict = Depends(get_cfg)):
-    """逐服务、逐版本的原始数字，不算项目平均覆盖率。name 为 __unassigned 时是未分组的服务。"""
-    return PrettyJSONResponse({"ok": True, **views.project_report(cfg, name, days)})
+    """逐服务、逐版本的原始数字，不算项目平均覆盖率。name 为 __unassigned 时是未分组的服务。
+    时间范围用 days（最近多少天）或 from / to（日期区间）二选一。"""
+    return PrettyJSONResponse({"ok": True, **views.project_report(cfg, name, days, start, end)})
 
 
 @router.get("/api/services/{name}/versions", summary="最近结算的版本（流水线定基线用）", responses=ERR)

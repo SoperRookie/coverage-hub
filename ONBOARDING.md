@@ -470,7 +470,7 @@ curl -s -o /dev/null -w '%{http_code}
 # 200 —— 反代通了。404 说明 nginx 少了 /api/ 那条 location
 
 curl -si -X POST -H "X-Covhub-Token: <令牌>" $HUB/api/login | grep -i set-cookie
-# set-cookie: covhub_token=...; HttpOnly; Path=/; SameSite=strict
+# set-cookie: covhub_token=...; HttpOnly; Path=/; SameSite=lax
 ```
 
 **第三步：浏览器**。打开看板应能看到一个空面板；配了令牌的话会弹输入框，填一次

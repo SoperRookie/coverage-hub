@@ -89,7 +89,7 @@ export interface ServiceRow {
   pushMixed: boolean;
   runtime: Brief | null;
   unit: Brief | null;
-  diff: { version: string; base: string; addedLines: number; files: number; at: string } | null;
+  diff: { version: string; base: string; addedLines: number; files: number; at: string; origin: "upload" | "sources" } | null;
   breaks: number;
   hasReport: boolean;
 }
@@ -215,6 +215,16 @@ export interface Detail extends StatusFields {
   };
 }
 
+/** /api/services/{name}/trend：某天或某个日期区间内的快照 */
+export interface Trend {
+  from: string;
+  to: string;
+  /** 区间内的快照总数；点多了服务端会均匀抽稀，points 少于它时 sampled 为 true */
+  count: number;
+  sampled: boolean;
+  points: Brief[];
+}
+
 export interface Project {
   id: number;
   name: string;
@@ -287,7 +297,11 @@ export interface ProjectReport {
   project: string;
   title: string;
   days: number;
+  /** 按日期区间查时是规整后的日期；按 days 查时为 null */
+  from: string | null;
+  to: string | null;
   since: string | null;
+  until: string | null;
   generatedAt: string;
   services: ReportService[];
   counts: Counts;
@@ -309,9 +323,14 @@ export const api = {
     command(`/api/predeploy?service=${enc(name)}${version ? `&version=${enc(version)}` : ""}`),
   /** 手动触发：用已有 exec 重出报告 */
   report: (name: string) => command(`/api/report?service=${enc(name)}`),
+  /** 趋势图：from / to 是 YYYY-MM-DD（含两端），都不给是今天 */
+  trend: (name: string, from: string, to: string) =>
+    request<Trend>(`/api/services/${enc(name)}/trend?from=${enc(from)}&to=${enc(to)}`),
   compare: (name: string, a: string, b: string) =>
     request<Compare>(`/api/services/${enc(name)}/compare?a=${enc(a)}&b=${enc(b)}`),
-  projectReport: (name: string, days: number) => request<ProjectReport>(`/api/projects/${enc(name)}/report?days=${days}`),
+  /** 时间范围二选一：range（YYYY-MM-DD 两端都含）优先，否则 days（0 不限） */
+  projectReport: (name: string, days: number, range?: [string, string] | null) =>
+    request<ProjectReport>(`/api/projects/${enc(name)}/report?${range ? `from=${enc(range[0])}&to=${enc(range[1])}` : `days=${days}`}`),
   projects: () => request<{ projects: Project[] }>("/api/projects"),
   createProject: (body: { name: string; title?: string | null; description?: string | null }) =>
     request<{ project: Project }>("/api/projects", { method: "POST", body }),

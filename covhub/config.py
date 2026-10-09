@@ -71,8 +71,23 @@ def parse_yaml(text, path):
         raise ConfigError("配置文件 %s 解析失败：%s" % (path, exc))
 
 
+# serve --interval 的命令行覆盖。配置每次重读，所以覆盖要在读的地方生效而不是改一次 cfg 了事：
+# agent_opts 算 covhub-agent 的 idle 用的就是 watch.intervalSeconds，和真正的轮询间隔对不上
+# 会让 agent 在两轮取数之间无谓地断开重连（每次重连多一份握手 exec、实例数短暂虚高）
+_WATCH_INTERVAL_OVERRIDE = None
+
+
+def override_watch_interval(seconds):
+    global _WATCH_INTERVAL_OVERRIDE
+    _WATCH_INTERVAL_OVERRIDE = int(seconds) if seconds else None
+
+
 def load_config(path):
     cfg = read_config_file(path)
+    if _WATCH_INTERVAL_OVERRIDE:
+        if not isinstance(cfg.get("watch"), dict):
+            cfg["watch"] = {}
+        cfg["watch"]["intervalSeconds"] = _WATCH_INTERVAL_OVERRIDE
     base = os.path.dirname(os.path.abspath(path))
     # 相对路径一律相对配置文件所在目录解析，便于整个目录搬迁。
     # 目录与文件路径记进 cfg：retarget 要回写文件，服务入库后相对路径也按这里展开。
