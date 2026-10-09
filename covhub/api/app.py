@@ -9,6 +9,7 @@ import contextlib
 import threading
 
 from fastapi import FastAPI
+from starlette.middleware.gzip import GZipMiddleware
 
 from .. import __version__, config
 from ..collector import PushCollector, get_collector, set_collector
@@ -129,6 +130,11 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
     app.state.cfg_path = cfg_path
     app.state.port = 8900
     install_handlers(app)
+    # 看板的接口返回体是 indent=2 的 JSON（见 responses.py），详情页带新增代码按文件的行号明细、
+    # 总览带全部服务，几百 KB 很平常，内网跨机房也能压到十分之一。只对带 Accept-Encoding: gzip
+    # 的请求压 —— curl 默认不带，所以 covhub-client.sh / Jenkins 库 grep 返回体的那几处不受影响。
+    # exec / class 这种二进制下载不压：没收益，白耗 CPU（tar.gz 的 application/gzip 中间件默认就排除）
+    app.add_middleware(GZipMiddleware, minimum_size=1024, **_gzip_exclusions())
 
     @app.middleware("http")
     async def access_log(request, call_next):
@@ -151,6 +157,17 @@ def create_app(cfg_path, *, with_watch=False, interval=None):
     app.include_router(docs.router)
     app.include_router(static.router)        # 兜底，必须最后挂
     return app
+
+
+def _gzip_exclusions():
+    """按内容类型跳过压缩的参数。starlette 0.48 之前的 GZipMiddleware 没有这个参数（内网机器上
+    装的往往就是老版本），那就什么都压 —— 多耗点 CPU，不影响正确性。"""
+    try:
+        from starlette.middleware.gzip import DEFAULT_EXCLUDED_CONTENT_TYPES
+    except ImportError:
+        return {}
+    return {"exclude_content_types": DEFAULT_EXCLUDED_CONTENT_TYPES
+            + ("application/octet-stream", "application/java-vm")}
 
 
 def serve(cfg_path, port, with_watch=False, interval=None):

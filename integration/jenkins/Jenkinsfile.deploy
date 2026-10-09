@@ -98,6 +98,8 @@ pipeline {
 
         stage('2 · 取新版本 class 产物') {
             steps {
+                // specific() 按构建号或构建显示名找；Jenkinsfile.build 把显示名设成了 REVISION，
+                // 所以这里能直接填版本号。构建任务没设显示名的话只能填构建号。
                 copyArtifacts(
                     projectName: params.BUILD_JOB,
                     selector: specific("${params.NEW_VERSION}"),

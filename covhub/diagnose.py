@@ -3,6 +3,7 @@
 import json
 import os
 
+from .agent import service_channel
 from .jacoco import class_file_ids, exec_class_ids, exec_sessions
 from .layout import ensure_dirs, safe_segment
 from .db import repo
@@ -75,6 +76,7 @@ def diagnose(cfg, svc, version=None):
                              "最可能的原因：classfiles 指向的是另一次构建的产物")
 
     starts = {s["start"] for s in result["sessions"]}
-    if len(starts) > 1:
+    if len(starts) > 1 and service_channel(svc) != "push":
+        # push 是多副本，每个副本一个会话，多会话是常态；只有单实例的 pull 才说明重启过
         result["verdict"] += "；另外这批 exec 跨了 %d 个进程会话，可能混了重启前后的数据" % len(starts)
     return result

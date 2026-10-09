@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, inject, onBeforeUnmount, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
-import { api, type Overview, type Project, type ServiceRow } from "../api";
+import type { Overview, Project, ServiceRow } from "../api";
+import { loadSnapshot } from "../store";
 import ProjectDialog from "../components/ProjectDialog.vue";
 import type { Nav } from "../App.vue";
 import Kpi from "../components/Kpi.vue";
@@ -21,18 +22,18 @@ const projects = ref<Project[]>([]);
 const loading = ref(true);
 let timer: number | undefined;
 
-async function load() {
+async function load(force = false) {
   try {
-    const [o, p] = await Promise.all([api.overview(), api.projects()]);
-    data.value = o;
-    projects.value = p.projects;
+    const snap = await loadSnapshot(force);
+    data.value = snap.overview;
+    projects.value = snap.projects;
   } catch (err) {
     props.onError(err);
   } finally {
     loading.value = false;
   }
 }
-onMounted(() => { load(); timer = window.setInterval(load, 60_000); });
+onMounted(() => { load(); timer = window.setInterval(() => load(true), 60_000); });
 onBeforeUnmount(() => window.clearInterval(timer));
 
 interface Card {
@@ -63,7 +64,7 @@ const cards = computed<Card[]>(() => {
     </template>
     <template #actions>
       <el-button size="small" type="primary" plain @click="createOpen = true">新建项目</el-button>
-      <el-button size="small" @click="load">刷新</el-button>
+      <el-button size="small" @click="load(true)">刷新</el-button>
     </template>
   </PageHeader>
 

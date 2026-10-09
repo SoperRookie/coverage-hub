@@ -1,7 +1,91 @@
 # 更新日志
 
-## 未发布
+## v2.6.5（2026-10-09）
 
+- 服务详情页的运行时趋势图改为**按天 / 按日期区间看**：新接口 `GET /api/services/{name}/trend?from=&to=`
+  按 hub 本地日历日取区间内的全部快照（默认今天），卡片上加日期区间选择器（今天 / 昨天 / 最近 7 天 /
+  最近 30 天快捷项，不能选未来）。原来跟着详情下发的「最近 40 次」在 5 分钟一轮下只有三个多小时，
+  既看不出一天的走势也回不了头；`detail` 里的 `runtime.history` 字段保留不变。
+- 趋势图横轴改成时间轴：采集停过的那段在图上留出空白，而不是和正常间隔画得一样宽；横轴撑满所选日期。
+  tooltip 带版本与快照类型（轮询 / 手动 / 结算 / 重启封存）。区间超过 1500 个点服务端均匀抽稀（首尾保留）。
+  采集停过的时段（相邻快照间隔超过正常间隔的 1.5 倍）折线断开、悬停不出 tooltip —— 原来轴触发的 tooltip
+  会吸到几小时外最近的点，把那个点的数字端出来，像是那会儿还有覆盖率。
+- 项目报表也能按日期区间看：`GET /api/projects/{name}/report` 多了 `from` / `to`（两端都含，按本地日历日切，
+  只给一端就看那一天），给了就不看 `days`；页面上「近 7 / 30 / 90 天 / 全部」旁边加了日期区间选择器，
+  区间进 URL（`?from=&to=`），导出的 CSV / PDF 文件名带上区间。返回体多了 `from` / `to` / `until`。
+- Element Plus 组件文案切到中文（日期选择器的月份星期、分页的「共 N 条」原来是英文）。
+
+## v2.6.4（2026-10-08）
+
+- 看板首页 / 项目面板慢：`/api/overview` 原来每个服务查 6 个会话 18 条 SQL（每条都先按名字查一次服务），
+  几十个服务就是上千次数据库往返，MySQL 在另一台机器上时要好几秒；而且壳（侧栏）和页面各打一次。
+  现在按表各一条「每个服务取最新一条」的查询（`repo.overview_data()`），服务数再多也只有 8 条 SQL；
+  项目报表的服务行也不再算两遍。
+- 前端：总览与项目列表改走共享缓存（`web/src/store.ts`），同一时刻只发一个请求、几秒内复用，切路由不再
+  重复打最重的接口；写操作之后强制重拉。新增代码明细表和服务表超过一页就分页（50 行一页）并带筛选框 ——
+  一次大重构的 diff 有上千个文件时，el-table 整张渲染要好几秒还卡滚动。明细表的排序改为跨页排。
+- hub 对带 `Accept-Encoding: gzip` 的请求压缩返回体（JSON 是 indent=2 的，压完只剩十分之一；exec / class
+  这类二进制不压）。curl 默认不带这个头，`covhub-client.sh` 与 Jenkins 库 grep 返回体的地方不受影响。
+  nginx 模板也打开 gzip：前端产物里的 JS 有 1 MB。
+- `breaks` 计数不再截到 3（看板只用它判断有没有）。
+
+## v2.6.3（2026-10-08）
+
+- push 收集端：错过结算清零的实例（结算那一刻取数失败被丢弃的、更早掉线还没回来的）重连时，握手带回的是
+  上一周期（已归档）的累计数据，原来会写进新周期的 `exec/`，抬高新版本的数字、拉低指纹匹配率。现在按 JVM
+  会话起点记住这些实例，重连时把握手数据丢掉并清零，日志里说明。登记和落盘之间已被采集线程（带 `--reset`）
+  取过的连接，握手数据也不再写。
+- push 收集端：同一个 JVM 重连上来（idle 到点、网络抖动）时清掉它的旧连接记录，看板和混版本记录里不再把一个
+  JVM 数成两个；握手数据落盘失败只记日志不再踢掉连接（踢掉会让 covhub-agent 1 秒一次地重连并全量 dump）；
+  同秒同连接的两次落盘不再互相覆盖。
+- `serve --interval` 现在也让每次重读的配置看到：`agent-opts` 给 covhub-agent 算的 `idle` 原来只看配置文件里的
+  `watch.intervalSeconds`，和真正的轮询间隔对不上时 agent 会在两轮取数之间无谓地断开重连。
+- 单独的 `covhub watch` 进程、以及没配 `collect.port` 的进程里对 push 服务：轮询不再把 `online=False` 写进库
+  （实例握在收集端进程手上，这里探不到）；`dump` / `predeploy` 报「当前进程没有收集端，请走 serve --with-watch
+  那个进程的接口」而不是「服务已经停了、数据已丢失」。
+- `diagnose` 对 push 服务不再附「跨了 N 个进程会话，可能混了重启前后的数据」—— 多副本各一个会话是常态。
+- 令牌 Cookie 的 `SameSite` 由 Strict 改为 Lax：从 Jenkins 页面 / IM 点开 `…?token=` 的报告链接，hub 302 到干净
+  地址后那一跳是跨站导航，Strict 不带 Cookie 就落到 401。写接口都是 POST / PATCH / DELETE，Lax 照样不带。
+  静态目录的门禁不再对 `X-Covhub-Token` 头做 URL 解码（令牌含 `%xx` 时同一个头打 `/api/*` 能过、打报告路径
+  401）。
+- 看板：切换版本时保留 `?tab=`；没配 `version` 的服务，源码提示改为「服务没配 version」而不是「没传源码」；
+  断代提示条的 key 改用序号，同一秒两条记录不再撞 key。
+
+## v2.6.2（2026-10-08）
+
+- push 通道的混版本检测改为**按类名对 class id**。原来比的是两个实例 class id 集合的包含关系，但 exec 里
+  只有**执行过**的类（JaCoCo 只写有命中的条目），多副本各跑各的请求路径时集合天然互有对方没有的 id，
+  正常的负载均衡就被判成「混版本」，`breaks` 表里反复多出 mixed-versions 记录、看板一直亮「混版本」。
+  现在只有两边都执行过的同名类 id 不同才算换了版本。
+- push 收集端：sessionid 匹配不到任何服务的连接原来登记完就不管了，covhub-agent 到 idle 自己断开重连，
+  每次重连都在 hub 里多留一条永不释放的记录和 fd，没有上限。现在收集端守着这条连接读到对方断开再释放，
+  登记上服务后它下一次重连就会被认领。
+- push 取数的工作线程改用 `contextvars.copy_context().run` 起（CLAUDE.md 一直这么写，代码从没这么做），
+  实例掉线的日志能进 HTTP 返回体；`predeploy` / `dump` 有实例没应答时多打一行「N 个实例只有 M 个应答」，
+  结算时掉了副本在流水线日志里看得见。push 分支两处 `RuntimeError` 改为 `CovhubError`：探活通过后所有
+  实例恰好掉线时 `/api/dump`、`/api/predeploy` 是 409 而不是 500。
+- 版本串在进库前就过 `safe_segment`：`service add` / `update` 的 `version`（400）、`retarget`、`predeploy`
+  的 `version`（409，且在 `dump --reset` 之前）。原来 `release/1.4` 这种要到归档那一刻才报错 —— 自动断代
+  会每轮重复写 seal 快照、新 exec 永远进不了 `exec/`，predeploy 则是计数器已清零才停。`safe_segment` 同时
+  限长 100（与 `version` 列一致，MySQL 严格模式下超长原来是 500）。
+- `GET /api/services/{name}/compare`：一侧没有任何快照（刚登记的服务打开「历史对比」）原来 500，现在差值为 null。
+- `diagnose`：`classfiles` 指向不存在的路径时原来把它交给 `classinfo` 再拿到一个 500，现在 409 并说明
+  「还没 upload-classes / retarget？」。
+- HTTP 层补一个兜底异常处理器：只读接口的意外异常也返回 `{ok: false, error}` 的 JSON 500 并把 traceback
+  打到 stderr，不再是 Starlette 的纯文本。
+- 看板：push 服务的端点原来显示成「push · push · N 个实例」；详情页「数据来源」卡片改为显示**正在看的这一版**
+  的 diff（看历史归档时原来显示的是最近收到的那条）并标明是 hub 比对源码生成还是流水线上传，提示文案由
+  过时的 `covhub-client.sh diff` 改为 `upload-sources`；`?v=` 指向不存在的归档时不再弹两次同一句错误；
+  未分组页刷新项目列表失败时能弹出令牌框。
+- `Jenkinsfile.build` 把构建显示名设成 `REVISION`：`Jenkinsfile.deploy` 的 `copyArtifacts specific(NEW_VERSION)`
+  按构建号或显示名找，原来填版本号找不到构建。其注释里「两份 class 都有时优先用 classdumpdir」改为与
+  实际一致的「后传的覆盖先传的」。
+
+## v2.6.1（2026-10-08）
+
+- 修复：push 服务一有在线实例，看板详情页就 500。详情接口把收集端的连接记录原样放进返回体，
+  里面握着 socket 对象，JSON 序列化失败。`collector_instances()` 现在只给 peer / since / last 等
+  能序列化的字段，总览与 `status` 不受影响（它们只数个数）。2.6 之前 push 实例常年连不上才没暴露。
 - Windows 的 covhub-agent 构建脚本由 cmd 批处理 `agent\build.cmd` 换成 PowerShell `agent\build.ps1`
   （`powershell -ExecutionPolicy Bypass -File agent\build.ps1`；带 UTF-8 BOM，注释可以是中文）。两个脚本仍然等价。
 - 文档按当前实现逐项对账：README 的命令一览 / 接口表补齐漏掉的参数，ONBOARDING 里过时的返回体示例、

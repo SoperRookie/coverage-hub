@@ -269,6 +269,9 @@ def test_login_exchanges_token_for_cookie(hub):
     assert r.status_code == 200 and r.json() == {"ok": True, "tokenRequired": True}
     assert "covhub_token=secret" in r.headers["set-cookie"]
     assert "HttpOnly" in r.headers["set-cookie"]
+    # Lax 不是 Strict：跨站点开的 ?token= 报告链接 302 之后那一跳要带得上 Cookie；写接口都是
+    # POST / PATCH / DELETE，Lax 照样不带
+    assert "samesite=lax" in r.headers["set-cookie"].lower()
     # 拿到的 Cookie 对 /api/* 和报告目录都好使
     jar = {"covhub_token": "secret"}
     assert hub.get("/api/status", cookies=jar).status_code == 200
@@ -422,6 +425,36 @@ def test_overview_and_detail_shapes(hub):
     assert r.status_code == 200 and r.json()["latest"] is None
 
 
+def test_detail_with_online_push_instance_is_serializable(hub, monkeypatch):
+    """push 服务有在线实例时详情接口要能出 JSON。收集端的连接记录握着 socket，
+    曾被原样塞进返回体，详情页一打开就 500（2.6.0 部署后实测）。"""
+    import socket
+    from covhub import collector as col
+
+    hub.post("/api/services", headers=H, json={"name": "pushed", "channel": "push"})
+    pc = col.PushCollector(lambda: {})
+    sock = socket.socket()
+    pc.conns[7] = {"id": 7, "peer": "10.0.0.8:40001", "sessionid": "pushed", "service": "pushed",
+                   "since": "2026-10-08T10:00:00", "last": None, "sock": sock, "rfile": None,
+                   "wfile": None, "sessionStart": "2026-10-08T09:59:00", "classIds": {1, 2}}
+    monkeypatch.setattr(col, "_COLLECTOR", pc)
+    try:
+        r = hub.get("/api/services/pushed/detail", headers=H)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert d["online"] is True and d["instances"] == 1
+        assert d["runtime"]["instances"] == [{"id": 7, "peer": "10.0.0.8:40001", "sessionid": "pushed",
+                                              "since": "2026-10-08T10:00:00", "last": None,
+                                              "sessionStart": "2026-10-08T09:59:00"}]
+        r = hub.get("/api/status?service=pushed", headers=H)
+        assert r.status_code == 200
+        assert r.json()["services"][0]["instances"] == [{"peer": "10.0.0.8:40001",
+                                                         "since": "2026-10-08T10:00:00", "last": None}]
+        assert hub.get("/api/overview", headers=H).status_code == 200
+    finally:
+        sock.close()
+
+
 def test_detail_and_source_can_view_archived_version(hub, tmp_path):
     """历史版本：detail?version= 切到归档的数字与明细，source 用归档里存下的源码片段。"""
     from covhub.db import repo
@@ -482,6 +515,64 @@ def test_detail_and_source_can_view_archived_version(hub, tmp_path):
     assert [(l["nr"], l["status"]) for l in s["lines"]] == [(3, "context"), (4, "context"), (5, "covered"), (6, "context")]
     assert s["lines"][2]["text"] == "    static void tick() { }"
     assert s["reportUrl"].startswith("/svc/versions/2.0/html/")
+
+
+def test_compare_without_snapshots_is_200(hub):
+    """刚登记的服务打开「历史对比」：两侧都是 current 且没有任何快照，差值全是 null，不能 500。"""
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0"))
+    r = hub.get("/api/services/svc/compare?a=current&b=current", headers=H)
+    assert r.status_code == 200, r.text
+    c = r.json()
+    assert c["a"]["summary"] is None and c["delta"]["incremental"] is None and c["files"] == []
+
+
+def test_version_string_validated_before_it_becomes_a_directory(hub):
+    """版本串要当目录名：登记 / retarget / predeploy 三个入口都在进库和 dump --reset 之前拦住。"""
+    r = hub.post("/api/services", headers=H, json=dict(PULL, version="release/1.4"))
+    assert r.status_code == 400 and "目录名" in r.json()["error"]
+    r = hub.post("/api/services", headers=H, json=dict(PULL, version="v" * 101))
+    assert r.status_code == 400 and "太长" in r.json()["error"]
+    hub.post("/api/services", headers=H, json=dict(PULL, version="1.4"))
+    r = hub.post("/api/retarget?service=svc&version=release/1.5", headers=H)
+    assert r.status_code == 409 and "目录名" in r.text
+    assert hub.get("/api/services/svc", headers=H).json()["service"]["version"] == "1.4"
+    r = hub.post("/api/predeploy?service=svc&version=release/1.5", headers=H)
+    assert r.status_code == 409 and "目录名" in r.text
+
+
+def test_percent_in_token_accepted_by_both_gates(tmp_path, monkeypatch, db_url_for_app):
+    """令牌里含 %xx 时，同一个头打 /api/* 和报告路径都要能过：只有 Cookie 写入时 quote 过，
+    头和 query 是原文，静态门禁原来对头也 unquote 了一次。"""
+    data = tmp_path / "data" / "svc" / "current"
+    data.mkdir(parents=True)
+    (data / "jacoco.xml").write_text("<report/>", encoding="utf-8")
+    cfg = {"jacocoAgent": os.path.join(ROOT, "lib", "jacocoagent.jar"),
+           "jacocoCli": os.path.join(ROOT, "lib", "jacococli.jar"),
+           "dataDir": str(tmp_path / "data"), "database": {"url": db_url_for_app},
+           "serve": {"token": "p%41ss"}}
+    cfg_path = tmp_path / "covhub.json"
+    cfg_path.write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.delenv("COVHUB_TOKEN", raising=False)
+    monkeypatch.delenv("COVHUB_DATABASE_URL", raising=False)
+    with TestClient(create_app(str(cfg_path)), base_url="http://hub") as client:
+        hdr = {"X-Covhub-Token": "p%41ss"}
+        client.post("/api/services", headers=hdr, json=PULL)
+        assert client.get("/api/status", headers=hdr).status_code == 200
+        assert client.get("/svc/current/jacoco.xml", headers=hdr).status_code == 200
+        assert client.get("/svc/current/jacoco.xml", headers={"X-Covhub-Token": "pAss"}).status_code == 401
+        r = client.post("/api/login", headers=hdr)
+        jar = {"covhub_token": r.headers["set-cookie"].split(";")[0].split("=", 1)[1]}
+        assert client.get("/svc/current/jacoco.xml", cookies=jar).status_code == 200
+
+
+def test_push_dump_in_process_without_collector_is_409(hub):
+    """直接跑 CLI / 没配 collect.port 的进程里对 push 服务 dump / predeploy：数据没丢，只是不在
+    这个进程里 —— 要说清楚，不能报「服务已经停了、数据已丢失」。"""
+    hub.post("/api/services", headers=H, json={"name": "pushed", "channel": "push"})
+    r = hub.post("/api/dump?service=pushed", headers=H)
+    assert r.status_code == 409 and "没有收集端" in r.text
+    r = hub.post("/api/predeploy?service=pushed&version=1&allowMissing=1", headers=H)
+    assert r.status_code == 409 and "没有收集端" in r.text
 
 
 def test_compare_versions(hub, tmp_path):
@@ -550,6 +641,21 @@ def test_project_report(hub, tmp_path):
     assert [v["version"] for v in hub.get("/api/projects/shop/report?days=3650", headers=H).json()["services"][0]["versions"]] == ["1.9"]
     assert hub.get("/api/projects/nosuch/report", headers=H).status_code == 404
     assert hub.get("/api/projects/__unassigned/report", headers=H).json()["services"] == []
+
+    # 按日期区间：两端都含、按本地日历日切；给了日期就不看 days
+    def vers(q):
+        r = hub.get("/api/projects/shop/report?%s" % q, headers=H)
+        assert r.status_code == 200, r.text
+        return r.json(), [v["version"] for v in r.json()["services"][0]["versions"]]
+    rep, vs = vers("from=2026-09-13&to=2026-09-13")
+    assert vs == ["1.9"] and rep["from"] == rep["to"] == "2026-09-13"
+    assert rep["since"] == "2026-09-13T00:00:00" and rep["until"] == "2026-09-14T00:00:00"
+    assert vers("from=2026-09-14&to=2026-09-30")[1] == []
+    assert vers("from=2000-01-01&to=2026-09-13&days=0")[1] == ["0.1", "1.9"]
+    assert vers("to=2026-09-13")[1] == ["1.9"]                         # 只给一端：就看那一天
+    assert vers("days=0")[0]["from"] is None
+    assert hub.get("/api/projects/shop/report?from=2026-09-14&to=2026-09-13", headers=H).status_code == 409
+    assert hub.get("/api/projects/shop/report?from=x", headers=H).status_code == 409
 
 
 # ---- hub 比对两版源码生成 diff ----
@@ -630,3 +736,97 @@ def test_auto_diff_base_falls_back_to_last_uploaded_sources(hub):
     assert r.status_code == 200 and r.json()["diff"]["base"] == "1.0"
     r = hub.post("/api/diff?service=svc&version=1.1&from=sources", headers=H)
     assert r.json()["baseReason"] == "最近上传过源码的版本"
+
+
+def test_overview_query_count_does_not_grow_with_services(hub):
+    """总览原来每个服务查 6 个会话 18 条 SQL，几十个服务首页就要几秒。现在按表各一条批量取，
+    SQL 条数不随服务数增长。"""
+    from sqlalchemy import event
+    from covhub.db import engine
+
+    hub.post("/api/projects", headers=H, json={"name": "shop"})
+    for i in range(12):
+        hub.post("/api/services", headers=H,
+                 json={"name": "s%d" % i, "address": "127.0.0.1", "port": 60000 + i, "project": "shop"})
+    hub.post("/api/diff?service=s0&version=2.0&base=v1", headers=H, content=DIFF.encode())
+    hub.post("/api/unit-coverage?service=s0&version=2.0", headers=H, content=XML.encode())
+
+    count = {"n": 0}
+
+    def _tick(*_a, **_k):
+        count["n"] += 1
+    eng = engine.get_engine()
+    event.listen(eng, "before_cursor_execute", _tick)
+    try:
+        r = hub.get("/api/overview", headers=H)
+    finally:
+        event.remove(eng, "before_cursor_execute", _tick)
+    assert r.status_code == 200
+    rows = r.json()["projects"][0]["services"]
+    assert len(rows) == 12 and rows[0]["unit"]["incremental"]["pct"] == 100.0 and rows[0]["diff"]["base"] == "v1"
+    assert rows[1]["unit"] is None and rows[1]["diff"] is None
+    # 配置 + 项目 + 批量的 6 条，留点余量；原来 12 个服务是 200 多条
+    assert count["n"] <= 20, count["n"]
+
+
+def test_json_is_gzipped_only_when_asked(hub):
+    """看板带 Accept-Encoding: gzip 时返回体压缩；curl 默认不带，covhub-client.sh 和 Jenkins 库
+    grep '"online": true' 的那几处拿到的仍是 indent=2 的明文。"""
+    hub.post("/api/projects", headers=H, json={"name": "shop"})
+    for i in range(8):
+        hub.post("/api/services", headers=H, json={"name": "s%d" % i, "channel": "push", "project": "shop"})
+    plain = hub.get("/api/overview", headers={**H, "Accept-Encoding": "identity"})
+    assert plain.status_code == 200 and "content-encoding" not in plain.headers
+    assert '"online": ' in plain.text                       # indent=2、冒号后带空格
+    zipped = hub.get("/api/overview", headers={**H, "Accept-Encoding": "gzip"})
+    assert zipped.status_code == 200 and zipped.headers.get("content-encoding") == "gzip"
+    assert zipped.json() == plain.json()                    # httpx 自动解压
+    assert int(zipped.headers["content-length"]) < len(plain.content) // 3
+
+
+def test_trend_by_day_and_range(hub):
+    """趋势接口按本地日历日切区间（两端都含），不给日期是今天；点多了均匀抽稀但首尾保留。"""
+    from datetime import date, datetime, timedelta
+    from covhub.db import repo
+    from covhub import views
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0"))
+    today = date.today()
+    def snap(at, inst):
+        repo.add_snapshot("svc", {"at": at.isoformat(timespec="seconds"), "kind": "watch", "version": "2.0",
+                                  "instruction": inst, "branch": 0.0, "covered": 1, "total": 3,
+                                  "classesHit": 1, "classesTotal": 1})
+    snap(datetime.combine(today - timedelta(days=2), datetime.min.time()) + timedelta(hours=23, minutes=59), 10.0)
+    snap(datetime.combine(today - timedelta(days=1), datetime.min.time()), 20.0)        # 昨天 00:00:00 归昨天
+    snap(datetime.combine(today, datetime.min.time()) + timedelta(hours=9), 30.0)
+    snap(datetime.combine(today, datetime.min.time()) + timedelta(hours=10), 40.0)
+
+    r = hub.get("/api/services/svc/trend", headers=H)
+    assert r.status_code == 200, r.text
+    t = r.json()
+    assert t["from"] == t["to"] == today.isoformat() and t["count"] == 2 and t["sampled"] is False
+    assert [p["instruction"] for p in t["points"]] == [30.0, 40.0] and t["points"][0]["kind"] == "watch"
+
+    r = hub.get("/api/services/svc/trend?from=%s&to=%s" % ((today - timedelta(days=1)).isoformat(), today.isoformat()), headers=H)
+    assert [p["instruction"] for p in r.json()["points"]] == [20.0, 30.0, 40.0]
+    r = hub.get("/api/services/svc/trend?from=%s" % (today - timedelta(days=2)).isoformat(), headers=H)
+    assert [p["instruction"] for p in r.json()["points"]] == [10.0]         # 只给 from：就看那一天
+
+    assert hub.get("/api/services/svc/trend?from=2026-13-01", headers=H).status_code == 409
+    assert hub.get("/api/services/svc/trend?from=2026-01-02&to=2026-01-01", headers=H).status_code == 409
+    assert hub.get("/api/services/svc/trend?from=2020-01-01&to=2026-01-01", headers=H).status_code == 409
+    assert hub.get("/api/services/nosuch/trend", headers=H).status_code == 404
+
+    # 抽稀：造 3 倍上限的点，返回正好上限个且首尾是原来的首尾
+    monkey = views.TREND_MAX_POINTS
+    views.TREND_MAX_POINTS = 10
+    try:
+        base = datetime.combine(today - timedelta(days=10), datetime.min.time())
+        for i in range(30):
+            snap(base + timedelta(minutes=i), float(i))
+        day = (today - timedelta(days=10)).isoformat()
+        r = hub.get("/api/services/svc/trend?from=%s&to=%s" % (day, day), headers=H)
+        t = r.json()
+        assert t["count"] == 30 and t["sampled"] is True and len(t["points"]) == 10
+        assert t["points"][0]["instruction"] == 0.0 and t["points"][-1]["instruction"] == 29.0
+    finally:
+        views.TREND_MAX_POINTS = monkey

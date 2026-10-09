@@ -18,7 +18,7 @@ export default defineConfig({
   build: {
     emptyOutDir: true,
     sourcemap: false,
-    chunkSizeWarningLimit: 1200,   // Element Plus + ECharts 一个包 ~300 KB gz，内网可接受
+    chunkSizeWarningLimit: 1300,   // Element Plus（含日期选择器）+ ECharts 一个包 ~400 KB gz，内网可接受
   },
   server: {
     port: 5173,

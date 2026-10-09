@@ -8,7 +8,7 @@
 import os
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from ..errors import CovhubError, ServiceNotFound
@@ -263,6 +263,19 @@ def history(name, limit=40):
         return [_snapshot_dict(r) for r in reversed(rows)]
 
 
+def history_between(name, start, end):
+    """[start, end) 时间段内的全部快照，按时间正序（看板趋势图按天 / 按区间看用）。
+
+    走 (service_id, at) 的索引按时间取，不按 id：导入的旧数据 id 顺序和时间顺序未必一致。
+    不在这里截条数 —— 一天 5 分钟一轮也就 288 条，区间长了由 views 那边均匀抽稀。"""
+    with session_scope() as s:
+        sid = _get(s, name).id
+        rows = s.scalars(select(Snapshot)
+                         .where(Snapshot.service_id == sid, Snapshot.at >= start, Snapshot.at < end)
+                         .order_by(Snapshot.at, Snapshot.id)).all()
+        return [_snapshot_dict(r) for r in rows]
+
+
 def versions(name, limit=10, sealed_by="predeploy"):
     """已结算的版本，按结算时间正序。sealed_by=None 则连重启封存的也列出来。"""
     with session_scope() as s:
@@ -301,8 +314,8 @@ def archive_by_dir(name, archive_dir):
         return d
 
 
-def versions_since(name, since=None, sealed_by="predeploy"):
-    """时间范围内的已结算版本（正序），报表用。since 是 datetime 或 None（不限）。"""
+def versions_since(name, since=None, sealed_by="predeploy", until=None):
+    """时间范围 [since, until) 内的已结算版本（正序），报表用。两端都是 datetime 或 None（不限）。"""
     with session_scope() as s:
         sid = _get(s, name).id
         q = (select(Archive, Snapshot).join(Snapshot, Archive.snapshot_id == Snapshot.id)
@@ -311,6 +324,8 @@ def versions_since(name, since=None, sealed_by="predeploy"):
             q = q.where(Archive.sealed_by == sealed_by)
         if since is not None:
             q = q.where(Archive.sealed_at >= since)
+        if until is not None:
+            q = q.where(Archive.sealed_at < until)
         out = []
         # 按结算时刻排，不按入库顺序：导入的旧归档 id 可能比新的大
         for archive, snap in s.execute(q.order_by(Archive.sealed_at, Archive.id)).all():
@@ -329,6 +344,57 @@ def breaks(name, limit=50):
         rows = s.scalars(select(Break).where(Break.service_id == sid)
                          .order_by(Break.id.desc()).limit(limit)).all()
         return [_break_dict(r) for r in reversed(rows)]
+
+
+def blank_overview():
+    """overview_data() 里一个服务什么都还没有时的形态。"""
+    return {"latest": None, "unit": None, "diff": None, "online": None, "onlineAt": None,
+            "sessionStart": None, "pushMixed": False, "breaks": 0}
+
+
+def overview_data(names=None):
+    """看板总览一次性要的东西，按服务名给：最新快照 / 运行态 / 最新单测 / 最新 diff / 断代数。
+
+    原来每个服务查 6 个会话 18 条 SQL（每条都带一次 _get），几十个服务就是上千次往返 ——
+    MySQL 在另一台机器上时总览页要好几秒，而且侧栏和页面各打一次。这里按表各一条
+    「每个服务取 max(id)」的查询，服务数再多也只有 6 条 SQL、一个会话。
+    names 为 None 时给全部服务；不在库里的名字不出现在结果里。
+    """
+    with session_scope() as s:
+        q = select(Service.id, Service.name)
+        if names is not None:
+            if not names:
+                return {}
+            q = q.where(Service.name.in_(list(names)))
+        ids = {sid: name for sid, name in s.execute(q).all()}
+        if not ids:
+            return {}
+        out = {name: blank_overview() for name in ids.values()}
+        sids = list(ids)
+
+        def newest(model):
+            # 「每组最新一条」用 max(id) 子查询回连，MySQL / PostgreSQL / SQLite 都认；
+            # 窗口函数 SQLite 旧版没有，DISTINCT ON 只有 PostgreSQL 有
+            sub = (select(model.service_id.label("sid"), func.max(model.id).label("mid"))
+                   .where(model.service_id.in_(sids)).group_by(model.service_id).subquery())
+            return s.scalars(select(model).join(sub, model.id == sub.c.mid)).all()
+
+        for row in newest(Snapshot):
+            out[ids[row.service_id]]["latest"] = _snapshot_dict(row)
+        for row in newest(UnitReport):
+            out[ids[row.service_id]]["unit"] = _unit_dict(row)
+        for row in newest(Diff):
+            out[ids[row.service_id]]["diff"] = _diff_dict(row)
+        for st in s.scalars(select(ServiceState).where(ServiceState.service_id.in_(sids))).all():
+            d = out[ids[st.service_id]]
+            d["sessionStart"], d["pushMixed"] = st.session_start, bool(st.push_mixed)
+            if st.online is not None:
+                d["online"], d["onlineAt"] = bool(st.online), _iso(st.online_at)
+        counts = s.execute(select(Break.service_id, func.count()).where(Break.service_id.in_(sids))
+                           .group_by(Break.service_id)).all()
+        for sid, n in counts:
+            out[ids[sid]]["breaks"] = int(n)
+        return out
 
 
 def get_state(name):
@@ -528,12 +594,15 @@ def latest_unit_report(name):
         return _unit_dict(row) if row else None
 
 
-def unit_reports_since(name, since=None):
+def unit_reports_since(name, since=None, until=None):
+    """[since, until) 内收到的单测报告（正序），报表用。"""
     with session_scope() as s:
         sid = _get(s, name).id
         q = select(UnitReport).where(UnitReport.service_id == sid)
         if since is not None:
             q = q.where(UnitReport.at >= since)
+        if until is not None:
+            q = q.where(UnitReport.at < until)
         return [_unit_dict(r) for r in s.scalars(q.order_by(UnitReport.at, UnitReport.id)).all()]
 
 

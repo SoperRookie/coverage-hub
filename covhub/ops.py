@@ -19,7 +19,7 @@ from .db import importer, repo
 from .diagnose import diagnose as _diagnose
 from .errors import CovhubError
 from .jacoco import make_report
-from .layout import ensure_dirs
+from .layout import ensure_dirs, safe_segment
 from .logbuf import log
 from .schemas import ProjectPatch, ProjectSpec, ServicePatch, ServiceSpec
 from .sources import store_sources
@@ -57,9 +57,18 @@ def status(cfg, name=None):
     return [service_status(cfg, find_service(cfg, n)) for n in names]
 
 
+def _need_collector(svc):
+    """push 服务的长连接握在收集端进程手上：直接跑 CLI 时这里没有收集端，报「不可达 /
+    数据已丢失」是误导 —— 数据好好的，只是得走 serve --with-watch 那个进程的 HTTP 接口。"""
+    if service_channel(svc) == "push" and get_collector() is None:
+        raise CovhubError("%s 是 push 服务，当前进程没有收集端：请走 serve --with-watch 那个进程的"
+                          "接口（covhub-client.sh / Jenkins 库，或 POST /api/...）" % svc["name"])
+
+
 def dump(cfg, name):
     """拉一次快照并出报告（累加，不清零）。"""
     svc = find_service(cfg, name)
+    _need_collector(svc)
     if not reachable(svc):
         if service_channel(svc) == "push":
             raise CovhubError("%s 当前没有实例连上来 —— 确认被测端挂的是 agent-opts 给的参数串 "
@@ -80,6 +89,9 @@ def predeploy(cfg, name, version=None, allow_missing=False):
     """
     svc = find_service(cfg, name)
     version = version or svc.get("version") or datetime.now().strftime("%Y%m%d-%H%M%S")
+    # 先于 dump --reset 校验：归档那一步才发现版本串当不了目录名的话，计数器已经清零了
+    version = safe_segment(version)
+    _need_collector(svc)        # 不受 allow_missing 影响：数据没丢，只是不在这个进程里
 
     if not reachable(svc):
         msg = "取不到 %s（%s）的数据，无法结算版本 %s" % (
@@ -128,7 +140,7 @@ def retarget(cfg, name, version=None, classfiles=None, sourcefiles=None):
     find_service(cfg, name)
     fields = {}
     if version:
-        fields["version"] = str(version)
+        fields["version"] = safe_segment(str(version))
     if classfiles:
         fields["classfiles"] = list(classfiles)
     if sourcefiles:
