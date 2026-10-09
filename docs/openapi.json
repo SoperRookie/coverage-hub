@@ -3,7 +3,7 @@
   "info": {
     "title": "covhub 控制 API",
     "description": "JaCoCo 运行期覆盖率的采集与看板。整套方案只有 hub 这一个服务端，被测机器和发版节点不装 Python、不装 java、不放配置文件，全部通过这些接口驱动 hub 干活 —— 它们只需要 curl。\n\n**写接口在 hub 内部串行执行**，返回体里带着这次执行的日志。**非 2xx 一律表示失败**，调用方应据此让部署流程停下来。\n\n发版节点上更省事的做法是用 integration/covhub-client.sh 包一层。",
-    "version": "2.6.4"
+    "version": "2.6.5"
   },
   "paths": {
     "/api/health": {
@@ -3139,6 +3139,124 @@
         }
       }
     },
+    "/api/services/{name}/trend": {
+      "get": {
+        "tags": [
+          "看板"
+        ],
+        "summary": "服务的采集趋势：某天或某个日期区间内的快照",
+        "description": "按 hub 本地日历日切区间，两端都含；一次最多 1500 个点，更多时均匀抽稀（首尾保留）并置 sampled。\n每个点是 detail 里 history 的同形态（总覆盖 / 新增覆盖 / 版本 / kind）。",
+        "operationId": "trend_api_services__name__trend_get",
+        "security": [
+          {
+            "tokenHeader": []
+          },
+          {
+            "tokenQuery": []
+          },
+          {
+            "tokenCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Name"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日 YYYY-MM-DD（含）；不给是今天",
+              "title": "From"
+            },
+            "description": "起始日 YYYY-MM-DD（含）；不给是今天"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "结束日 YYYY-MM-DD（含）；不给与 from 同一天",
+              "title": "To"
+            },
+            "description": "结束日 YYYY-MM-DD（含）；不给与 from 同一天"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "401": {
+            "description": "令牌无效或缺失",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "日期不合法、to 早于 from、或区间超过一年",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/services/{name}/compare": {
       "get": {
         "tags": [
@@ -4004,7 +4122,7 @@
             "title": "Version",
             "description": "hub 版本",
             "examples": [
-              "2.6.4"
+              "2.6.5"
             ]
           },
           "services": {

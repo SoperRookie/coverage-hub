@@ -767,3 +767,51 @@ def test_json_is_gzipped_only_when_asked(hub):
     assert zipped.status_code == 200 and zipped.headers.get("content-encoding") == "gzip"
     assert zipped.json() == plain.json()                    # httpx 自动解压
     assert int(zipped.headers["content-length"]) < len(plain.content) // 3
+
+
+def test_trend_by_day_and_range(hub):
+    """趋势接口按本地日历日切区间（两端都含），不给日期是今天；点多了均匀抽稀但首尾保留。"""
+    from datetime import date, datetime, timedelta
+    from covhub.db import repo
+    from covhub import views
+    hub.post("/api/services", headers=H, json=dict(PULL, version="2.0"))
+    today = date.today()
+    def snap(at, inst):
+        repo.add_snapshot("svc", {"at": at.isoformat(timespec="seconds"), "kind": "watch", "version": "2.0",
+                                  "instruction": inst, "branch": 0.0, "covered": 1, "total": 3,
+                                  "classesHit": 1, "classesTotal": 1})
+    snap(datetime.combine(today - timedelta(days=2), datetime.min.time()) + timedelta(hours=23, minutes=59), 10.0)
+    snap(datetime.combine(today - timedelta(days=1), datetime.min.time()), 20.0)        # 昨天 00:00:00 归昨天
+    snap(datetime.combine(today, datetime.min.time()) + timedelta(hours=9), 30.0)
+    snap(datetime.combine(today, datetime.min.time()) + timedelta(hours=10), 40.0)
+
+    r = hub.get("/api/services/svc/trend", headers=H)
+    assert r.status_code == 200, r.text
+    t = r.json()
+    assert t["from"] == t["to"] == today.isoformat() and t["count"] == 2 and t["sampled"] is False
+    assert [p["instruction"] for p in t["points"]] == [30.0, 40.0] and t["points"][0]["kind"] == "watch"
+
+    r = hub.get("/api/services/svc/trend?from=%s&to=%s" % ((today - timedelta(days=1)).isoformat(), today.isoformat()), headers=H)
+    assert [p["instruction"] for p in r.json()["points"]] == [20.0, 30.0, 40.0]
+    r = hub.get("/api/services/svc/trend?from=%s" % (today - timedelta(days=2)).isoformat(), headers=H)
+    assert [p["instruction"] for p in r.json()["points"]] == [10.0]         # 只给 from：就看那一天
+
+    assert hub.get("/api/services/svc/trend?from=2026-13-01", headers=H).status_code == 409
+    assert hub.get("/api/services/svc/trend?from=2026-01-02&to=2026-01-01", headers=H).status_code == 409
+    assert hub.get("/api/services/svc/trend?from=2020-01-01&to=2026-01-01", headers=H).status_code == 409
+    assert hub.get("/api/services/nosuch/trend", headers=H).status_code == 404
+
+    # 抽稀：造 3 倍上限的点，返回正好上限个且首尾是原来的首尾
+    monkey = views.TREND_MAX_POINTS
+    views.TREND_MAX_POINTS = 10
+    try:
+        base = datetime.combine(today - timedelta(days=10), datetime.min.time())
+        for i in range(30):
+            snap(base + timedelta(minutes=i), float(i))
+        day = (today - timedelta(days=10)).isoformat()
+        r = hub.get("/api/services/svc/trend?from=%s&to=%s" % (day, day), headers=H)
+        t = r.json()
+        assert t["count"] == 30 and t["sampled"] is True and len(t["points"]) == 10
+        assert t["points"][0]["instruction"] == 0.0 and t["points"][-1]["instruction"] == 29.0
+    finally:
+        views.TREND_MAX_POINTS = monkey

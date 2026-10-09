@@ -215,6 +215,16 @@ export interface Detail extends StatusFields {
   };
 }
 
+/** /api/services/{name}/trend：某天或某个日期区间内的快照 */
+export interface Trend {
+  from: string;
+  to: string;
+  /** 区间内的快照总数；点多了服务端会均匀抽稀，points 少于它时 sampled 为 true */
+  count: number;
+  sampled: boolean;
+  points: Brief[];
+}
+
 export interface Project {
   id: number;
   name: string;
@@ -309,6 +319,9 @@ export const api = {
     command(`/api/predeploy?service=${enc(name)}${version ? `&version=${enc(version)}` : ""}`),
   /** 手动触发：用已有 exec 重出报告 */
   report: (name: string) => command(`/api/report?service=${enc(name)}`),
+  /** 趋势图：from / to 是 YYYY-MM-DD（含两端），都不给是今天 */
+  trend: (name: string, from: string, to: string) =>
+    request<Trend>(`/api/services/${enc(name)}/trend?from=${enc(from)}&to=${enc(to)}`),
   compare: (name: string, a: string, b: string) =>
     request<Compare>(`/api/services/${enc(name)}/compare?a=${enc(a)}&b=${enc(b)}`),
   projectReport: (name: string, days: number) => request<ProjectReport>(`/api/projects/${enc(name)}/report?days=${days}`),

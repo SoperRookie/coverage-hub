@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import "element-plus/es/components/message/style/css";
 import "element-plus/es/components/message-box/style/css";
-import { ApiError, api, type Brief, type CommandResult, type Detail } from "../api";
+import { ApiError, api, type Brief, type CommandResult, type Detail, type Trend } from "../api";
 import type { Nav } from "../App.vue";
 import CompareView from "../components/CompareView.vue";
 import CovCell from "../components/CovCell.vue";
@@ -36,8 +36,47 @@ const viewingHistory = computed(() => !!d.value?.viewingVersion);
 // 没配 version 的服务按版本找不到源码：提示要说「去配 version」，而不是「传了也没用」
 const noVersion = computed(() => !!d.value && !viewingHistory.value && !d.value.version);
 
+// ---- 运行时趋势：按天 / 按日期区间看，默认今天 ----
+// 趋势不再跟着 detail 一起下发「最近 40 次」：5 分钟一轮的话 40 次只有三个多小时，
+// 既看不出一天的走势，也没法回看某一天。区间选好后单独打 /trend，和 detail 互不拖累。
+function localDay(dt: Date): string {
+  // 不用 toISOString()：那是 UTC 日期，晚上八点以后会跳到明天
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
+}
+function daysAgo(n: number): string { const dt = new Date(); dt.setDate(dt.getDate() - n); return localDay(dt); }
+const range = ref<[string, string]>([localDay(new Date()), localDay(new Date())]);
+const RANGE_SHORTCUTS = [
+  { text: "今天", value: () => [daysAgo(0), daysAgo(0)] },
+  { text: "昨天", value: () => [daysAgo(1), daysAgo(1)] },
+  { text: "最近 7 天", value: () => [daysAgo(6), daysAgo(0)] },
+  { text: "最近 30 天", value: () => [daysAgo(29), daysAgo(0)] },
+];
+const noFuture = (dt: Date) => dt.getTime() > Date.now();
+const trend = ref<Trend | null>(null);
+const trendLoading = ref(false);
+async function loadTrend() {
+  trendLoading.value = true;
+  try {
+    trend.value = await api.trend(props.name, range.value[0], range.value[1]);
+  } catch (err) {
+    props.onError(err);
+  } finally {
+    trendLoading.value = false;
+  }
+}
+watch(range, loadTrend);
+const trendHint = computed(() => {
+  const t = trend.value;
+  if (!t) return "";
+  const span = t.from === t.to ? t.from : `${t.from} ～ ${t.to}`;
+  return `${span} · ${t.count} 次采集${t.sampled ? `（抽稀为 ${t.points.length} 点）` : ""}`;
+});
+
 async function load() {
   loading.value = true;
+  // 趋势和详情并行拉；详情页的手动操作（采集 / 结算）之后也顺带刷新趋势
+  void loadTrend();
   try {
     d.value = await api.detail(props.name, version.value);
     nav.project = d.value.project ?? "__unassigned";
@@ -222,14 +261,18 @@ const crumbs = computed(() => [
     <template v-if="tab === 'overview' || printAll">
       <div class="card">
         <div class="card-head">
-          <h2>运行时趋势</h2><span class="hint">最近 {{ d.runtime.history.length }} 次采集</span>
+          <h2>运行时趋势</h2><span class="hint">{{ trendHint }}</span>
           <span class="spacer"></span>
           <span class="legend"><i :style="{ background: SERIES.total }"></i>总覆盖</span>
           <span class="legend"><i class="dash" :style="{ background: `repeating-linear-gradient(90deg, ${SERIES.inc} 0 3px, transparent 3px 5px)` }"></i>新增代码</span>
+          <el-date-picker v-model="range" type="daterange" size="small" class="no-print" unlink-panels :clearable="false"
+                          value-format="YYYY-MM-DD" range-separator="～" start-placeholder="开始日期" end-placeholder="结束日期"
+                          :shortcuts="RANGE_SHORTCUTS" :disabled-date="noFuture" style="width: 240px" />
         </div>
         <div class="card-body">
-          <TrendChart v-if="d.runtime.history.length" :history="d.runtime.history" />
-          <div v-else class="empty">还没有采集记录</div>
+          <TrendChart v-if="trend && trend.points.length" :history="trend.points" :from="trend.from" :to="trend.to" />
+          <div v-else-if="trend" class="empty">{{ trend.from === trend.to ? "这一天" : "这段时间" }}没有采集记录</div>
+          <div v-else class="empty">加载中…</div>
         </div>
       </div>
       <div class="card">

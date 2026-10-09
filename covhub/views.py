@@ -6,7 +6,7 @@ ISO 串、不带时区，浏览器自己减会差出时区来。
 """
 
 import os
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from . import build
 from .agent import endpoint_label, service_channel
@@ -203,6 +203,55 @@ def service_detail(cfg, name, version=None):
             "incremental": _files_view(unit_inc),
             "xmlUrl": ("%s/%s" % (base, unit["xmlPath"])) if unit else None,
         },
+    }
+
+
+# 趋势图一次最多给这么多点：再多屏幕上也画不开，浏览器端排序 / tooltip 反而卡
+TREND_MAX_POINTS = 1500
+# 区间上限一年：按天的索引扫一年也就十万行，再长没有看的意义，也防止一个请求把库拖住
+TREND_MAX_DAYS = 366
+
+
+def _parse_day(value, what):
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError):
+        raise CovhubError("%s 要是 YYYY-MM-DD 的日期：%r" % (what, value))
+
+
+def trend(cfg, name, start=None, end=None):
+    """某服务在 [start, end] 这些天里的采集轨迹（两端都含，按本地日历日）。
+
+    都不给是今天；只给一端另一端取同一天。快照的时刻是本地时间、不带时区（见模块说明），
+    所以日界也按 hub 的本地日历切，和看板上显示的时刻一致。点多了均匀抽稀但**首尾两点保留**，
+    返回体里 sampled 标出来 —— 画出来的线是轮廓，不是每次采集。"""
+    find_service(cfg, name)
+    today = date.today()
+    s = _parse_day(start, "from") if start else None
+    e = _parse_day(end, "to") if end else None
+    if s is None and e is None:
+        s = e = today
+    elif s is None:
+        s = e
+    elif e is None:
+        e = s
+    if e < s:
+        raise CovhubError("to 不能早于 from")
+    if (e - s).days >= TREND_MAX_DAYS:
+        raise CovhubError("区间最长 %d 天" % TREND_MAX_DAYS)
+    lo = datetime.combine(s, datetime.min.time())
+    hi = datetime.combine(e + timedelta(days=1), datetime.min.time())
+    rows = repo.history_between(name, lo, hi)
+    total = len(rows)
+    sampled = total > TREND_MAX_POINTS
+    if sampled:
+        step = total / float(TREND_MAX_POINTS - 1)
+        picked = [rows[int(i * step)] for i in range(TREND_MAX_POINTS - 1)] + [rows[-1]]
+        rows = picked
+    return {
+        "from": s.isoformat(), "to": e.isoformat(),
+        "count": total, "sampled": sampled,
+        "points": [_brief(h) | {"kind": h["kind"]} for h in rows],
     }
 
 

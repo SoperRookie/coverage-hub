@@ -263,6 +263,19 @@ def history(name, limit=40):
         return [_snapshot_dict(r) for r in reversed(rows)]
 
 
+def history_between(name, start, end):
+    """[start, end) 时间段内的全部快照，按时间正序（看板趋势图按天 / 按区间看用）。
+
+    走 (service_id, at) 的索引按时间取，不按 id：导入的旧数据 id 顺序和时间顺序未必一致。
+    不在这里截条数 —— 一天 5 分钟一轮也就 288 条，区间长了由 views 那边均匀抽稀。"""
+    with session_scope() as s:
+        sid = _get(s, name).id
+        rows = s.scalars(select(Snapshot)
+                         .where(Snapshot.service_id == sid, Snapshot.at >= start, Snapshot.at < end)
+                         .order_by(Snapshot.at, Snapshot.id)).all()
+        return [_snapshot_dict(r) for r in rows]
+
+
 def versions(name, limit=10, sealed_by="predeploy"):
     """已结算的版本，按结算时间正序。sealed_by=None 则连重启封存的也列出来。"""
     with session_scope() as s:

@@ -4,6 +4,8 @@ import { useRoute, useRouter } from "vue-router";
 import { ApiError, api, login, type Project } from "./api";
 import { loadSnapshot } from "./store";
 import { theme } from "./ui/theme";
+// Element Plus 自带组件的文案（日期选择器的月份 / 星期、分页的「共 N 条」）默认是英文
+import zhCn from "element-plus/es/locale/lang/zh-cn";
 
 // 壳：左侧栏（品牌、项目选择、导航）+ 内容区。层级是项目 → 服务，所以项目选择固定在侧栏。
 const route = useRoute();
@@ -73,6 +75,7 @@ function onError(err: unknown): boolean {
 </script>
 
 <template>
+  <el-config-provider :locale="zhCn">
   <div class="shell">
     <aside class="sidebar">
       <router-link class="brand" to="/">
@@ -137,4 +140,5 @@ function onError(err: unknown): boolean {
   </el-dialog>
 
   <el-alert v-if="message" :title="message" type="error" show-icon closable style="position: fixed; right: 20px; bottom: 20px; width: 420px; z-index: 20" @close="message = ''" />
+  </el-config-provider>
 </template>

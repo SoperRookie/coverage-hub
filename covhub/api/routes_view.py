@@ -30,6 +30,17 @@ def service_detail(name: str,
     return PrettyJSONResponse({"ok": True, **views.service_detail(cfg, name, version)})
 
 
+@router.get("/api/services/{name}/trend", summary="服务的采集趋势：某天或某个日期区间内的快照",
+            responses={**ERR, 409: {"model": schemas.Error, "description": "日期不合法、to 早于 from、或区间超过一年"}})
+def trend(name: str,
+          start: str | None = Query(None, alias="from", description="起始日 YYYY-MM-DD（含）；不给是今天"),
+          end: str | None = Query(None, alias="to", description="结束日 YYYY-MM-DD（含）；不给与 from 同一天"),
+          cfg: dict = Depends(get_cfg)):
+    """按 hub 本地日历日切区间，两端都含；一次最多 1500 个点，更多时均匀抽稀（首尾保留）并置 sampled。
+    每个点是 detail 里 history 的同形态（总覆盖 / 新增覆盖 / 版本 / kind）。"""
+    return PrettyJSONResponse({"ok": True, **views.trend(cfg, name, start, end)})
+
+
 @router.get("/api/services/{name}/compare", summary="两个版本的覆盖率对比", responses=ERR)
 def compare(name: str,
             a: str = Query("current", description="基准：current 或归档目录名"),
