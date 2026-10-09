@@ -314,8 +314,8 @@ def archive_by_dir(name, archive_dir):
         return d
 
 
-def versions_since(name, since=None, sealed_by="predeploy"):
-    """时间范围内的已结算版本（正序），报表用。since 是 datetime 或 None（不限）。"""
+def versions_since(name, since=None, sealed_by="predeploy", until=None):
+    """时间范围 [since, until) 内的已结算版本（正序），报表用。两端都是 datetime 或 None（不限）。"""
     with session_scope() as s:
         sid = _get(s, name).id
         q = (select(Archive, Snapshot).join(Snapshot, Archive.snapshot_id == Snapshot.id)
@@ -324,6 +324,8 @@ def versions_since(name, since=None, sealed_by="predeploy"):
             q = q.where(Archive.sealed_by == sealed_by)
         if since is not None:
             q = q.where(Archive.sealed_at >= since)
+        if until is not None:
+            q = q.where(Archive.sealed_at < until)
         out = []
         # 按结算时刻排，不按入库顺序：导入的旧归档 id 可能比新的大
         for archive, snap in s.execute(q.order_by(Archive.sealed_at, Archive.id)).all():
@@ -592,12 +594,15 @@ def latest_unit_report(name):
         return _unit_dict(row) if row else None
 
 
-def unit_reports_since(name, since=None):
+def unit_reports_since(name, since=None, until=None):
+    """[since, until) 内收到的单测报告（正序），报表用。"""
     with session_scope() as s:
         sid = _get(s, name).id
         q = select(UnitReport).where(UnitReport.service_id == sid)
         if since is not None:
             q = q.where(UnitReport.at >= since)
+        if until is not None:
+            q = q.where(UnitReport.at < until)
         return [_unit_dict(r) for r in s.scalars(q.order_by(UnitReport.at, UnitReport.id)).all()]
 
 

@@ -11,11 +11,13 @@ import PageHeader from "../components/PageHeader.vue";
 import ServiceBars from "../components/ServiceBars.vue";
 import StatusTag from "../components/StatusTag.vue";
 import { SERIES, ago, pct, when } from "../ui/colors";
+import { DAY_SHORTCUTS, isDay, noFuture, spanText } from "../ui/dates";
 import { exportPdf } from "../ui/pdf";
 
 // 项目报表：一页看完项目下所有服务的现状，以及某段时间内结算过的版本和收到的单测报告。
 // 不算项目平均覆盖率 —— 各服务的百分比平均起来只会误导，这里给的是逐服务、逐版本的原始数字。
-// 时间范围放在 URL 的 query 里（?days=30），链接贴出去别人看到的是同一份。
+// 时间范围放在 URL 的 query 里（?days=30 或 ?from=&to=），链接贴出去别人看到的是同一份。
+// 两种给法：快捷的「近 N 天 / 全部」，或日期选择器选一段（两端都含，按日历日）；选了日期就不看 days。
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
 const route = useRoute();
 const router = useRouter();
@@ -27,13 +29,18 @@ const days = computed(() => {
   const q = Number(route.query.days);
   return DAYS.some((d) => d.v === q) ? q : 30;
 });
+// URL 里 from / to 都是合法日期才算选了区间，缺一个或写错就当没选、回落到 days
+const range = computed<[string, string] | null>(() => {
+  const f = route.query.from, t = route.query.to;
+  return isDay(f) && isDay(t) && f <= t ? [f, t] : null;
+});
 const rep = ref<ProjectReport | null>(null);
 const loading = ref(true);
 
 async function load() {
   loading.value = true;
   try {
-    rep.value = await api.projectReport(props.name, days.value);
+    rep.value = await api.projectReport(props.name, days.value, range.value);
   } catch (err) {
     props.onError(err);
   } finally {
@@ -41,12 +48,28 @@ async function load() {
   }
 }
 onMounted(load);
-watch(() => [props.name, days.value], load);
-const setDays = (v: number) => router.replace({ query: { ...route.query, days: String(v) } });
+watch(() => [props.name, days.value, range.value?.join()], load);
+// 两种范围互斥：点快捷项就清掉日期，选了日期就清掉 days
+function setDays(v: number) {
+  const q: Record<string, any> = { ...route.query, days: String(v) };
+  delete q.from; delete q.to;
+  router.replace({ query: q });
+}
+function setRange(v: [string, string] | null) {
+  const q: Record<string, any> = { ...route.query };
+  delete q.days; delete q.from; delete q.to;
+  if (v) { q.from = v[0]; q.to = v[1]; }
+  router.replace({ query: q });
+}
+// 文件名里的范围：2026-10-01_2026-10-09 / 30d / all
+const rangeSlug = computed(() => (range.value ? `${range.value[0]}_${range.value[1]}` : days.value ? `${days.value}d` : "all"));
 
 const isPool = computed(() => props.name === "__unassigned");
 const title = computed(() => rep.value?.title || props.name);
-const rangeText = computed(() => (days.value ? `${when(rep.value?.since ?? null)} 至今` : "全部历史"));
+const rangeText = computed(() => {
+  if (rep.value?.from && rep.value.to) return spanText(rep.value.from, rep.value.to);
+  return days.value ? `${when(rep.value?.since ?? null)} 至今` : "全部历史";
+});
 
 const bars = computed(() => (rep.value?.services ?? []).map((s) => ({
   name: s.name,
@@ -104,7 +127,7 @@ function exportCsv() {
     rows.push([u.service, u.version, u.at, u.instruction, u.branch, u.line ?? "", u.incremental?.pct ?? "",
                u.incremental?.covered ?? "", u.incremental?.total ?? "", u.classesHit, u.classesTotal]);
   }
-  download(`covhub-${r.project}-${days.value ? days.value + "d" : "all"}.csv`, rows.map((row) => row.map(csvEscape).join(",")).join("\r\n"));
+  download(`covhub-${r.project}-${rangeSlug.value}.csv`, rows.map((row) => row.map(csvEscape).join(",")).join("\r\n"));
   ElMessage.success("已导出 CSV");
 }
 const print = () => window.print();
@@ -114,7 +137,7 @@ async function exportPdfFile() {
   if (!root.value || !rep.value) return;
   exporting.value = true;
   try {
-    await exportPdf(root.value, `covhub-${rep.value.project}-${days.value ? days.value + "d" : "all"}.pdf`);
+    await exportPdf(root.value, `covhub-${rep.value.project}-${rangeSlug.value}.pdf`);
     ElMessage.success("已导出 PDF");
   } catch (err) {
     ElMessage.error("导出失败：" + (err instanceof Error ? err.message : String(err)));
@@ -133,9 +156,13 @@ async function exportPdfFile() {
       <span v-if="rep">生成于 {{ when(rep.generatedAt) }}</span>
     </template>
     <template #actions>
-      <el-radio-group :model-value="days" size="small" class="no-print" @change="(v: string | number | boolean | undefined) => setDays(Number(v))">
+      <el-radio-group :model-value="range ? undefined : days" size="small" class="no-print" @change="(v: string | number | boolean | undefined) => setDays(Number(v))">
         <el-radio-button v-for="d in DAYS" :key="d.v" :value="d.v">{{ d.l }}</el-radio-button>
       </el-radio-group>
+      <el-date-picker :model-value="range" type="daterange" size="small" class="no-print" unlink-panels clearable
+                      value-format="YYYY-MM-DD" range-separator="～" start-placeholder="开始日期" end-placeholder="结束日期"
+                      :shortcuts="DAY_SHORTCUTS" :disabled-date="noFuture" style="width: 240px"
+                      @update:model-value="(v: unknown) => setRange(Array.isArray(v) && v.length === 2 ? [v[0], v[1]] : null)" />
       <el-button size="small" class="no-print" :disabled="!rep" @click="exportCsv">导出 CSV</el-button>
       <el-button size="small" type="primary" plain class="no-print" :disabled="!rep" :loading="exporting" @click="exportPdfFile">导出 PDF</el-button>
       <el-button size="small" class="no-print" :disabled="!rep" @click="print">打印</el-button>

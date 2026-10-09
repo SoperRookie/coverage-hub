@@ -219,13 +219,11 @@ def _parse_day(value, what):
         raise CovhubError("%s 要是 YYYY-MM-DD 的日期：%r" % (what, value))
 
 
-def trend(cfg, name, start=None, end=None):
-    """某服务在 [start, end] 这些天里的采集轨迹（两端都含，按本地日历日）。
+def _day_range(start, end, max_days=None):
+    """接口上的 from / to（YYYY-MM-DD，两端都含）→ 规整后的两个 date 和本地日历日的 [lo, hi) 两个 datetime。
 
-    都不给是今天；只给一端另一端取同一天。快照的时刻是本地时间、不带时区（见模块说明），
-    所以日界也按 hub 的本地日历切，和看板上显示的时刻一致。点多了均匀抽稀但**首尾两点保留**，
-    返回体里 sampled 标出来 —— 画出来的线是轮廓，不是每次采集。"""
-    find_service(cfg, name)
+    都不给是今天；只给一端另一端取同一天。库里的时刻是本地时间、不带时区（见模块说明），
+    所以日界也按 hub 的本地日历切，和看板上显示的时刻一致。"""
     today = date.today()
     s = _parse_day(start, "from") if start else None
     e = _parse_day(end, "to") if end else None
@@ -237,10 +235,19 @@ def trend(cfg, name, start=None, end=None):
         e = s
     if e < s:
         raise CovhubError("to 不能早于 from")
-    if (e - s).days >= TREND_MAX_DAYS:
-        raise CovhubError("区间最长 %d 天" % TREND_MAX_DAYS)
+    if max_days and (e - s).days >= max_days:
+        raise CovhubError("区间最长 %d 天" % max_days)
     lo = datetime.combine(s, datetime.min.time())
     hi = datetime.combine(e + timedelta(days=1), datetime.min.time())
+    return s, e, lo, hi
+
+
+def trend(cfg, name, start=None, end=None):
+    """某服务在 [start, end] 这些天里的采集轨迹（两端都含，按本地日历日，见 _day_range）。
+
+    点多了均匀抽稀但**首尾两点保留**，返回体里 sampled 标出来 —— 画出来的线是轮廓，不是每次采集。"""
+    find_service(cfg, name)
+    s, e, lo, hi = _day_range(start, end, TREND_MAX_DAYS)
     rows = repo.history_between(name, lo, hi)
     total = len(rows)
     sampled = total > TREND_MAX_POINTS
@@ -399,13 +406,13 @@ def incremental_source(cfg, name, kind, path, context=3, version=None, full=Fals
     }
 
 
-def project_report(cfg, project, days=30):
+def project_report(cfg, project, days=30, start=None, end=None):
     """项目维度的报表：每个服务的最新数字 + 时间范围内的已结算版本与单测报告。
 
-    days=0 表示不限时间。不算项目平均覆盖率 —— 各服务的百分比平均起来只会误导，
-    报表给的是逐服务、逐版本的原始数字，汇总由看的人按自己的口径做。
+    时间范围两种给法：days（最近多少天，0 不限）或 from / to 日期（YYYY-MM-DD，两端都含，按本地
+    日历日切，见 _day_range）；给了日期就不看 days。不算项目平均覆盖率 —— 各服务的百分比平均起来
+    只会误导，报表给的是逐服务、逐版本的原始数字，汇总由看的人按自己的口径做。
     """
-    from datetime import timedelta
     if project == "__unassigned":
         names = [s["name"] for s in cfg.get("services", []) if not s.get("project")]
         title = "未分组"
@@ -413,7 +420,11 @@ def project_report(cfg, project, days=30):
         proj = repo.get_project(project)
         names = proj["services"]
         title = proj.get("title") or project
-    since = datetime.now() - timedelta(days=days) if days and days > 0 else None
+    day_from = day_to = until = None
+    if start or end:
+        day_from, day_to, since, until = _day_range(start, end)
+    else:
+        since = datetime.now() - timedelta(days=days) if days and days > 0 else None
     interval = int((cfg.get("watch") or {}).get("intervalSeconds", 300))
     stale_after = max(interval * 3, 900)
     by_name = {s["name"]: s for s in cfg.get("services", [])}
@@ -426,8 +437,8 @@ def project_report(cfg, project, days=30):
             continue
         row = service_row(cfg, svc, stale_after, pre.get(name))
         rows.append(row)
-        versions = repo.versions_since(name, since)
-        units = repo.unit_reports_since(name, since)
+        versions = repo.versions_since(name, since, until=until)
+        units = repo.unit_reports_since(name, since, until)
         services.append({
             "name": name, "channel": row["channel"], "version": row["version"],
             "online": row["online"], "unknown": row["unknown"], "stale": row["stale"],
@@ -442,7 +453,11 @@ def project_report(cfg, project, days=30):
         })
     return {
         "project": project, "title": title, "days": days,
+        # 按日期区间查时 from / to 是规整后的日期（只给一端时两者相同）；按 days 查时为 None
+        "from": day_from.isoformat() if day_from else None,
+        "to": day_to.isoformat() if day_to else None,
         "since": since.isoformat(timespec="seconds") if since else None,
+        "until": until.isoformat(timespec="seconds") if until else None,
         "generatedAt": datetime.now().isoformat(timespec="seconds"),
         "services": services,
         "counts": _counts(rows),

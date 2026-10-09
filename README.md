@@ -337,7 +337,7 @@ hub 只收源码文件，配置文件之类即便混进包里也不落盘；`sou
 | `/api/services/{name}/source?file=F[&kind=unit][&version=D][&full=1][&context=3]` | GET | 某个文件新增代码的源码与逐行覆盖状态；`context` 是新增行前后带几行（0–20）；`full=1` 给整个文件（该版本传过源码时） |
 | `/api/services/{name}/compare?a=A&b=B` | GET | 两个版本的对比（`current` 或归档目录名）：总量差 + 按源码文件的指令覆盖差 |
 | `/api/services/{name}/versions` | GET | 最近结算的版本与 diff 的 head（流水线定基线用） |
-| `/api/projects/{name}/report[?days=30]` | GET | 项目报表：各服务现状 + 时间范围内的结算版本与单测报告（`days=0` 不限，最大 3650）；`{name}` 为 `__unassigned` 时是未分组的服务 |
+| `/api/projects/{name}/report[?days=30]`、`[?from=D1&to=D2]` | GET | 项目报表：各服务现状 + 时间范围内的结算版本与单测报告。范围用 `days`（最近多少天，`0` 不限，最大 3650）或 `from` / `to`（`YYYY-MM-DD`，两端都含，按 hub 本地日历，只给一端就看那一天）二选一，给了日期就不看 `days`；`{name}` 为 `__unassigned` 时是未分组的服务 |
 
 写操作在 hub 内部串行执行，返回体里带着这次执行的日志；**HTTP 非 2xx 表示失败**，
 调用方应当据此让部署流程停下来。上传类接口的正文是原始文件，用 `curl --data-binary`（`-d` 会吃掉换行）。

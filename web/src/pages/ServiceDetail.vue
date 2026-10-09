@@ -14,6 +14,7 @@ import PageHeader from "../components/PageHeader.vue";
 import StatusTag from "../components/StatusTag.vue";
 import TrendChart from "../components/TrendChart.vue";
 import { SERIES, ago, num, pct, when, where } from "../ui/colors";
+import { DAY_SHORTCUTS, daysAgo, noFuture, spanText } from "../ui/dates";
 import { exportPdf } from "../ui/pdf";
 
 const props = defineProps<{ name: string; onError: (err: unknown) => boolean }>();
@@ -39,20 +40,7 @@ const noVersion = computed(() => !!d.value && !viewingHistory.value && !d.value.
 // ---- 运行时趋势：按天 / 按日期区间看，默认今天 ----
 // 趋势不再跟着 detail 一起下发「最近 40 次」：5 分钟一轮的话 40 次只有三个多小时，
 // 既看不出一天的走势，也没法回看某一天。区间选好后单独打 /trend，和 detail 互不拖累。
-function localDay(dt: Date): string {
-  // 不用 toISOString()：那是 UTC 日期，晚上八点以后会跳到明天
-  const p = (n: number) => String(n).padStart(2, "0");
-  return `${dt.getFullYear()}-${p(dt.getMonth() + 1)}-${p(dt.getDate())}`;
-}
-function daysAgo(n: number): string { const dt = new Date(); dt.setDate(dt.getDate() - n); return localDay(dt); }
-const range = ref<[string, string]>([localDay(new Date()), localDay(new Date())]);
-const RANGE_SHORTCUTS = [
-  { text: "今天", value: () => [daysAgo(0), daysAgo(0)] },
-  { text: "昨天", value: () => [daysAgo(1), daysAgo(1)] },
-  { text: "最近 7 天", value: () => [daysAgo(6), daysAgo(0)] },
-  { text: "最近 30 天", value: () => [daysAgo(29), daysAgo(0)] },
-];
-const noFuture = (dt: Date) => dt.getTime() > Date.now();
+const range = ref<[string, string]>([daysAgo(0), daysAgo(0)]);
 const trend = ref<Trend | null>(null);
 const trendLoading = ref(false);
 async function loadTrend() {
@@ -69,8 +57,7 @@ watch(range, loadTrend);
 const trendHint = computed(() => {
   const t = trend.value;
   if (!t) return "";
-  const span = t.from === t.to ? t.from : `${t.from} ～ ${t.to}`;
-  return `${span} · ${t.count} 次采集${t.sampled ? `（抽稀为 ${t.points.length} 点）` : ""}`;
+  return `${spanText(t.from, t.to)} · ${t.count} 次采集${t.sampled ? `（抽稀为 ${t.points.length} 点）` : ""}`;
 });
 
 async function load() {
@@ -267,7 +254,7 @@ const crumbs = computed(() => [
           <span class="legend"><i class="dash" :style="{ background: `repeating-linear-gradient(90deg, ${SERIES.inc} 0 3px, transparent 3px 5px)` }"></i>新增代码</span>
           <el-date-picker v-model="range" type="daterange" size="small" class="no-print" unlink-panels :clearable="false"
                           value-format="YYYY-MM-DD" range-separator="～" start-placeholder="开始日期" end-placeholder="结束日期"
-                          :shortcuts="RANGE_SHORTCUTS" :disabled-date="noFuture" style="width: 240px" />
+                          :shortcuts="DAY_SHORTCUTS" :disabled-date="noFuture" style="width: 240px" />
         </div>
         <div class="card-body">
           <TrendChart v-if="trend && trend.points.length" :history="trend.points" :from="trend.from" :to="trend.to" />

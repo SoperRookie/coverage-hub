@@ -3359,7 +3359,7 @@
           "看板"
         ],
         "summary": "项目报表：各服务的数字与时间范围内的已结算版本",
-        "description": "逐服务、逐版本的原始数字，不算项目平均覆盖率。name 为 __unassigned 时是未分组的服务。",
+        "description": "逐服务、逐版本的原始数字，不算项目平均覆盖率。name 为 __unassigned 时是未分组的服务。\n时间范围用 days（最近多少天）或 from / to（日期区间）二选一。",
         "operationId": "project_report_api_projects__name__report_get",
         "security": [
           {
@@ -3390,11 +3390,47 @@
               "type": "integer",
               "maximum": 3650,
               "minimum": 0,
-              "description": "只看最近多少天的结算版本与单测报告；0 表示不限",
+              "description": "只看最近多少天的结算版本与单测报告；0 表示不限。给了 from / to 时忽略",
               "default": 30,
               "title": "Days"
             },
-            "description": "只看最近多少天的结算版本与单测报告；0 表示不限"
+            "description": "只看最近多少天的结算版本与单测报告；0 表示不限。给了 from / to 时忽略"
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "起始日 YYYY-MM-DD（含，按 hub 本地日历）；只给它时 to 取同一天",
+              "title": "From"
+            },
+            "description": "起始日 YYYY-MM-DD（含，按 hub 本地日历）；只给它时 to 取同一天"
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "结束日 YYYY-MM-DD（含）；只给它时 from 取同一天",
+              "title": "To"
+            },
+            "description": "结束日 YYYY-MM-DD（含）；只给它时 from 取同一天"
           }
         ],
         "responses": {
@@ -3418,6 +3454,16 @@
           },
           "404": {
             "description": "没有这个服务",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "from / to 日期不合法或 to 早于 from",
             "content": {
               "application/json": {
                 "schema": {

@@ -642,6 +642,21 @@ def test_project_report(hub, tmp_path):
     assert hub.get("/api/projects/nosuch/report", headers=H).status_code == 404
     assert hub.get("/api/projects/__unassigned/report", headers=H).json()["services"] == []
 
+    # 按日期区间：两端都含、按本地日历日切；给了日期就不看 days
+    def vers(q):
+        r = hub.get("/api/projects/shop/report?%s" % q, headers=H)
+        assert r.status_code == 200, r.text
+        return r.json(), [v["version"] for v in r.json()["services"][0]["versions"]]
+    rep, vs = vers("from=2026-09-13&to=2026-09-13")
+    assert vs == ["1.9"] and rep["from"] == rep["to"] == "2026-09-13"
+    assert rep["since"] == "2026-09-13T00:00:00" and rep["until"] == "2026-09-14T00:00:00"
+    assert vers("from=2026-09-14&to=2026-09-30")[1] == []
+    assert vers("from=2000-01-01&to=2026-09-13&days=0")[1] == ["0.1", "1.9"]
+    assert vers("to=2026-09-13")[1] == ["1.9"]                         # 只给一端：就看那一天
+    assert vers("days=0")[0]["from"] is None
+    assert hub.get("/api/projects/shop/report?from=2026-09-14&to=2026-09-13", headers=H).status_code == 409
+    assert hub.get("/api/projects/shop/report?from=x", headers=H).status_code == 409
+
 
 # ---- hub 比对两版源码生成 diff ----
 
